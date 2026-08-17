@@ -284,7 +284,7 @@ Describe 'A run with -ExcludeUpnPattern' {
         $exCommand = @"
 `$env:PSModulePath = '$(Join-Path $script:Root 'Modules')' + [IO.Path]::PathSeparator + `$env:PSModulePath
 `$summary = & '$(Get-AssessmentScriptPath)' -TenantId 'fabrikam-example.com' ``
-    -OutputPath '$script:ExCsv' -ExcludeUpnPattern '^svc-' -SkipAclHardening
+    -OutputPath '$script:ExCsv' -ExcludeUpnPattern '^svc-', '^clear@' -SkipAclHardening
 `$summary | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath '$script:ExSummaryPath'
 "@
 
@@ -316,9 +316,24 @@ Describe 'A run with -ExcludeUpnPattern' {
         $svc.NextStep | Should -Match 'Confirm this is a non-human account'
     }
 
+    It 'keeps an excluded account that has no other reason to be in the file' {
+        # The default export is the affected population, and an excluded user can fall
+        # outside every part of that definition: clear@ is in neither policy scope and
+        # holds no phone method. Without exclusion being a reason to keep a row, the row
+        # vanishes -- and a pattern that matched a real person leaves no trace anywhere,
+        # while the README and the console both promise it stays marked Excluded.
+        $clear = $script:ExRows | Where-Object UserPrincipalName -eq 'clear@fabrikam-example.com'
+
+        $clear | Should -Not -BeNullOrEmpty -Because 'exclusion marks, it does not delete'
+        $clear.Risk | Should -Be 'Excluded'
+        $clear.InSmsPolicyScope | Should -Be 'False'
+        $clear.InVoicePolicyScope | Should -Be 'False'
+        $clear.PhoneMethodsRegistered | Should -BeNullOrEmpty
+    }
+
     It 'leaves the excluded account out of every count' {
-        $script:ExSummary.UsersExcludedByPattern | Should -Be 1
-        $script:ExSummary.ExcludeUpnPattern | Should -Be '^svc-'
+        $script:ExSummary.UsersExcludedByPattern | Should -Be 2
+        $script:ExSummary.ExcludeUpnPattern | Should -Be '^svc- | ^clear@'
 
         # It is phone-only and in scope, so without the exclusion it would be a candidate
         # and would count toward the blocked population.

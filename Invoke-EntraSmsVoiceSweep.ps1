@@ -313,6 +313,7 @@ end {
         }
         if ($IncludeUnaffected) { $arguments.IncludeUnaffected = $true }
         if ($HtmlReport) { $arguments.HtmlReport = $true }
+        if ($ExcludeUpnPattern) { $arguments.ExcludeUpnPattern = $ExcludeUpnPattern }
         if ($SkipAclHardening) { $arguments.SkipAclHardening = $true }
         # The customer label becomes the report heading and the ticket company, so every
         # artefact is client-ready without hand-editing after the sweep.

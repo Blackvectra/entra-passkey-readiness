@@ -133,6 +133,21 @@ param(
     [Parameter()]
     [switch]$IncludeUnaffected,
 
+    # Reads each user's legacy per-user MFA state, which is the assessment's one real blind
+    # spot. Microsoft is explicit that users enabled for SMS or voice through legacy
+    # per-user MFA are in scope for the retirement, and that state has no v1.0 equivalent:
+    # it is only readable at /beta/users/{id}/authentication/requirements.
+    #
+    # Without this, such users surface as Moderate with "go and check the legacy portal
+    # yourself". With it, they resolve into the real band and the Moderate population
+    # becomes what it should be: stale phone registrations and nothing else.
+    #
+    # Off by default because it is a beta endpoint, not because it needs more access. The
+    # permission is Policy.Read.All, which this script already requests, and Global Reader
+    # is a supported role. Cost is one Graph call per twenty users.
+    [Parameter()]
+    [switch]$IncludeLegacyPerUserMfa,
+
     # Regular expressions matched against the UPN. A user who matches is marked Excluded
     # and drops out of every count, the action list, the tickets, and the report.
     #
@@ -222,6 +237,11 @@ if (-not $OutputPath) {
 
 # Graph endpoints are declared once so the read-only surface of this script is auditable at a glance.
 $script:GraphBase = 'https://graph.microsoft.com/v1.0'
+
+# Beta is used for exactly one thing: reading legacy per-user MFA state, which has no v1.0
+# equivalent. Kept behind -IncludeLegacyPerUserMfa so the default run stays on v1.0 only,
+# and named separately so the beta surface of this script is one line to audit.
+$script:GraphBeta = 'https://graph.microsoft.com/beta'
 
 # Group display names are resolved once and reused; the same exclusion group is commonly
 # referenced by both the SMS and voice method configurations.
@@ -1732,7 +1752,15 @@ $rows = @($rows)
 # under StrictMode throws. It survived review because `-or` short-circuits, so the bad
 # access is only reached for a user outside both policy scopes -- which is every Moderate
 # and Informational user, and therefore every real tenant.
-$affectedRows = @($rows | Where-Object { $_.InSmsPolicyScope -or $_.InVoicePolicyScope -or $_.PhoneMethodsRegistered })
+#
+# `Risk -eq 'Excluded'` is in the filter for a different reason: the README and the console
+# both promise that an excluded user stays in the file marked Excluded, so the operator can
+# audit what the pattern removed. Without this clause an excluded user who is outside both
+# scopes and holds no phone method is dropped from the default export entirely, and a
+# pattern that quietly matched a real person leaves no trace anywhere.
+$affectedRows = @($rows | Where-Object {
+    $_.InSmsPolicyScope -or $_.InVoicePolicyScope -or $_.PhoneMethodsRegistered -or $_.Risk -eq 'Excluded'
+})
 
 # Excluded rows stay in the export as a record of what the pattern removed, and are kept
 # out of every number. Counting them as candidates would defeat the point of excluding
