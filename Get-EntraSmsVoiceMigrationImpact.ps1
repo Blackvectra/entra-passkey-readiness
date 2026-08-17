@@ -120,9 +120,10 @@ param(
     [ValidatePattern('^[0-9a-fA-F]{40}$')]
     [string]$CertificateThumbprint,
 
+    # Defaults to a timestamped file beside the script, with -CustomerName folded into the
+    # filename when supplied. Computed after the param block so it can see -CustomerName.
     [Parameter()]
-    [ValidateNotNullOrEmpty()]
-    [string]$OutputPath = (Join-Path -Path $(if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }) -ChildPath "EntraSmsVoiceMigrationImpact_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"),
+    [string]$OutputPath,
 
     [Parameter()]
     [switch]$IncludeUnaffected,
@@ -166,6 +167,30 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if (-not $OutputPath) {
+    # Every artefact of a run is named from this one path, so folding the customer in here
+    # names all of them at once. Running five clients back to back otherwise produces five
+    # sets of files distinguishable only by timestamp, which is a poor thing to be sorting
+    # out at the point you are attaching one of them to a ticket.
+    #
+    # The tool stem stays at the front: the .gitignore rule that stops a live export being
+    # committed anchors on it, and a filename that quietly slips past that rule is worse
+    # than one that reads slightly less naturally.
+    $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+    $baseDirectory = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+
+    $customerPart = ''
+    if ($CustomerName) {
+        # Operator-supplied and often pasted from a PSA export, so treat it as untrusted:
+        # strip path characters and traversal before it reaches a filename.
+        $safeCustomer = ($CustomerName -replace '[\\/:*?"<>|]', '_') -replace '\s+', '-'
+        $safeCustomer = [System.IO.Path]::GetFileName($safeCustomer.Trim().Trim('.'))
+        if ($safeCustomer) { $customerPart = "$safeCustomer`_" }
+    }
+
+    $OutputPath = Join-Path -Path $baseDirectory -ChildPath "EntraSmsVoiceMigrationImpact_$customerPart$stamp.csv"
+}
 
 # Graph endpoints are declared once so the read-only surface of this script is auditable at a glance.
 $script:GraphBase = 'https://graph.microsoft.com/v1.0'

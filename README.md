@@ -27,7 +27,15 @@ That is the whole thing. Sign in as Global Reader or Security Reader, and you ge
 | `...Impact.html` | A self-contained client report ([sample](examples/Example-Report.html)) |
 | `..._ActionList.csv` | Affected users, what they have, what to do. Attach it to a ticket ([sample](examples/Example-ActionList.csv)) |
 
-Add `-CustomerName "Contoso Manufacturing"` to put the client's name on the report. That is the only switch most runs need.
+Add `-CustomerName "Contoso Manufacturing"` to put the client's name on the report **and into every filename**, which is what you want when you are running several clients and then attaching one set to that client's ticket:
+
+```
+EntraSmsVoiceMigrationImpact_Contoso-Manufacturing_20260817_170000.csv
+EntraSmsVoiceMigrationImpact_Contoso-Manufacturing_20260817_170000.html
+EntraSmsVoiceMigrationImpact_Contoso-Manufacturing_20260817_170000_ActionList.csv
+```
+
+That is the only switch most runs need. Use `-OutputPath` if you want them somewhere specific; everything else is named from it.
 
 Everything else is optional: `-CsvOnly` skips the report and action list, and `-ExportTickets` adds a fourth file shaped for bulk PSA import ([sample](examples/Example-Tickets.csv)). Nothing is created in any external system by any of it — every output is a file on disk.
 
@@ -367,7 +375,7 @@ The sweep does this for you: history lives in the per-tenant folder rather than 
 | `-TenantId` | string | current Graph context | Tenant GUID or verified domain. Forces re-auth if it does not match the live session. Mandatory for app-only. |
 | `-ClientId` | guid | none | App registration ID for unattended app-only auth. Requires `-CertificateThumbprint`. |
 | `-CertificateThumbprint` | string | none | Certificate thumbprint for app-only auth. |
-| `-OutputPath` | string | timestamped CSV beside the script | Destination CSV path. Parent directory is created if missing. |
+| `-OutputPath` | string | timestamped CSV beside the script, with `-CustomerName` folded in | Destination CSV path. The report and action list are named from it. Parent directory is created if missing. |
 | `-IncludeUnaffected` | switch | off | Include every enabled user, not just migration candidates. |
 | `-CsvOnly` | switch | off | Write only the assessment CSV, skipping the report and action list. |
 | `-CustomerName` | string | none | Heading used on the HTML report. |
