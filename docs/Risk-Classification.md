@@ -64,6 +64,14 @@ The user is touched by the change but already holds a passwordless method. They 
 ### Informational
 No resolved exposure. Present in the CSV only when `-IncludeUnaffected` is supplied.
 
+### Excluded
+
+Not a risk level, and not produced by the model above. The user matched a pattern passed to `-ExcludeUpnPattern`, so the assessment did not classify them.
+
+The row is kept in the CSV rather than dropped. A filter that silently removes people from a security assessment is how a real account disappears behind a careless pattern, and the resulting report looks entirely normal. Keeping the row means the export remains a complete record of what was assessed and what was set aside, and it means every filter on the actionable bands excludes these users without needing to know the parameter exists.
+
+`UsersExcludedByPattern` in the summary is the number to sanity-check on a first run.
+
 ## Framework mapping
 
 Use these when the output feeds a formal report rather than a work queue.

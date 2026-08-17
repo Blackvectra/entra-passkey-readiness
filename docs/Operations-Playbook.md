@@ -14,7 +14,7 @@ Before optimising anything, it is worth being honest about the cost distribution
 |---|---|---|
 | Getting app-only auth consented in each tenant | **Days to weeks**, one time | No. This is a write and a customer conversation. |
 | Running the assessment | Minutes per tenant, parallelisable | Yes, this is what it does |
-| Reviewing candidates and filtering non-human accounts | Hours, first run; minutes after | Partly, see [Service accounts](#service-accounts-and-shared-mailboxes) |
+| Reviewing candidates and filtering non-human accounts | Hours, first run; a parameter after | Yes, once you know the convention: [Service accounts](#service-accounts-and-shared-mailboxes) |
 | Validating legacy per-user MFA | Hours, manual, per tenant | No. Not readable at this permission level. |
 | Creating remediation groups and campaigns | Minutes per tenant | Produces the list; the group is a write you make |
 | Client communications | Hours per client | No |
@@ -217,7 +217,6 @@ Gaps worth knowing about, roughly in order of how much time each would save an e
 
 | Idea | Why it would help |
 |---|---|
-| `-ExcludeUpnPattern` parameter | Every operator writes the same `Where-Object` filter for service accounts. Making it a parameter puts it in the ticket and action-list paths too, not just the pipeline. |
 | Estate-wide HTML report | Reports are per-tenant today. A single roll-up ranking customers by Critical count is what an account manager actually wants. |
 | Legacy per-user MFA read behind an explicit opt-in switch | Would close the largest coverage gap, at the cost of beta endpoints and broader scopes. Opt-in keeps the least-privilege default intact. |
 | Trend series rather than pairwise diff | The diff compares two runs. Ten runs plotted would show whether a campaign is decelerating, which is the thing you want to catch early. |

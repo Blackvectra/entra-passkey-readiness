@@ -53,6 +53,7 @@ Two optional extras: `-HtmlReport` adds a self-contained HTML report to hand a c
 - [Prerequisites](#prerequisites) — modules, roles, Graph scopes
 - [Usage](#usage) — single tenant, estate sweeps, progress tracking, reports, tickets
 - [Output](#output) — console summary and CSV schema
+- [Service accounts](#service-accounts-and-shared-mailboxes) — keeping non-human accounts out of the work queue
 - [Who actually gets stopped](#who-actually-gets-stopped) — the lockout population, which is not the same as the risk bands
 - [Risk classifications](#risk-classifications) — the five bands
 - [Coverage](#coverage-who-this-actually-finds) — exactly who this finds, and who it does not
@@ -377,6 +378,7 @@ The sweep does this for you: history lives in the per-tenant folder rather than 
 | `-CertificateThumbprint` | string | none | Certificate thumbprint for app-only auth. |
 | `-OutputPath` | string | timestamped CSV beside the script, with `-CustomerName` folded in | Destination CSV path. The report and action list are named from it. Parent directory is created if missing. |
 | `-IncludeUnaffected` | switch | off | Include every enabled user, not just migration candidates. |
+| `-ExcludeUpnPattern` | string[] | none | Regex patterns matched against the UPN. Matching users are marked `Excluded` and left out of every count and work queue. See [Service accounts](#service-accounts-and-shared-mailboxes). |
 | `-HtmlReport` | switch | off | Also write a self-contained HTML client report beside the CSVs. |
 | `-CustomerName` | string | none | Heading used on the HTML report. |
 | `-ExportTickets` | switch | off | Also write a PSA-importable ticket queue. |
@@ -458,6 +460,23 @@ The registration report also returns `isMfaCapable`, `isMfaRegistered`, `systemP
 
 ---
 
+## Service accounts and shared mailboxes
+
+A tenant targeting `All users` surfaces every shared mailbox, sync account, and service account as a migration candidate. They are technically in scope, nobody signs into them interactively, and ticketing them wastes a technician's afternoon.
+
+```powershell
+.\Get-EntraSmsVoiceMigrationImpact.ps1 -TenantId contoso.onmicrosoft.com `
+    -ExcludeUpnPattern '^svc-', '^shared-', '^noreply@'
+```
+
+Patterns are regular expressions matched case-insensitively against the UPN. Anchor them yourself: `^svc-` catches `svc-backup@contoso.com` and leaves `marc.svc-jones@contoso.com` alone, while `svc-` catches both. An invalid pattern fails at parameter binding, before the tenant is contacted.
+
+**Matching users are marked, not deleted.** Their row stays in the assessment CSV with `Risk = Excluded`, and they are left out of every count, the action list, the tickets, and the report. That distinction matters: a filter that silently removes people from a security assessment is how a real account disappears behind a careless pattern, and nothing about the output would look unusual. The summary reports `UsersExcludedByPattern` and the patterns used, and the console says how many were removed.
+
+Check that number on the first run for a new customer. If it is larger than the count of non-human accounts you expect, the pattern is too broad.
+
+The sweep accepts the same parameter, since one naming convention usually covers a whole estate.
+
 ## Who actually gets stopped
 
 If the question is "will any of my users turn up on a Monday and be unable to work", the risk bands are not the answer. `BlockedAtRetirement` is.
@@ -493,6 +512,7 @@ Summarised here; full logic and remediation guidance in [docs/Risk-Classificatio
 | **Moderate** | Phone method registered, no passwordless method, but outside resolved modern policy scope — usually legacy per-user MFA exposure |
 | **Low** | Exposed to the change but already passwordless-capable |
 | **Informational** | No resolved exposure |
+| **Excluded** | Not a risk level. The user matched `-ExcludeUpnPattern` and was left out of every count. |
 
 ---
 

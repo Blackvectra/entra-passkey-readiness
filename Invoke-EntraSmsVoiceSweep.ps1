@@ -127,6 +127,11 @@ param(
     [Parameter()]
     [switch]$IncludeUnaffected,
 
+    # Passed through to the assessment. One convention usually covers a whole estate, so
+    # this is set once for the sweep rather than per tenant.
+    [Parameter()]
+    [string[]]$ExcludeUpnPattern,
+
     # Also writes the HTML client report per tenant. Off by default: a sweep produces
     # spreadsheets, which is what gets attached to a ticket and worked from.
     [Parameter()]

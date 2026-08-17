@@ -47,14 +47,30 @@ function Invoke-MgGraphRequest {
             [PSCustomObject]@{ id='u-member'; displayName='Marcus Whitfield'; userPrincipalName='marcus@fabrikam-example.com'; userType='Member'; accountEnabled=$true }
             [PSCustomObject]@{ id='u-safe';   displayName='Nadia Ferreira'; userPrincipalName='nadia@fabrikam-example.com';  userType='Member'; accountEnabled=$true }
             [PSCustomObject]@{ id='u-noreport'; displayName='Ghost Account'; userPrincipalName='ghost@fabrikam-example.com'; userType='Member'; accountEnabled=$true }
+            [PSCustomObject]@{ id='u-legacy'; displayName='Rosalind Achebe'; userPrincipalName='rosalind@fabrikam-example.com'; userType='Member'; accountEnabled=$true }
+            [PSCustomObject]@{ id='u-clear';  displayName='Out Of Scope'; userPrincipalName='clear@fabrikam-example.com';  userType='Member'; accountEnabled=$true }
+            [PSCustomObject]@{ id='u-svc';    displayName='Service Account - Scanner'; userPrincipalName='svc-scanner@fabrikam-example.com'; userType='Member'; accountEnabled=$true }
             [PSCustomObject]@{ id='u-off';    displayName='Disabled Person'; userPrincipalName='off@fabrikam-example.com';   userType='Member'; accountEnabled=$false }
         )}
     }
     if ($Uri -match '/authenticationMethodConfigurations/sms$') {
+        # Scoped to a group, not all_users. With all_users every row is in scope, the
+        # candidate filter short-circuits on the first term, and anything wrong in the
+        # later terms is never evaluated. Real tenants have users outside scope.
         return [PSCustomObject]@{ state='enabled'
-            includeTargets=@([PSCustomObject]@{ id='all_users'; targetType='group' })
+            includeTargets=@([PSCustomObject]@{ id='g-sms-users'; targetType='group' })
             excludeTargets=@() }
     }
+    if ($Uri -match '/groups/g-sms-users/transitiveMembers') {
+        return [PSCustomObject]@{ value = @(
+            [PSCustomObject]@{ id='u-admin' }
+            [PSCustomObject]@{ id='u-member' }
+            [PSCustomObject]@{ id='u-safe' }
+            [PSCustomObject]@{ id='u-noreport' }
+            [PSCustomObject]@{ id='u-svc' }
+        )}
+    }
+    if ($Uri -match '/groups/[^/]+\?') { return [PSCustomObject]@{ displayName='SMS Users' } }
     if ($Uri -match '/authenticationMethodConfigurations/voice$') {
         return [PSCustomObject]@{ state='disabled'; includeTargets=@(); excludeTargets=@() }
     }
@@ -74,6 +90,15 @@ function Invoke-MgGraphRequest {
             [PSCustomObject]@{ id='u-safe';   isAdmin=$false; isMfaCapable=$true; isMfaRegistered=$true; isPasswordlessCapable=$true
                                methodsRegistered=@('passKeyDeviceBound'); systemPreferredAuthenticationMethods=@()
                                lastUpdatedDateTime='2026-08-17T03:12:44Z' }
+            [PSCustomObject]@{ id='u-legacy'; isAdmin=$false; isMfaCapable=$true; isMfaRegistered=$true; isPasswordlessCapable=$false
+                               methodsRegistered=@('officePhone'); systemPreferredAuthenticationMethods=@('voiceOffice')
+                               lastUpdatedDateTime='2026-08-16T03:12:44Z' }
+            [PSCustomObject]@{ id='u-clear';  isAdmin=$false; isMfaCapable=$true; isMfaRegistered=$true; isPasswordlessCapable=$true
+                               methodsRegistered=@('fido2SecurityKey'); systemPreferredAuthenticationMethods=@()
+                               lastUpdatedDateTime='2026-08-17T03:12:44Z' }
+            [PSCustomObject]@{ id='u-svc';    isAdmin=$false; isMfaCapable=$true; isMfaRegistered=$true; isPasswordlessCapable=$false
+                               methodsRegistered=@('alternateMobilePhone'); systemPreferredAuthenticationMethods=@('sms')
+                               lastUpdatedDateTime='2026-08-16T03:12:44Z' }
         )}
     }
     throw "Stub Graph received an unexpected URI: $Uri"
@@ -176,6 +201,25 @@ Describe 'A default run against a stubbed tenant' {
         $script:Summary.UsersMissingFromReport | Should -Be 1
     }
 
+    It 'keeps a user who is outside both policy scopes but still holds a phone' {
+        # The Moderate band, and the shape that crashed the run: the candidate filter
+        # short-circuits on in-scope users, so only an out-of-scope row evaluates the
+        # later terms. A fixture where everyone is in scope never reaches them.
+        $rows = @(Import-Csv -LiteralPath $script:CsvPath)
+        $legacy = $rows | Where-Object UserPrincipalName -eq 'rosalind@fabrikam-example.com'
+
+        $legacy | Should -Not -BeNullOrEmpty -Because 'a phone method outside AMP scope is the legacy per-user MFA signal'
+        $legacy.InSmsPolicyScope | Should -Be 'False'
+        $legacy.InVoicePolicyScope | Should -Be 'False'
+        $legacy.Risk | Should -Be 'Moderate'
+        $legacy.BlockedAtRetirement | Should -Be 'True'
+    }
+
+    It 'drops a user with no exposure at all from the default export' {
+        $rows = @(Import-Csv -LiteralPath $script:CsvPath)
+        $rows.UserPrincipalName | Should -Not -Contain 'clear@fabrikam-example.com'
+    }
+
     It 'separates who is blocked from who merely lacks a passkey' {
         $rows = @(Import-Csv -LiteralPath $script:CsvPath)
 
@@ -207,13 +251,90 @@ Describe 'A default run against a stubbed tenant' {
     }
 
     It 'counts the blocked population separately from the risk bands' {
-        # Dale is phone-only and stopped; Marcus is High on Authenticator push and is not.
-        $script:Summary.BlockedAtRetirement | Should -Be 1
+        # Dale (in scope, phone only), Rosalind (out of scope, phone only) and the service
+        # account are all stopped. Marcus is High on Authenticator push and is not stopped.
+        # The two populations are not the same set, which is the point of the column.
+        $script:Summary.BlockedAtRetirement | Should -Be 3
         $script:Summary.BlockedAdminsAtRetirement | Should -Be 1
         $script:Summary.High | Should -BeGreaterThan 0
+
+        # Rosalind is Moderate and stopped; a High user is not. Sorting by band alone
+        # would put her behind people who are in less danger than she is.
+        $rows = @(Import-Csv -LiteralPath $script:CsvPath)
+        ($rows | Where-Object UserPrincipalName -eq 'rosalind@fabrikam-example.com').Risk | Should -Be 'Moderate'
+        ($rows | Where-Object UserPrincipalName -eq 'marcus@fabrikam-example.com').BlockedAtRetirement | Should -Be 'False'
     }
 
     It 'reports no unrecognised authentication methods for known input' {
         $script:Summary.UnrecognisedMethods | Should -BeNullOrEmpty
+    }
+}
+
+
+Describe 'A run with -ExcludeUpnPattern' {
+
+    BeforeAll {
+        $pwshPath = if ($IsWindows) { Join-Path $PSHOME 'pwsh.exe' } else { Join-Path $PSHOME 'pwsh' }
+        if (-not (Test-Path -LiteralPath $pwshPath)) { $pwshPath = 'pwsh' }
+
+        $script:ExCsv = Join-Path $script:OutDir 'excluded.csv'
+        $script:ExSummaryPath = Join-Path $script:Root 'excluded-summary.json'
+        $exStdErr = Join-Path $script:Root 'excluded-stderr.txt'
+
+        $exCommand = @"
+`$env:PSModulePath = '$(Join-Path $script:Root 'Modules')' + [IO.Path]::PathSeparator + `$env:PSModulePath
+`$summary = & '$(Get-AssessmentScriptPath)' -TenantId 'fabrikam-example.com' ``
+    -OutputPath '$script:ExCsv' -ExcludeUpnPattern '^svc-' -SkipAclHardening
+`$summary | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath '$script:ExSummaryPath'
+"@
+
+        $exProcess = Start-Process -FilePath $pwshPath -PassThru -Wait -NoNewWindow `
+            -RedirectStandardOutput (Join-Path $script:Root 'excluded-stdout.txt') `
+            -RedirectStandardError $exStdErr `
+            -ArgumentList @('-NoProfile', '-NonInteractive', '-Command', $exCommand)
+
+        $script:ExExit = $exProcess.ExitCode
+        $script:ExStdErr = if (Test-Path $exStdErr) { Get-Content -LiteralPath $exStdErr -Raw } else { '' }
+        $script:ExRows = if (Test-Path $script:ExCsv) { @(Import-Csv -LiteralPath $script:ExCsv) } else { @() }
+        $script:ExSummary = if (Test-Path $script:ExSummaryPath) {
+            Get-Content -LiteralPath $script:ExSummaryPath -Raw | ConvertFrom-Json
+        } else { $null }
+    }
+
+    It 'completes without error' {
+        $script:ExExit | Should -Be 0 -Because "the run failed: $script:ExStdErr"
+    }
+
+    It 'marks the matched account rather than deleting it' {
+        # The row has to survive, or a pattern that catches a real person removes them
+        # from the assessment with nothing left to notice.
+        $svc = $script:ExRows | Where-Object UserPrincipalName -eq 'svc-scanner@fabrikam-example.com'
+
+        $svc | Should -Not -BeNullOrEmpty
+        $svc.Risk | Should -Be 'Excluded'
+        $svc.Reason | Should -Match 'ExcludeUpnPattern'
+        $svc.NextStep | Should -Match 'Confirm this is a non-human account'
+    }
+
+    It 'leaves the excluded account out of every count' {
+        $script:ExSummary.UsersExcludedByPattern | Should -Be 1
+        $script:ExSummary.ExcludeUpnPattern | Should -Be '^svc-'
+
+        # It is phone-only and in scope, so without the exclusion it would be a candidate
+        # and would count toward the blocked population.
+        $baseline = $script:Summary
+        $script:ExSummary.MigrationCandidates | Should -Be ($baseline.MigrationCandidates - 1)
+        $script:ExSummary.BlockedAtRetirement | Should -Be ($baseline.BlockedAtRetirement - 1)
+    }
+
+    It 'keeps the excluded account out of the action list' {
+        $actionList = @(Import-Csv -LiteralPath (Join-Path $script:OutDir 'excluded_ActionList.csv'))
+        $actionList.UserPrincipalName | Should -Not -Contain 'svc-scanner@fabrikam-example.com'
+        $actionList.Count | Should -BeGreaterThan 0 -Because 'real users are still listed'
+    }
+
+    It 'does not touch anybody who does not match' {
+        $rosalind = $script:ExRows | Where-Object UserPrincipalName -eq 'rosalind@fabrikam-example.com'
+        $rosalind.Risk | Should -Be 'Moderate'
     }
 }

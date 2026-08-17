@@ -86,6 +86,9 @@ $script:RiskOrder = @{
     Moderate      = 2
     Low           = 3
     Informational = 4
+    # Not a risk level: an operator-applied state from -ExcludeUpnPattern. Ordered last so
+    # a user who becomes excluded reads as an improvement rather than an unknown band.
+    Excluded      = 5
 }
 
 function Get-PropertyValue {
