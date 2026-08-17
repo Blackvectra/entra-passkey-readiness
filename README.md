@@ -1,10 +1,54 @@
 # entra-passkey-readiness
 
+[![CI](https://github.com/Blackvectra/entra-passkey-readiness/actions/workflows/ci.yml/badge.svg)](https://github.com/Blackvectra/entra-passkey-readiness/actions/workflows/ci.yml)
+[![PowerShell 7+](https://img.shields.io/badge/PowerShell-7.0%2B-5391FE)](https://learn.microsoft.com/powershell/scripting/install/installing-powershell)
+[![Read-only](https://img.shields.io/badge/Graph%20calls-GET%20only-0F9D6E)](#security)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 Read-only PowerShell assessment that identifies which Microsoft Entra ID users are exposed to the retirement of Microsoft-provided SMS and voice authentication, and which are ready for passkeys.
 
-The script answers a question the Entra portal does not answer directly: **which specific users are both targeted by the SMS/voice Authentication Methods Policy and unable to satisfy MFA without it after the retirement date.**
+It answers a question the Entra portal does not answer directly: **which specific users are both targeted by the SMS/voice Authentication Methods Policy and unable to satisfy MFA without it after the retirement date.**
 
-It performs GET requests only. It does not modify users, groups, policies, authentication methods, or registration campaigns.
+Every Microsoft Graph call is a GET. It does not modify users, groups, policies, authentication methods, or registration campaigns, which is what makes it safe to run against a customer tenant during business hours without a change window.
+
+## Quick start
+
+```powershell
+Install-Module Microsoft.Graph.Authentication -Scope CurrentUser
+
+.\Get-EntraSmsVoiceMigrationImpact.ps1 -TenantId contoso.onmicrosoft.com `
+    -CustomerName "Contoso Manufacturing" -HtmlReport -ExportTickets -ExportRemediationGroup
+```
+
+Sign in as Global Reader or Security Reader. You get four files beside each other:
+
+| File | What it is |
+|---|---|
+| `...Impact.csv` | One risk-ranked row per exposed user, highest risk first |
+| `...Impact.html` | A self-contained client report ([sample](examples/Example-Report.html)) |
+| `..._Tickets.csv` | A PSA-importable work queue ([sample](examples/Example-Tickets.csv)) |
+| `..._RemediationGroup.csv` | The membership list for the migration security group |
+
+## The three scripts
+
+| Script | Use it to |
+|---|---|
+| `Get-EntraSmsVoiceMigrationImpact.ps1` | Assess one tenant. This is the core of the project. |
+| `Invoke-EntraSmsVoiceSweep.ps1` | Assess many tenants, with optional concurrency and resume. |
+| `Compare-EntraSmsVoiceAssessment.ps1` | Diff two assessments to see whether the campaign is moving anybody. Reads files only; no Graph, no permissions. |
+
+## Contents
+
+- [Why this exists](#why-this-exists) — the timeline, and the two populations people conflate
+- [Prerequisites](#prerequisites) — modules, roles, Graph scopes
+- [Usage](#usage) — single tenant, estate sweeps, progress tracking, reports, tickets
+- [Output](#output) — console summary and CSV schema
+- [Risk classifications](#risk-classifications) — the five bands
+- [Coverage](#coverage-who-this-actually-finds) — exactly who this finds, and who it does not
+- [Limitations](#limitations) — read before presenting results to a client
+- [Troubleshooting](#troubleshooting)
+- [Development](#development) — tests, linting, contributing
+- [Security](#security)
 
 ---
 
@@ -131,6 +175,73 @@ Results sort failures first, then by Critical count descending, so the estate tr
 
 **Point `-ReportRoot` at your protected client documentation store, never at a git working directory.**
 
+#### Running tenants concurrently
+
+`-ThrottleLimit` assesses up to 16 tenants at once. On a large estate this is the difference between a sweep you start and watch and a sweep you start and come back to.
+
+```powershell
+.\Invoke-EntraSmsVoiceSweep.ps1 -TenantListPath .\tenants.csv `
+    -ReportRoot D:\ClientEvidence\EntraMigration `
+    -ClientId 11111111-1111-1111-1111-111111111111 `
+    -CertificateThumbprint A1B2C3D4E5F60718293A4B5C6D7E8F9012345678 `
+    -ThrottleLimit 6
+```
+
+Each concurrent tenant runs in **its own pwsh process**, not a runspace. `Microsoft.Graph.Authentication` holds the signed-in context in process-wide state, so concurrent connections inside one process can serve one customer's token to another customer's report. That is the exact failure this project exists to prevent, so the isolation boundary is a process.
+
+Two consequences worth knowing:
+
+- **App-only authentication is required.** Interactive sign-in cannot be driven concurrently, and the script refuses rather than half-working.
+- **Graph throttling is per-tenant**, so concurrency across different tenants does not compound it. Concurrency will not make a single large tenant faster.
+
+#### Resuming an interrupted sweep
+
+A ninety-tenant sweep that dies at tenant sixty should not restart at tenant one.
+
+```powershell
+.\Invoke-EntraSmsVoiceSweep.ps1 -TenantListPath .\tenants.csv `
+    -ReportRoot D:\ClientEvidence\EntraMigration `
+    -ClientId 11111111-1111-1111-1111-111111111111 `
+    -CertificateThumbprint A1B2C3D4E5F60718293A4B5C6D7E8F9012345678 `
+    -ThrottleLimit 6 -Resume
+```
+
+`-Resume` reads the most recent `SweepSummary_*.csv` under `-ReportRoot` and skips every tenant already recorded as `Success`. Skipped tenants are **carried into the new summary** rather than dropped, so the summary still describes the whole tenant list and a second resume does not redo the first run's work.
+
+Matching is on the customer label rather than the tenant ID, because a successful row records the tenant GUID Graph reported, which will not equal the verified domain you supplied.
+
+### Tracking progress between runs
+
+The first assessment answers "who is exposed." Every run after it answers "did the campaign move anybody," and that question is unreadable from a 400-row CSV where 380 rows are identical to last month's.
+
+```powershell
+.\Compare-EntraSmsVoiceAssessment.ps1 `
+    -BaselinePath .\Contoso-2026-09.csv `
+    -CurrentPath  .\Contoso-2026-10.csv
+```
+
+Every user is classified by direction of travel, and the report sorts regressions first, because a user who went backwards is the only category that means something is actively wrong.
+
+| Movement | Meaning |
+|---|---|
+| `Regressed` | Risk band worsened. Lost a passwordless method, or newly resolved into policy scope. |
+| `New` | Appeared in this run. New account, newly in scope, or newly present in the registration report. |
+| `Improved` | Risk band improved. Usually the remediation completing. |
+| `Resolved` | No longer a migration candidate at all. Also what a disabled or deleted account looks like, so it is reported rather than assumed to be good news. |
+| `Unchanged` | No movement. Excluded unless you pass `-IncludeUnchanged`. |
+
+The console summary reports `LeftActionableBands` and `EnteredActionableBands`. The first is the number worth putting in a client status update; the second is usually new starters or a group membership change.
+
+Users are matched on object ID, so a rename does not read as a new account. Where only the UPN matched, the row records `MatchedOn = UserPrincipalName` so you can tell the difference.
+
+This script touches no tenant and needs no Graph permissions or connectivity. It compares two files.
+
+```powershell
+# Who went backwards since the last run, worst first
+$changes = .\Compare-EntraSmsVoiceAssessment.ps1 -BaselinePath .\a.csv -CurrentPath .\b.csv -PassThru
+$changes | Where-Object Movement -eq 'Regressed' | Format-Table DisplayName, BaselineRisk, CurrentRisk, Note
+```
+
 ### Unattended authentication
 
 App-only runs need the same four Graph permissions granted as **application** permissions with admin consent in each tenant, and a certificate registered on the app registration.
@@ -154,7 +265,18 @@ When `-TenantId` is supplied as a GUID, the script verifies the established Grap
     -CustomerName "Contoso Manufacturing" -HtmlReport -ExportRemediationGroup
 ```
 
-`-HtmlReport` writes a self-contained HTML file beside the CSV. No CDN, no external assets, no JavaScript, so it survives being emailed, archived, or opened offline years later. It leads with a live countdown to both deadlines, shows the risk bands, prints the resolved policy scope with group names, and tables only the Critical, High, and Moderate findings so the accounts that matter are not buried under the ones that do not.
+`-HtmlReport` writes a self-contained HTML file beside the CSV. No CDN, no external assets, no JavaScript, so it survives being emailed, archived, or opened offline years later.
+
+It is designed as a document rather than a dashboard, because it gets printed:
+
+- **An executive summary in prose**, generated from the same numbers as the cards. A report that shows only counts leaves the reader to do the interpretation, and the interpretation is what they are paying for. It refuses to describe a zero-candidate tenant as finished, because legacy per-user MFA is not readable from here.
+- **Findings split into one table per band.** A technician works Critical to completion before touching High, and the band boundary is where that decision gets made.
+- **A countdown to both deadlines**, computed when the report is generated.
+- **The resolved policy scope with group names**, so the targeting is auditable rather than a list of GUIDs.
+- **A scope-and-method section** stating what was and was not assessed, so the deliverable stands up in a client conversation without this README open beside it.
+- Only Critical, High, and Moderate findings are tabled, so the accounts that matter are not buried under the ones that do not.
+
+Printing to PDF produces a clean document: column headers repeat across pages, bands and cards do not straddle page breaks, and page margins are set.
 
 All user-supplied strings are HTML-encoded before rendering. Directory display names are attacker-influenceable in tenants that permit self-service profile edits or B2B invites, and an unencoded display name containing markup would execute in the browser of whoever you emailed the report to.
 
@@ -192,6 +314,8 @@ See [examples/Example-Tickets.csv](examples/Example-Tickets.csv) for a sample bu
 
 ### Parameters
 
+#### `Get-EntraSmsVoiceMigrationImpact.ps1`
+
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `-TenantId` | string | current Graph context | Tenant GUID or verified domain. Forces re-auth if it does not match the live session. Mandatory for app-only. |
@@ -206,6 +330,31 @@ See [examples/Example-Tickets.csv](examples/Example-Tickets.csv) for a sample bu
 | `-MaxIndividualTickets` | int | 50 | Cap on individual tickets before High findings batch into a campaign ticket. |
 | `-SkipAclHardening` | switch | off | Skip restricting output file permissions. Use only where the filesystem rejects ACL changes. |
 | `-PassThru` | switch | off | Emit per-user objects to the pipeline in addition to the summary. |
+
+#### `Invoke-EntraSmsVoiceSweep.ps1`
+
+Accepts and passes through `-IncludeUnaffected`, `-HtmlReport`, `-ExportRemediationGroup`, `-ExportTickets`, `-MaxIndividualTickets`, and `-SkipAclHardening`. Its own parameters:
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-TenantId` | string[] | none | One or more tenants. Accepts pipeline input. Mutually exclusive with `-TenantListPath`. |
+| `-TenantListPath` | string | none | CSV with a `TenantId` column and optional `CustomerName`. |
+| `-ReportRoot` | string | **required** | Output root. One subfolder per tenant. Point at your protected client documentation store. |
+| `-ClientId` / `-CertificateThumbprint` | string | none | App-only auth. Both or neither. |
+| `-AssessmentScriptPath` | string | same directory | Path to the assessment script. |
+| `-ThrottleLimit` | int | 1 | Tenants assessed concurrently, 1 to 16. Above 1 requires app-only auth. |
+| `-Resume` | switch | off | Skip tenants already recorded as `Success` in the newest sweep summary under `-ReportRoot`. |
+
+#### `Compare-EntraSmsVoiceAssessment.ps1`
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-BaselinePath` | string | **required** | The earlier assessment CSV. |
+| `-CurrentPath` | string | **required** | The later assessment CSV. |
+| `-OutputPath` | string | timestamped CSV beside `-CurrentPath` | Destination for the change report. |
+| `-IncludeUnchanged` | switch | off | Include users whose band did not move. |
+| `-SkipAclHardening` | switch | off | Skip restricting output file permissions. |
+| `-PassThru` | switch | off | Emit per-user change objects to the pipeline. |
 
 ---
 
@@ -316,6 +465,22 @@ These are properties of the data sources, not defects. Read them before presenti
 | Every user is `Moderate` | SMS and voice are disabled in AMP but phone numbers remain registered. This is the legacy per-user MFA pattern. |
 
 ---
+
+## Development
+
+```powershell
+Install-Module Pester -MinimumVersion 5.5.0 -Scope CurrentUser -SkipPublisherCheck
+Install-Module PSScriptAnalyzer -Scope CurrentUser
+
+Invoke-Pester ./tests
+Invoke-ScriptAnalyzer -Path . -Recurse -Settings ./PSScriptAnalyzerSettings.psd1
+```
+
+CI runs both on every push and pull request and fails on any finding.
+
+The suite covers the risk model, AMP include/exclude resolution against a mocked Graph, both output-sanitization controls, the executive summary arithmetic, and the generated report's security properties. It also covers the repository's own structure: broken relative documentation links, `.gitignore` negations that no longer match where a file lives, and anything export-shaped committed outside `examples/` all fail the build. That last group is the defect class that shipped in 1.0.0 and was invisible to human review.
+
+The assessment is a script rather than a module, so the tests parse it and lift out individual function definitions by name instead of dot-sourcing it, which would execute the Execution section and reach for Graph. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Security
 
