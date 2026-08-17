@@ -440,6 +440,73 @@ function ConvertTo-SafeHtml {
     return [System.Net.WebUtility]::HtmlEncode([string]$Value)
 }
 
+function Get-ExecutiveSummary {
+    # Prose, generated from the same numbers as the cards. A client report that only
+    # shows counts makes the reader do the interpretation, and the interpretation is the
+    # part they are paying for. Returns an array of paragraphs.
+    param(
+        [Parameter(Mandatory)]$Summary,
+
+        # Distinct users in SMS or voice scope. Passed in rather than derived from the
+        # summary, because InSmsPolicyScope and InVoicePolicyScope overlap: a user
+        # targeted by both methods appears in both counts, and adding them together
+        # reports more users in scope than the tenant has.
+        [Parameter(Mandatory)][int]$InScopeCount
+    )
+
+    $asInt = {
+        param($value)
+        $parsed = 0
+        if ([int]::TryParse([string]$value, [ref]$parsed)) { return $parsed }
+        return 0
+    }
+
+    $critical = & $asInt $Summary.Critical
+    $high = & $asInt $Summary.High
+    $moderate = & $asInt $Summary.Moderate
+    $candidates = & $asInt $Summary.MigrationCandidates
+    $assessed = & $asInt $Summary.EnabledUsersAssessed
+    $inScope = $InScopeCount
+    $ready = & $asInt $Summary.PasswordlessCapableInScope
+    $missing = & $asInt $Summary.UsersMissingFromReport
+
+    $paragraphs = [System.Collections.Generic.List[string]]::new()
+
+    if ($candidates -eq 0) {
+        $paragraphs.Add("No users resolved into SMS or voice policy scope, and no phone-based authentication methods are registered across the $assessed enabled users assessed. This tenant has no measurable exposure through the modern authentication methods policy.")
+        $paragraphs.Add('That is not the same as no exposure. Legacy per-user MFA service settings are in scope for the retirement and cannot be read by this assessment. Confirm that population in the legacy MFA portal before treating this tenant as finished.')
+        return $paragraphs
+    }
+
+    $blocked = $critical + $high
+    $paragraphs.Add("$candidates of $assessed enabled users are migration candidates: they are targeted by the SMS or voice authentication methods policy, they have a phone-based method registered, or both.")
+
+    if ($blocked -gt 0) {
+        $sentence = "$blocked of them have no phishing-resistant method registered today. Unless that changes, those accounts cannot satisfy multifactor authentication once Microsoft-provided SMS and voice delivery is retired on 1 February 2027, and their next sign-in after that date will be a blocking passkey registration prompt."
+        $paragraphs.Add($sentence)
+    }
+
+    if ($critical -gt 0) {
+        $word = if ($critical -eq 1) { 'account holds' } else { 'accounts hold' }
+        $paragraphs.Add("$critical of those $word a privileged role. Privileged accounts are the first remediation priority: if one is blocked at sign-in and its recovery path also depends on a phone number, the result is an availability problem on top of an authentication problem. Confirm the emergency-access accounts specifically.")
+    }
+
+    if ($moderate -gt 0) {
+        $paragraphs.Add("$moderate user(s) have a phone method registered but did not resolve into the modern policy scope. That pattern usually means legacy per-user MFA, which is equally in scope for the retirement and is not readable through the least-privilege Graph surface this assessment uses. Treat it as a finding to validate manually, not as a clean result.")
+    }
+
+    if ($inScope -gt 0) {
+        $percent = [math]::Round(($ready / $inScope) * 100)
+        $paragraphs.Add("$ready of the $inScope users in policy scope ($percent%) already hold a method that survives the retirement. That figure is the progress measure worth tracking between runs.")
+    }
+
+    if ($missing -gt 0) {
+        $paragraphs.Add("$missing enabled user(s) had no row in the authentication methods registration report. Their registration fields default to 'not capable', so they are reported as more exposed rather than quietly dropped. Recently created accounts and reporting latency both produce this; re-run in 24 to 48 hours before acting on that subset.")
+    }
+
+    return $paragraphs
+}
+
 function New-HtmlReport {
     param(
         [Parameter(Mandatory)]$Summary,
@@ -451,44 +518,116 @@ function New-HtmlReport {
     $now = Get-Date
     $autoEnableDate = [datetime]'2026-09-01'
     $retirementDate = [datetime]'2027-02-01'
+    $providerDate = [datetime]'2026-10-30'
     $daysToAutoEnable = [math]::Max(0, [int]($autoEnableDate - $now).TotalDays)
     $daysToRetirement = [math]::Max(0, [int]($retirementDate - $now).TotalDays)
 
+    $heading = if ($Customer) { $Customer } else { 'Microsoft Entra ID' }
     $title = if ($Customer) { "$Customer - Entra SMS/Voice Migration Impact" } else { 'Entra SMS/Voice Migration Impact' }
 
-    # Only actionable rows go in the table. Low and Informational are in the CSV; putting
+    $asInt = {
+        param($value)
+        $parsed = 0
+        if ([int]::TryParse([string]$value, [ref]$parsed)) { return $parsed }
+        return 0
+    }
+
+    $critical = & $asInt $Summary.Critical
+    $high = & $asInt $Summary.High
+    $moderate = & $asInt $Summary.Moderate
+    $low = & $asInt $Summary.Low
+    $candidates = & $asInt $Summary.MigrationCandidates
+
+    # Only actionable rows go in the tables. Low and Informational are in the CSV; putting
     # them here would bury the ten accounts that actually matter under four hundred that don't.
     $actionable = @($Rows | Where-Object { $_.Risk -in @('Critical', 'High', 'Moderate') })
 
-    $tableRows = foreach ($row in $actionable) {
-        $badgeClass = switch ($row.Risk) {
-            'Critical' { 'b-crit' }
-            'High'     { 'b-high' }
-            'Moderate' { 'b-mod' }
-            default    { 'b-low' }
-        }
-        $adminMark = if ($row.IsAdmin) { '<span class="admin">ADMIN</span>' } else { '' }
-        $scope = @()
-        if ($row.InSmsPolicyScope) { $scope += 'SMS' }
-        if ($row.InVoicePolicyScope) { $scope += 'Voice' }
-        $scopeText = if ($scope.Count -gt 0) { $scope -join ' + ' } else { 'not in AMP scope' }
+    # Distinct users in either method's scope. Summing the two policy counts would
+    # double-count anyone targeted by both.
+    $inScopeCount = @($Rows | Where-Object { $_.InSmsPolicyScope -or $_.InVoicePolicyScope }).Count
 
-        @"
+    $summaryParagraphs = Get-ExecutiveSummary -Summary $Summary -InScopeCount $inScopeCount
+    $summaryHtml = ($summaryParagraphs | ForEach-Object { "<p>$(ConvertTo-SafeHtml $_)</p>" }) -join "`n"
+
+    # Proportional bar across the four bands. Pure CSS widths computed here, because the
+    # report carries no JavaScript and has to render identically offline in five years.
+    $barTotal = $critical + $high + $moderate + $low
+    $barSegments = if ($barTotal -gt 0) {
+        $segments = @(
+            @{ Class = 's-crit'; Count = $critical; Label = 'Critical' }
+            @{ Class = 's-high'; Count = $high; Label = 'High' }
+            @{ Class = 's-mod'; Count = $moderate; Label = 'Moderate' }
+            @{ Class = 's-low'; Count = $low; Label = 'Low' }
+        )
+        ($segments | Where-Object { $_.Count -gt 0 } | ForEach-Object {
+            $percent = [math]::Round(($_.Count / $barTotal) * 100, 2)
+            "<div class=""seg $($_.Class)"" style=""width:$percent%"" title=""$($_.Label): $($_.Count)""></div>"
+        }) -join ''
+    } else { '' }
+
+    # One table per band rather than one long table. A technician works Critical to
+    # completion before touching High, and the band boundary is where that decision is made.
+    $bandSections = foreach ($band in @('Critical', 'High', 'Moderate')) {
+        $bandRows = @($actionable | Where-Object Risk -eq $band)
+        if ($bandRows.Count -eq 0) { continue }
+
+        $bandClass = switch ($band) {
+            'Critical' { 'crit' }
+            'High' { 'high' }
+            default { 'mod' }
+        }
+
+        $bandBlurb = switch ($band) {
+            'Critical' { 'Privileged accounts, targeted by policy, with a phone method and no phishing-resistant alternative. Individual work, scheduled, verified with a real test sign-in.' }
+            'High'     { 'Targeted by policy with no method that survives the retirement. Remediate as a scoped registration campaign rather than one ticket at a time.' }
+            default    { 'A phone method is registered but the user is outside the resolved modern policy scope. Usually legacy per-user MFA. Validate this population manually before concluding it is unaffected.' }
+        }
+
+        $rowsHtml = foreach ($row in $bandRows) {
+            $adminMark = if ($row.IsAdmin) { '<span class="admin">ADMIN</span>' } else { '' }
+            $scope = @()
+            if ($row.InSmsPolicyScope) { $scope += 'SMS' }
+            if ($row.InVoicePolicyScope) { $scope += 'Voice' }
+            $scopeText = if ($scope.Count -gt 0) { $scope -join ' + ' } else { 'not in AMP scope' }
+            $phone = if ($row.PhoneMethodsRegistered) { $row.PhoneMethodsRegistered } else { 'none reported' }
+            $pwlessClass = if ($row.IsPasswordlessCapable) { 'yes' } else { 'no' }
+            $pwlessText = if ($row.IsPasswordlessCapable) { 'Yes' } else { 'No' }
+
+            @"
 <tr>
-<td><span class="badge $badgeClass">$(ConvertTo-SafeHtml $row.Risk)</span></td>
-<td class="name">$(ConvertTo-SafeHtml $row.DisplayName) $adminMark<br><span class="upn">$(ConvertTo-SafeHtml $row.UserPrincipalName)</span></td>
+<td class="name">$(ConvertTo-SafeHtml $row.DisplayName)$adminMark<div class="upn">$(ConvertTo-SafeHtml $row.UserPrincipalName)</div></td>
 <td>$(ConvertTo-SafeHtml $row.UserType)</td>
 <td>$(ConvertTo-SafeHtml $scopeText)</td>
-<td>$(ConvertTo-SafeHtml $row.PhoneMethodsRegistered)</td>
-<td class="$(if ($row.IsPasswordlessCapable) { 'yes' } else { 'no' })">$(if ($row.IsPasswordlessCapable) { 'Yes' } else { 'No' })</td>
+<td class="mono">$(ConvertTo-SafeHtml $phone)</td>
+<td class="$pwlessClass">$pwlessText</td>
 <td class="reason">$(ConvertTo-SafeHtml $row.Reason)</td>
 </tr>
 "@
+        }
+
+        @"
+<section class="band">
+<h3 class="band-h $bandClass">$band <span class="band-n">$($bandRows.Count)</span></h3>
+<p class="band-blurb">$(ConvertTo-SafeHtml $bandBlurb)</p>
+<table>
+<colgroup><col class="c-user"><col class="c-type"><col class="c-scope"><col class="c-phone"><col class="c-pwless"><col class="c-why"></colgroup>
+<thead><tr>
+<th>User</th><th>Type</th><th>AMP scope</th><th>Phone methods</th><th>Passwordless</th><th>Why</th>
+</tr></thead>
+<tbody>
+$($rowsHtml -join "`n")
+</tbody>
+</table>
+</section>
+"@
     }
 
-    $emptyState = if ($actionable.Count -eq 0) {
-        '<tr><td colspan="7" class="empty">No Critical, High, or Moderate findings. Verify against the portal and check legacy per-user MFA settings separately.</td></tr>'
-    } else { '' }
+    $findingsHtml = if ($actionable.Count -eq 0) {
+        '<div class="empty"><strong>No Critical, High, or Moderate findings.</strong><br>Verify against the Entra portal, and check legacy per-user MFA service settings separately: that population is in scope for the retirement and is not readable from the Graph surface this assessment uses.</div>'
+    }
+    else {
+        $bandSections -join "`n"
+    }
 
     $html = @"
 <!DOCTYPE html>
@@ -502,81 +641,195 @@ function New-HtmlReport {
 <meta name="referrer" content="no-referrer">
 <title>$(ConvertTo-SafeHtml $title)</title>
 <style>
+/* Light document, brand accents. This file gets emailed, archived, and printed to PDF;
+   a dark background costs a reader half a toner cartridge and reads as a dashboard
+   screenshot rather than a deliverable. */
 :root {
-  --navy: #0E1B2C; --panel: #16273D; --line: #24384F;
-  --accent: #22D99D; --text: #E8EEF5; --muted: #8FA3B8;
-  --crit: #FF4D4D; --high: #FF8A3D; --mod: #FFC53D; --low: #22D99D;
+  --navy: #0E1B2C; --navy-2: #16273D; --accent: #0F9D6E;
+  --ink: #14202E; --ink-2: #4A5C70; --ink-3: #6E8095;
+  --rule: #DDE4EC; --panel: #F5F8FB; --page: #FFFFFF;
+  --crit: #C22B2B; --high: #C25E17; --mod: #A8820A; --low: #0F9D6E;
 }
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--navy); color: var(--text);
-  font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
-.wrap { max-width: 1180px; margin: 0 auto; padding: 32px 20px 64px; }
-h1 { font-size: 26px; margin: 0 0 4px; letter-spacing: -0.3px; }
-h2 { font-size: 15px; text-transform: uppercase; letter-spacing: 1.4px;
-  color: var(--accent); margin: 40px 0 14px; font-weight: 600; }
-.sub { color: var(--muted); font-size: 13px; margin-bottom: 28px; }
-.readonly { display: inline-block; border: 1px solid var(--accent); color: var(--accent);
-  border-radius: 3px; padding: 2px 8px; font-size: 11px; letter-spacing: 1px; margin-left: 8px; }
-.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
-.card { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 16px 18px; }
-.card .n { font-size: 30px; font-weight: 700; line-height: 1.1; }
-.card .l { font-size: 11px; text-transform: uppercase; letter-spacing: 1.2px; color: var(--muted); margin-top: 6px; }
+html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+body { margin: 0; background: var(--page); color: var(--ink);
+  font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+
+.masthead { background: var(--navy); color: #fff; padding: 30px 0 26px;
+  border-bottom: 4px solid var(--accent); }
+.wrap { max-width: 1140px; margin: 0 auto; padding: 0 28px; }
+.eyebrow { font-size: 11px; letter-spacing: 2.2px; text-transform: uppercase;
+  color: var(--accent); font-weight: 700; margin-bottom: 8px; }
+h1 { font-size: 30px; margin: 0 0 6px; letter-spacing: -0.4px; font-weight: 650; }
+.masthead .sub { color: #A9BDD2; font-size: 13.5px; }
+.tag { display: inline-block; border: 1px solid var(--accent); color: var(--accent);
+  border-radius: 3px; padding: 2px 9px; font-size: 10.5px; letter-spacing: 1.4px;
+  font-weight: 700; vertical-align: 4px; margin-left: 10px; }
+
+main { padding: 8px 0 60px; }
+h2 { font-size: 12.5px; text-transform: uppercase; letter-spacing: 1.6px;
+  color: var(--ink-3); margin: 42px 0 14px; font-weight: 700;
+  padding-bottom: 8px; border-bottom: 1px solid var(--rule); }
+
+.lede p { margin: 0 0 12px; font-size: 16px; line-height: 1.65; max-width: 74ch; }
+.lede p:first-child { font-size: 17.5px; color: var(--ink); font-weight: 500; }
+
+.clock { display: flex; gap: 14px; flex-wrap: wrap; margin: 18px 0 4px; }
+/* Direct children only. A bare `.clock div` also matches the nested .d and .t blocks
+   and paints a card border around each line inside the card. */
+.clock > div { background: var(--panel); border: 1px solid var(--rule);
+  border-left: 3px solid var(--accent); border-radius: 4px; padding: 13px 17px; flex: 1 1 240px; }
+.clock .d { font-size: 21px; font-weight: 700; letter-spacing: -0.3px; }
+.clock .t { font-size: 12px; color: var(--ink-2); margin-top: 3px; line-height: 1.45; }
+
+.bar { display: flex; height: 12px; border-radius: 3px; overflow: hidden;
+  background: var(--panel); border: 1px solid var(--rule); margin: 4px 0 10px; }
+.seg { height: 100%; }
+.s-crit { background: var(--crit); } .s-high { background: var(--high); }
+.s-mod { background: var(--mod); }  .s-low { background: var(--low); }
+.legend { display: flex; gap: 18px; flex-wrap: wrap; font-size: 12px; color: var(--ink-2); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.dot { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px; margin-top: 16px; }
+.card { background: var(--panel); border: 1px solid var(--rule); border-radius: 5px;
+  padding: 15px 17px; }
+.card .n { font-size: 27px; font-weight: 700; line-height: 1.1; letter-spacing: -0.5px; }
+.card .l { font-size: 10.5px; text-transform: uppercase; letter-spacing: 1.1px;
+  color: var(--ink-3); margin-top: 6px; font-weight: 600; }
 .card.crit .n { color: var(--crit); } .card.high .n { color: var(--high); }
-.card.mod .n { color: var(--mod); }  .card.low .n { color: var(--low); }
-.clock { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 12px; }
-.clock div { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--accent);
-  border-radius: 4px; padding: 12px 16px; flex: 1 1 260px; }
-.clock .d { font-size: 22px; font-weight: 700; }
-.clock .t { font-size: 12px; color: var(--muted); margin-top: 3px; }
-table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 13.5px; }
-th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 1px;
-  color: var(--muted); border-bottom: 1px solid var(--line); padding: 10px 10px; font-weight: 600; }
-td { border-bottom: 1px solid var(--line); padding: 12px 10px; vertical-align: top; }
-tr:hover td { background: rgba(34,217,157,0.04); }
-.badge { display: inline-block; border-radius: 3px; padding: 3px 9px; font-size: 11px;
-  font-weight: 700; letter-spacing: 0.6px; color: var(--navy); }
-.b-crit { background: var(--crit); color: #fff; } .b-high { background: var(--high); }
-.b-mod { background: var(--mod); } .b-low { background: var(--low); }
-.admin { background: var(--crit); color: #fff; font-size: 9.5px; font-weight: 700;
-  padding: 2px 5px; border-radius: 2px; letter-spacing: 0.8px; vertical-align: middle; }
-.name { font-weight: 600; } .upn { font-weight: 400; color: var(--muted); font-size: 12px; }
-.reason { color: var(--muted); font-size: 12.5px; max-width: 300px; }
-.yes { color: var(--accent); font-weight: 600; } .no { color: var(--crit); font-weight: 600; }
-.empty { text-align: center; color: var(--muted); padding: 32px; }
-dl { display: grid; grid-template-columns: 220px 1fr; gap: 8px 18px; margin: 0;
-  background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 18px 20px; }
-dt { color: var(--muted); font-size: 12.5px; } dd { margin: 0; font-size: 13.5px; word-break: break-word; }
-.note { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--mod);
-  border-radius: 4px; padding: 16px 20px; font-size: 13px; color: var(--muted); }
-.note ul { margin: 8px 0 0; padding-left: 18px; } .note li { margin-bottom: 6px; }
-footer { margin-top: 44px; padding-top: 18px; border-top: 1px solid var(--line);
-  color: var(--muted); font-size: 12px; }
-@media print { body { background: #fff; color: #000; } .card, dl, .note, .clock div { border-color: #ccc; background: #fff; } }
+.card.mod .n { color: var(--mod); }   .card.low .n { color: var(--low); }
+
+dl { display: grid; grid-template-columns: 240px 1fr; gap: 0; margin: 0;
+  border: 1px solid var(--rule); border-radius: 5px; overflow: hidden; }
+dt { color: var(--ink-2); font-size: 12.5px; font-weight: 600;
+  padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--rule); }
+dd { margin: 0; font-size: 13px; padding: 10px 16px; word-break: break-word;
+  border-bottom: 1px solid var(--rule); }
+dl > dt:last-of-type, dl > dd:last-of-type { border-bottom: 0; }
+
+.band { margin-top: 30px; }
+.band-h { font-size: 15px; margin: 0 0 4px; font-weight: 700; letter-spacing: 0.2px;
+  padding-left: 11px; border-left: 4px solid var(--rule); }
+.band-h.crit { border-left-color: var(--crit); color: var(--crit); }
+.band-h.high { border-left-color: var(--high); color: var(--high); }
+.band-h.mod  { border-left-color: var(--mod);  color: var(--mod); }
+.band-n { background: var(--panel); border: 1px solid var(--rule); color: var(--ink-2);
+  font-size: 11.5px; border-radius: 10px; padding: 1px 9px; margin-left: 6px;
+  vertical-align: 2px; font-weight: 700; }
+.band-blurb { font-size: 12.5px; color: var(--ink-2); margin: 6px 0 12px;
+  padding-left: 15px; max-width: 88ch; }
+
+.tablewrap { overflow-x: auto; }
+/* Fixed layout so every band's table lines up with the others. With auto layout each
+   table sizes to its own content and the columns visibly jump between bands. */
+table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
+col.c-user { width: 26%; } col.c-type { width: 7%; } col.c-scope { width: 11%; }
+col.c-phone { width: 16%; } col.c-pwless { width: 10%; } col.c-why { width: 30%; }
+th { text-align: left; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.9px;
+  color: var(--ink-3); border-bottom: 2px solid var(--rule); padding: 9px 10px; font-weight: 700;
+  background: var(--panel); }
+td { border-bottom: 1px solid var(--rule); padding: 11px 10px; vertical-align: top; }
+tbody tr:nth-child(even) td { background: #FAFCFE; }
+.name { font-weight: 600; }
+/* Guest UPNs carry the #EXT# suffix and run long; fixed layout needs an explicit
+   instruction to break them rather than push the column open. */
+.name, .upn, .mono { overflow-wrap: anywhere; }
+.upn { font-weight: 400; color: var(--ink-3); font-size: 11.5px; margin-top: 2px; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; }
+.reason { color: var(--ink-2); font-size: 12px; }
+.yes { color: var(--low); font-weight: 700; } .no { color: var(--crit); font-weight: 700; }
+.admin { background: var(--crit); color: #fff; font-size: 9px; font-weight: 700;
+  padding: 2px 5px; border-radius: 2px; letter-spacing: 0.8px; margin-left: 7px;
+  vertical-align: 1px; }
+.empty { background: var(--panel); border: 1px solid var(--rule); border-radius: 5px;
+  padding: 26px; color: var(--ink-2); font-size: 13.5px; line-height: 1.6; }
+
+.note { background: var(--panel); border: 1px solid var(--rule);
+  border-left: 3px solid var(--mod); border-radius: 4px; padding: 16px 22px;
+  font-size: 13px; color: var(--ink-2); }
+.note ul { margin: 0; padding-left: 18px; } .note li { margin-bottom: 9px; }
+.note li:last-child { margin-bottom: 0; }
+.note strong { color: var(--ink); }
+
+.method { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; font-size: 12.5px;
+  color: var(--ink-2); }
+.method h4 { font-size: 12px; text-transform: uppercase; letter-spacing: 1px;
+  color: var(--ink); margin: 0 0 8px; }
+.method ul { margin: 0; padding-left: 17px; } .method li { margin-bottom: 6px; }
+
+footer { margin-top: 46px; padding-top: 18px; border-top: 1px solid var(--rule);
+  color: var(--ink-3); font-size: 11.5px; line-height: 1.6; }
+
+@media (max-width: 720px) {
+  dl { grid-template-columns: 1fr; }
+  dt { border-bottom: 0; padding-bottom: 2px; }
+  .method { grid-template-columns: 1fr; }
+}
+
+@media print {
+  @page { margin: 14mm; }
+  body { font-size: 10.5pt; }
+  .wrap { max-width: none; padding: 0; }
+  .masthead { padding: 0 0 12px; background: #fff; color: var(--ink);
+    border-bottom: 3px solid var(--navy); }
+  .masthead .sub { color: var(--ink-2); }
+  .eyebrow { color: var(--navy); }
+  .tag { border-color: var(--ink-3); color: var(--ink-3); }
+  h2 { margin-top: 22px; page-break-after: avoid; }
+  .band, .card, .clock div, .note, .empty { page-break-inside: avoid; }
+  .band-h { page-break-after: avoid; }
+  /* Repeat column headers when a band's table spans pages, or page two is unreadable. */
+  thead { display: table-header-group; }
+  tr { page-break-inside: avoid; }
+  a { text-decoration: none; color: inherit; }
+}
 </style>
 </head>
 <body>
-<div class="wrap">
 
-<h1>$(ConvertTo-SafeHtml $title)<span class="readonly">READ-ONLY</span></h1>
+<header class="masthead">
+<div class="wrap">
+<div class="eyebrow">Entra ID &middot; SMS and voice retirement</div>
+<h1>$(ConvertTo-SafeHtml $heading)<span class="tag">READ-ONLY</span></h1>
 <div class="sub">
+Migration impact assessment &middot;
 Tenant $(ConvertTo-SafeHtml $Summary.TenantId) &middot;
-Assessed $(ConvertTo-SafeHtml $now.ToString('yyyy-MM-dd HH:mm')) local &middot;
+$(ConvertTo-SafeHtml $now.ToString('d MMMM yyyy, HH:mm')) local &middot;
 $(ConvertTo-SafeHtml $Summary.EnabledUsersAssessed) enabled users evaluated &middot;
 No tenant settings were changed
 </div>
+</div>
+</header>
+
+<main class="wrap">
+
+<h2>Summary</h2>
+<div class="lede">
+$summaryHtml
+</div>
 
 <div class="clock">
-<div><div class="d">$daysToAutoEnable days</div><div class="t">Until 2026-09-01: users in SMS/voice scope auto-enabled for passkeys and nudged to register</div></div>
-<div><div class="d">$daysToRetirement days</div><div class="t">Until 2027-02-01: Microsoft-provided SMS/voice delivery retired. No opt-out</div></div>
+<div><div class="d">$daysToAutoEnable days</div><div class="t"><strong>1 September 2026</strong> &mdash; users in SMS or voice scope are auto-enabled for passkeys and nudged to register at next MFA sign-in.</div></div>
+<div><div class="d">$daysToRetirement days</div><div class="t"><strong>1 February 2027</strong> &mdash; Microsoft-provided SMS and voice delivery is retired. No opt-out. Also the deadline to have a customer-managed telecom provider configured.</div></div>
 </div>
 
 <h2>Exposure</h2>
+<div class="bar">$barSegments</div>
+<div class="legend">
+<span><i class="dot s-crit"></i>Critical $critical</span>
+<span><i class="dot s-high"></i>High $high</span>
+<span><i class="dot s-mod"></i>Moderate $moderate</span>
+<span><i class="dot s-low"></i>Low $low</span>
+</div>
+
 <div class="grid">
-<div class="card crit"><div class="n">$(ConvertTo-SafeHtml $Summary.Critical)</div><div class="l">Critical</div></div>
-<div class="card high"><div class="n">$(ConvertTo-SafeHtml $Summary.High)</div><div class="l">High</div></div>
-<div class="card mod"><div class="n">$(ConvertTo-SafeHtml $Summary.Moderate)</div><div class="l">Moderate</div></div>
-<div class="card low"><div class="n">$(ConvertTo-SafeHtml $Summary.Low)</div><div class="l">Low</div></div>
-<div class="card"><div class="n">$(ConvertTo-SafeHtml $Summary.MigrationCandidates)</div><div class="l">Migration candidates</div></div>
+<div class="card crit"><div class="n">$critical</div><div class="l">Critical</div></div>
+<div class="card high"><div class="n">$high</div><div class="l">High</div></div>
+<div class="card mod"><div class="n">$moderate</div><div class="l">Moderate</div></div>
+<div class="card low"><div class="n">$low</div><div class="l">Low</div></div>
+<div class="card"><div class="n">$candidates</div><div class="l">Migration candidates</div></div>
 <div class="card"><div class="n">$(ConvertTo-SafeHtml $Summary.PasswordlessCapableInScope)</div><div class="l">Already passwordless</div></div>
 </div>
 
@@ -591,39 +844,55 @@ No tenant settings were changed
 <dt>Voice exclude targets</dt><dd>$(ConvertTo-SafeHtml $(if ($Summary.VoicePolicyExclude) { $Summary.VoicePolicyExclude } else { 'none' }))</dd>
 <dt>Users in SMS scope</dt><dd>$(ConvertTo-SafeHtml $Summary.InSmsPolicyScope)</dd>
 <dt>Users in voice scope</dt><dd>$(ConvertTo-SafeHtml $Summary.InVoicePolicyScope)</dd>
-<dt>Oldest report row</dt><dd>$(ConvertTo-SafeHtml $Summary.OldestReportRowUtc) (registration report lags live directory state)</dd>
+<dt>Oldest report row</dt><dd>$(ConvertTo-SafeHtml $Summary.OldestReportRowUtc) &mdash; the registration report lags live directory state, so this is the age of the evidence</dd>
 <dt>Users missing from report</dt><dd>$(ConvertTo-SafeHtml $Summary.UsersMissingFromReport)</dd>
 </dl>
 
 <h2>Actionable findings ($($actionable.Count))</h2>
-<table>
-<thead><tr>
-<th>Risk</th><th>User</th><th>Type</th><th>AMP scope</th>
-<th>Phone methods</th><th>Passwordless</th><th>Why</th>
-</tr></thead>
-<tbody>
-$($tableRows -join "`n")$emptyState
-</tbody>
-</table>
+<div class="tablewrap">
+$findingsHtml
+</div>
 
 <h2>Read this before acting</h2>
 <div class="note">
 <ul>
 <li><strong>Critical rows are individual work.</strong> Privileged accounts that cannot satisfy MFA after retirement. Register a FIDO2 key or platform passkey and verify with a real test sign-in. Check emergency-access accounts specifically; they are the ones most likely to have a phone number attached that nobody has looked at in a year.</li>
+<li><strong>Register the new method before removing the phone method.</strong> Doing it in the other order creates the lockout you are working to prevent.</li>
 <li><strong>A large Moderate count means legacy per-user MFA.</strong> Those users have a phone method registered but do not resolve into modern AMP scope. They are still in scope for the retirement. This assessment cannot read legacy per-user MFA service settings; validate that population manually.</li>
 <li><strong>Policy scope is not effective sign-in behaviour.</strong> Conditional Access is not evaluated here. A user in AMP scope may never be challenged, and a user outside it may still be blocked by a grant control this assessment does not read.</li>
-<li><strong>Disabled users are excluded</strong> because the registration report does not return them. Accounts re-enabled after this run are not represented.</li>
 <li><strong>Guests follow a separate Microsoft timeline</strong> for passkey support. Validate B2B readiness independently before assuming a guest can register on the same schedule as a member.</li>
 </ul>
 </div>
 
+<h2>Scope and method</h2>
+<div class="method">
+<div>
+<h4>What was assessed</h4>
+<ul>
+<li>Every enabled user object returned by Graph, members and guests, with full pagination.</li>
+<li>SMS and voice authentication methods policy include and exclude targets, resolved to users through nested group membership.</li>
+<li>The authentication methods registration report, per user.</li>
+<li>Registration campaign state, which Microsoft sets to Microsoft managed for in-scope tenants on 1 September 2026.</li>
+</ul>
+</div>
+<div>
+<h4>What was not</h4>
+<ul>
+<li>Disabled users. The registration report does not return them.</li>
+<li>Legacy per-user MFA service settings. Reading them requires beta endpoints and broader permissions than this assessment holds.</li>
+<li>Conditional Access. Policy scope is not the same as being challenged at sign-in.</li>
+<li>Non-human accounts. Shared mailboxes and service accounts appear as ordinary users and should be reviewed before they become tickets.</li>
+</ul>
+</div>
+</div>
+
 <footer>
-Generated by Get-EntraSmsVoiceMigrationImpact.ps1 &middot; Read-only assessment, no tenant settings modified &middot;
-This report contains identity-security metadata including administrative status and registered authentication methods.
-Handle and retain it with the same controls you apply to a penetration test report.
+Generated by Get-EntraSmsVoiceMigrationImpact.ps1. Read-only assessment; every Microsoft Graph call was a GET and no tenant setting was modified.<br>
+This report contains identity-security metadata including administrative status and registered authentication methods. Handle and retain it with the same controls you apply to a penetration test report.<br>
+Timeline dates are per Microsoft Learn: passkeys by default and retirement of Microsoft-provided SMS and voice authentication. Customer-managed telecom providers can be configured from $($providerDate.ToString('d MMMM yyyy')).
 </footer>
 
-</div>
+</main>
 </body>
 </html>
 "@
