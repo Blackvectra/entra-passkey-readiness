@@ -243,6 +243,12 @@ $script:GraphBase = 'https://graph.microsoft.com/v1.0'
 # and named separately so the beta surface of this script is one line to audit.
 $script:GraphBeta = 'https://graph.microsoft.com/beta'
 
+# The two non-verdicts the PerUserMfaState column can carry. Both are deliberately not
+# blank: an empty cell in a spreadsheet reads as "no", and "no" is exactly the answer this
+# column must never give when it does not know.
+$script:PerUserMfaNotChecked = '(not checked)'
+$script:PerUserMfaUnreadable = '(unreadable)'
+
 # Group display names are resolved once and reused; the same exclusion group is commonly
 # referenced by both the SMS and voice method configurations.
 $script:GroupNameCache = @{}
@@ -373,6 +379,137 @@ function Get-GraphCollection {
         }
     }
     return $items.ToArray()
+}
+
+function Invoke-GraphBatch {
+    # The one non-GET call this script makes, and it is still a read: JSON batching is a
+    # POST by protocol, and every request inside the envelope is a GET. Kept here rather
+    # than folded into Invoke-GraphGet so the write-shaped verb is visible in one place.
+    param(
+        [Parameter(Mandatory)][string]$Uri,
+        [Parameter(Mandatory)][object[]]$Request,
+        [ValidateRange(1, 10)][int]$MaxAttempts = 5
+    )
+
+    # @() around $Request matters: ConvertTo-Json serialises a one-element array as a bare
+    # object, and Graph rejects a requests property that is not an array.
+    $body = @{ requests = @($Request) } | ConvertTo-Json -Depth 5 -Compress
+
+    $attempt = 0
+    while ($true) {
+        $attempt++
+        try {
+            return Invoke-MgGraphRequest -Method POST -Uri $Uri -Body $body `
+                -ContentType 'application/json' -OutputType PSObject -ErrorAction Stop
+        }
+        catch {
+            $status = $null
+            $responseProperty = $_.Exception.PSObject.Properties['Response']
+            if ($responseProperty -and $responseProperty.Value) {
+                $status = [int]$responseProperty.Value.StatusCode
+            }
+
+            if ($attempt -ge $MaxAttempts -or $status -notin @(429, 503, 504)) { throw }
+
+            $delaySeconds = [math]::Min(60, [math]::Pow(2, $attempt))
+            Write-Verbose "Graph returned HTTP $status for the batch at $Uri. Retry $attempt of $MaxAttempts in $delaySeconds second(s)."
+            Start-Sleep -Seconds $delaySeconds
+        }
+    }
+}
+
+function Get-LegacyPerUserMfaState {
+    <#
+    .SYNOPSIS
+        Reads legacy per-user MFA state for the given users, returning a hashtable of
+        object ID to state ('disabled', 'enabled', 'enforced', or the unreadable marker).
+    .DESCRIPTION
+        The assessment's one real blind spot. Users enabled for SMS or voice through the
+        legacy per-user MFA service settings are in scope for the retirement, and that
+        state has no v1.0 equivalent -- it is readable only at
+        GET /beta/users/{id}/authentication/requirements.
+
+        One call per user would be one call per user, so this batches twenty at a time.
+        Throttled or transient per-request failures are retried in later rounds; anything
+        still unanswered is marked unreadable rather than absent, because a missing entry
+        would read downstream as "no legacy MFA" and mark somebody safe who is not.
+    #>
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$UserId,
+        [ValidateRange(1, 20)][int]$BatchSize = 20,
+        [ValidateRange(1, 10)][int]$MaxRounds = 4
+    )
+
+    $state = @{}
+    if ($null -eq $UserId -or $UserId.Count -eq 0) { return $state }
+
+    $pending = [System.Collections.Generic.List[string]]::new()
+    foreach ($id in $UserId) { $pending.Add($id) }
+
+    for ($round = 1; $round -le $MaxRounds -and $pending.Count -gt 0; $round++) {
+        $retry = [System.Collections.Generic.List[string]]::new()
+
+        for ($offset = 0; $offset -lt $pending.Count; $offset += $BatchSize) {
+            $take = [math]::Min($BatchSize, $pending.Count - $offset)
+            $chunk = @($pending.GetRange($offset, $take))
+
+            # Correlation IDs are positional rather than the object ID: Graph requires them
+            # unique within the batch and does not promise the responses come back in order.
+            $requests = [System.Collections.Generic.List[object]]::new()
+            $byRequestId = @{}
+            for ($i = 0; $i -lt $chunk.Count; $i++) {
+                $requestId = [string]($i + 1)
+                $byRequestId[$requestId] = $chunk[$i]
+                $requests.Add(@{
+                        id     = $requestId
+                        method = 'GET'
+                        url    = "/users/$($chunk[$i])/authentication/requirements"
+                    })
+            }
+
+            $response = Invoke-GraphBatch -Uri "$script:GraphBeta/`$batch" -Request $requests.ToArray()
+            $answered = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+            foreach ($item in @($response.responses)) {
+                $requestId = [string](Get-PropertyValue $item 'id')
+                if (-not $byRequestId.ContainsKey($requestId)) { continue }
+                $subjectId = $byRequestId[$requestId]
+                [void]$answered.Add($subjectId)
+
+                $status = [int](Get-PropertyValue $item 'status')
+                if ($status -eq 200) {
+                    $itemBody = Get-PropertyValue $item 'body'
+                    $value = if ($itemBody) { [string](Get-PropertyValue $itemBody 'perUserMfaState') } else { '' }
+                    $state[$subjectId] = if ([string]::IsNullOrWhiteSpace($value)) { $script:PerUserMfaUnreadable } else { $value }
+                }
+                elseif ($status -in @(429, 503, 504)) {
+                    # A 429 inside a batch is not retried by anything above us: the batch
+                    # itself succeeded with 200.
+                    $retry.Add($subjectId)
+                }
+                else {
+                    $state[$subjectId] = $script:PerUserMfaUnreadable
+                }
+            }
+
+            # A request the batch simply did not answer is a transient shape, not a verdict.
+            foreach ($id in $chunk) {
+                if (-not $answered.Contains($id)) { $retry.Add($id) }
+            }
+        }
+
+        $pending = $retry
+        if ($pending.Count -gt 0 -and $round -lt $MaxRounds) {
+            $delaySeconds = [math]::Min(60, [math]::Pow(2, $round))
+            Write-Verbose "$($pending.Count) per-user MFA read(s) were throttled. Retry round $round in $delaySeconds second(s)."
+            Start-Sleep -Seconds $delaySeconds
+        }
+    }
+
+    # Never leave a user out of the result. An absent key reads downstream as no legacy
+    # exposure, which is the one wrong answer that costs somebody their sign-in.
+    foreach ($id in $pending) { $state[$id] = $script:PerUserMfaUnreadable }
+    return $state
 }
 
 function Get-GroupDisplayName {
@@ -507,22 +644,48 @@ function Get-RiskAssessment {
         [bool]$HasPhoneMethodRegistered,
         [bool]$IsPasswordlessCapable,
         [bool]$IsAdmin,
-        [string]$UserType
+        [string]$UserType,
+
+        # Legacy per-user MFA state, when -IncludeLegacyPerUserMfa read it. Empty means it
+        # was not read, which is the historical behaviour and still the default.
+        #
+        # A user enabled or enforced there is in scope for the retirement whatever the
+        # modern policy says, so this counts as scope. Without it the tenant's real
+        # exposure sits in Moderate looking like stale registrations, and the operator is
+        # told to go and check a portal by hand.
+        [string]$PerUserMfaState = ''
     )
 
-    if ($InPolicyScope -and $HasPhoneMethodRegistered -and -not $IsPasswordlessCapable) {
-        if ($IsAdmin) { return @('Critical', 'Privileged user is targeted, has a phone method registered, and is not passwordless-capable.') }
-        if ($UserType -eq 'Guest') { return @('High', 'Guest is targeted, has a phone method registered, and lacks a reported passwordless method; validate B2B passkey readiness.') }
-        return @('High', 'User is targeted, has a phone method registered, and is not passwordless-capable.')
+    $legacyMfaInForce = $PerUserMfaState -in @('enabled', 'enforced')
+    $legacyMfaConfirmedOff = $PerUserMfaState -eq 'disabled'
+    $inScope = $InPolicyScope -or $legacyMfaInForce
+
+    # Which scope caught the user changes the remediation, so the reason has to say. A
+    # modern-policy user is a campaign target; a legacy per-user MFA user has to be moved
+    # onto the modern policy first, because the campaign will not reach them where they are.
+    $via = if ($InPolicyScope -and $legacyMfaInForce) { 'SMS/voice policy and legacy per-user MFA' }
+    elseif ($InPolicyScope) { 'SMS/voice policy' }
+    else { "legacy per-user MFA ($PerUserMfaState)" }
+
+    if ($inScope -and $HasPhoneMethodRegistered -and -not $IsPasswordlessCapable) {
+        if ($IsAdmin) { return @('Critical', "Privileged user is in scope via $via, has a phone method registered, and is not passwordless-capable.") }
+        if ($UserType -eq 'Guest') { return @('High', "Guest is in scope via $via, has a phone method registered, and lacks a reported passwordless method; validate B2B passkey readiness.") }
+        return @('High', "User is in scope via $via, has a phone method registered, and is not passwordless-capable.")
     }
-    if ($InPolicyScope -and -not $IsPasswordlessCapable) {
-        return @('High', 'User is targeted by SMS/voice policy and is not passwordless-capable.')
+    if ($inScope -and -not $IsPasswordlessCapable) {
+        return @('High', "User is in scope via $via and is not passwordless-capable.")
     }
     if ($HasPhoneMethodRegistered -and -not $IsPasswordlessCapable) {
+        # Moderate exists to say "there may be legacy per-user MFA here, go and look". Once
+        # the run has actually looked and found none, saying it again sends a technician to
+        # a portal to confirm something already confirmed.
+        if ($legacyMfaConfirmedOff) {
+            return @('Moderate', 'Phone method is registered outside every resolved scope, and legacy per-user MFA is disabled for this user; treat as a stale registration.')
+        }
         return @('Moderate', 'Phone method is registered outside resolved modern policy scope; validate legacy per-user MFA exposure.')
     }
-    if ($InPolicyScope -and $IsPasswordlessCapable) {
-        return @('Low', 'User is targeted but already reports a policy-allowed passwordless method.')
+    if ($inScope -and $IsPasswordlessCapable) {
+        return @('Low', "User is in scope via $via but already reports a policy-allowed passwordless method.")
     }
     if ($HasPhoneMethodRegistered -and $IsPasswordlessCapable) {
         return @('Low', 'Phone method remains registered, but user reports a policy-allowed passwordless method.')
@@ -593,35 +756,51 @@ function Get-RemediationStep {
         [Parameter(Mandatory)][string]$Risk,
         [bool]$HasPhoneMethodRegistered,
         [string]$UserType,
-        [string]$PhoneMethodsRegistered
+        [string]$PhoneMethodsRegistered,
+
+        # See Get-RiskAssessment. Empty means the legacy state was not read.
+        [string]$PerUserMfaState = ''
     )
 
     # Named so the instruction says which registration to remove, not "the phone method".
     $methods = if ([string]::IsNullOrWhiteSpace($PhoneMethodsRegistered)) { 'the phone method' } else { $PhoneMethodsRegistered }
 
+    # A user held in legacy per-user MFA needs one step before anything else works: the
+    # modern registration campaign does not reach them, so a passkey push aimed at them
+    # lands nowhere and the run after this one reports the same user unchanged.
+    $legacyPrefix = if ($PerUserMfaState -in @('enabled', 'enforced')) {
+        "This user is $PerUserMfaState in legacy per-user MFA. Convert them to the modern authentication methods policy first, or the registration campaign will not reach them. Then: "
+    } else { '' }
+
     # Every sequence below registers the surviving method before removing the phone
     # method. The other order creates the lockout the whole exercise exists to prevent.
     switch ($Risk) {
         'Critical' {
-            return "Contact the user and schedule a session; do not leave a privileged account to a self-service nudge. Register a FIDO2 security key or platform passkey, confirm with a real test sign-in, then remove $methods. Check that the account recovery path does not also depend on a phone number, and if this is an emergency-access account, confirm at least one break-glass account uses a method outside the retirement scope."
+            return $legacyPrefix + "Contact the user and schedule a session; do not leave a privileged account to a self-service nudge. Register a FIDO2 security key or platform passkey, confirm with a real test sign-in, then remove $methods. Check that the account recovery path does not also depend on a phone number, and if this is an emergency-access account, confirm at least one break-glass account uses a method outside the retirement scope."
         }
         'High' {
             if ($UserType -eq 'Guest') {
-                return "Include in the passkey registration campaign, but confirm this guest can register before committing to a date: B2B and internal guest passkey support follows a separate Microsoft timeline. Leave $methods in place until a surviving method is confirmed working."
+                return $legacyPrefix + "Include in the passkey registration campaign, but confirm this guest can register before committing to a date: B2B and internal guest passkey support follows a separate Microsoft timeline. Leave $methods in place until a surviving method is confirmed working."
             }
             if ($HasPhoneMethodRegistered) {
-                return "Include in the passkey registration campaign. Direct the user to register a passkey or Microsoft Authenticator for their device type, confirm the registration landed, then remove $methods."
+                return $legacyPrefix + "Include in the passkey registration campaign. Direct the user to register a passkey or Microsoft Authenticator for their device type, confirm the registration landed, then remove $methods."
             }
-            return 'Include in the passkey registration campaign. The user is targeted by policy with no method that survives the retirement, so they will be auto-enabled and nudged on 2026-09-01 whether or not you act first.'
+            return $legacyPrefix + 'Include in the passkey registration campaign. The user is in scope with no method that survives the retirement, so they will be auto-enabled and nudged on 2026-09-01 whether or not you act first.'
         }
         'Moderate' {
-            return "Check this user in the legacy per-user MFA service settings. If they are enabled for SMS or voice there, convert them to the modern authentication methods policy so the exposure becomes measurable, then remediate as High. If the registration is simply stale, remove $methods once a phishing-resistant method is confirmed."
+            # Two different instructions, because the run may already have answered the
+            # question this band exists to raise. Sending somebody to a portal to confirm
+            # something the tool confirmed is how a checked tenant still costs an afternoon.
+            if ($PerUserMfaState -eq 'disabled') {
+                return "No legacy per-user MFA exposure: this run read the per-user MFA state and it is disabled, so the phone registration is stale rather than a live sign-in path. Confirm a phishing-resistant method is registered, then remove $methods."
+            }
+            return "Check this user in the legacy per-user MFA service settings. If they are enabled for SMS or voice there, convert them to the modern authentication methods policy so the exposure becomes measurable, then remediate as High. If the registration is simply stale, remove $methods once a phishing-resistant method is confirmed. Re-run with -IncludeLegacyPerUserMfa to have this answered automatically."
         }
         'Low' {
             if ($HasPhoneMethodRegistered) {
                 return "No action required before the retirement; the user already holds a surviving method. Optionally remove $methods to reduce account-recovery attack surface, which is worth doing independently of this change."
             }
-            return 'No action required. The user is in policy scope but already holds a method that survives the retirement. Expect a registration nudge on 2026-09-01.'
+            return 'No action required. The user is in scope but already holds a method that survives the retirement. Expect a registration nudge on 2026-09-01.'
         }
         default {
             return 'No action required. No resolved exposure to the SMS and voice retirement.'
@@ -1660,6 +1839,22 @@ $script:UnrecognisedMethods = [System.Collections.Generic.HashSet[string]]::new(
 $script:NoReportRowMarker = '(no row in registration report)'
 $nonMfaMethods = @('email', 'securityQuestion', 'temporaryAccessPass', 'temporaryAccessPassMultiUse', 'appPassword')
 
+# The legacy per-user MFA read, when asked for. A whole-tenant failure here is reported and
+# survived rather than thrown: the rest of the assessment is still worth having, and the
+# column says '(unreadable)' for everyone so nobody reads the run as having checked.
+$perUserMfaStates = @{}
+if ($IncludeLegacyPerUserMfa) {
+    $batches = [math]::Ceiling($enabledUsers.Count / 20)
+    Write-Host "Reading legacy per-user MFA state for $($enabledUsers.Count) users ($batches batched request(s), beta endpoint)..." -ForegroundColor Cyan
+    try {
+        $perUserMfaStates = Get-LegacyPerUserMfaState -UserId @($enabledUserIndex.Keys)
+    }
+    catch {
+        Write-Warning "Legacy per-user MFA could not be read, so that exposure is unassessed: $($_.Exception.Message)"
+        Write-Warning 'The most common cause is missing Policy.Read.All. Every row will read (unreadable) rather than being assumed clean.'
+    }
+}
+
 $rows = foreach ($user in $enabledUsers) {
     $id = [string](Get-PropertyValue $user 'id')
     $registration = $registrationIndex[$id]
@@ -1680,8 +1875,15 @@ $rows = foreach ($user in $enabledUsers) {
     $isAdmin = if ($registration) { [bool](Get-PropertyValue $registration 'isAdmin') } else { $false }
     $userType = [string](Get-PropertyValue $user 'userType')
 
+    # Three states with three meanings, and they must not collapse into each other:
+    # not asked for, asked for but unanswered, and a real verdict.
+    $perUserMfaState = if (-not $IncludeLegacyPerUserMfa) { $script:PerUserMfaNotChecked }
+    elseif ($perUserMfaStates.ContainsKey($id)) { [string]$perUserMfaStates[$id] }
+    else { $script:PerUserMfaUnreadable }
+
     $risk = Get-RiskAssessment -InPolicyScope $inPolicyScope -HasPhoneMethodRegistered $hasPhoneMethod `
-        -IsPasswordlessCapable $isPasswordlessCapable -IsAdmin $isAdmin -UserType $userType
+        -IsPasswordlessCapable $isPasswordlessCapable -IsAdmin $isAdmin -UserType $userType `
+        -PerUserMfaState $perUserMfaState
 
     $phoneMethodList = ($matchingMethods -join '; ')
 
@@ -1715,7 +1917,8 @@ $rows = foreach ($user in $enabledUsers) {
         'No action. Excluded by pattern at run time. Confirm this is a non-human account before treating the exclusion as correct.'
     } else {
         Get-RemediationStep -Risk $risk[0] -HasPhoneMethodRegistered $hasPhoneMethod `
-            -UserType $userType -PhoneMethodsRegistered $phoneMethodList
+            -UserType $userType -PhoneMethodsRegistered $phoneMethodList `
+            -PerUserMfaState $perUserMfaState
     }
 
     # A user with no row in the registration report is not the same as a user with nothing
@@ -1724,10 +1927,14 @@ $rows = foreach ($user in $enabledUsers) {
     # is stated in the column somebody actually reads.
     $allMethods = if ($registration) { ($methods -join '; ') } else { $script:NoReportRowMarker }
 
-    # Fourteen columns, chosen so the file is readable in Excel. The registration report
+    # Fifteen columns, chosen so the file is readable in Excel. The registration report
     # also returns isMfaCapable, isMfaRegistered, systemPreferredAuthenticationMethods and
     # a per-row timestamp; none of them changed what anybody did with the file, and the
     # evidence age is still reported once, as OldestReportRowUtc in the summary.
+    #
+    # PerUserMfaState is always written, even on a run that did not ask for it. A column
+    # that appears and disappears between runs breaks Compare-EntraSmsVoiceAssessment and
+    # every spreadsheet built on the file; a column that says '(not checked)' does not.
     [PSCustomObject][ordered]@{
         Risk                  = $rowRisk
         Reason                = $rowReason
@@ -1739,6 +1946,7 @@ $rows = foreach ($user in $enabledUsers) {
         IsAdmin               = $isAdmin
         InSmsPolicyScope      = $inSmsScope
         InVoicePolicyScope    = $inVoiceScope
+        PerUserMfaState       = $perUserMfaState
         PhoneMethodsRegistered = $phoneMethodList
         AllMethodsRegistered  = $allMethods
         IsPasswordlessCapable = $isPasswordlessCapable
@@ -1758,8 +1966,13 @@ $rows = @($rows)
 # audit what the pattern removed. Without this clause an excluded user who is outside both
 # scopes and holds no phone method is dropped from the default export entirely, and a
 # pattern that quietly matched a real person leaves no trace anywhere.
+#
+# Legacy per-user MFA is in the filter for a third reason: it is a scope the two boolean
+# columns do not represent. A user enforced there with no phone method registered yet is
+# High and belongs in the file, but matches none of the other terms.
 $affectedRows = @($rows | Where-Object {
-    $_.InSmsPolicyScope -or $_.InVoicePolicyScope -or $_.PhoneMethodsRegistered -or $_.Risk -eq 'Excluded'
+    $_.InSmsPolicyScope -or $_.InVoicePolicyScope -or $_.PhoneMethodsRegistered -or
+    $_.Risk -eq 'Excluded' -or $_.PerUserMfaState -in @('enabled', 'enforced')
 })
 
 # Excluded rows stay in the export as a record of what the pattern removed, and are kept
@@ -1807,6 +2020,11 @@ $summary = [PSCustomObject][ordered]@{
     VoicePolicyExclude         = ($voiceScope.ExcludeNotes -join ' | ')
     InSmsPolicyScope           = @($rows | Where-Object InSmsPolicyScope).Count
     InVoicePolicyScope         = @($rows | Where-Object InVoicePolicyScope).Count
+    # The state of the blind spot, stated on every run rather than only when it is closed.
+    # A summary that simply omits legacy MFA on a default run reads as a clean tenant.
+    LegacyPerUserMfaChecked    = [bool]$IncludeLegacyPerUserMfa
+    LegacyPerUserMfaInForce    = @($rows | Where-Object { $_.PerUserMfaState -in @('enabled', 'enforced') }).Count
+    LegacyPerUserMfaUnreadable = @($rows | Where-Object { $_.PerUserMfaState -eq $script:PerUserMfaUnreadable }).Count
     MigrationCandidates        = $candidateRows.Count
     Critical                   = @($candidateRows | Where-Object Risk -eq 'Critical').Count
     High                       = @($candidateRows | Where-Object Risk -eq 'High').Count
@@ -1892,7 +2110,23 @@ if ($summary.UnrecognisedMethods) {
     Write-Host "Unrecognised authentication methods seen: $($summary.UnrecognisedMethods). Treated as NOT surviving the retirement, so affected users are reported as more exposed rather than less." -ForegroundColor Yellow
 }
 
-Write-Host '2026-09-01  Users in SMS/voice scope auto-enabled for passkeys; registration campaign set to Microsoft managed.' -ForegroundColor Yellow
+# Legacy per-user MFA is the one exposure this tool can miss entirely, so its state is
+# reported on every run: checked and clean, checked and found, or not checked at all.
+if (-not $IncludeLegacyPerUserMfa) {
+    Write-Host "`nLegacy per-user MFA was NOT checked, so this run cannot rule it out. Users enabled for SMS or voice there are in scope for the retirement and will not appear above as in scope." -ForegroundColor Yellow
+    Write-Host 'Re-run with -IncludeLegacyPerUserMfa to close that gap. It needs no extra permission beyond the Policy.Read.All this run already used.' -ForegroundColor Yellow
+}
+elseif ($summary.LegacyPerUserMfaInForce -gt 0) {
+    Write-Host "`n$($summary.LegacyPerUserMfaInForce) user(s) are enabled or enforced in legacy per-user MFA. They are in scope for the retirement whatever the modern policy says, and the registration campaign will not reach them until they are converted to it." -ForegroundColor Red
+}
+else {
+    Write-Host "`nNo user is enabled or enforced in legacy per-user MFA. That exposure is ruled out for this tenant." -ForegroundColor Green
+}
+if ($summary.LegacyPerUserMfaUnreadable -gt 0) {
+    Write-Host "$($summary.LegacyPerUserMfaUnreadable) user(s) returned no readable per-user MFA state. They are marked (unreadable), not clean; re-run before treating this tenant as assessed." -ForegroundColor Yellow
+}
+
+Write-Host "`n2026-09-01  Users in SMS/voice scope auto-enabled for passkeys; registration campaign set to Microsoft managed." -ForegroundColor Yellow
 Write-Host '2026-10-30  Customer-managed telecom providers can first be configured via the Microsoft Security Store.' -ForegroundColor Yellow
 Write-Host '2027-02-01  Microsoft-provided SMS/voice delivery retired. No opt-out. Also the deadline to have a customer-managed telecom provider configured.' -ForegroundColor Red
 Write-Host 'Interpretation: Critical/High rows deserve validation first; Moderate rows may reveal legacy per-user MFA exposure.' -ForegroundColor Yellow

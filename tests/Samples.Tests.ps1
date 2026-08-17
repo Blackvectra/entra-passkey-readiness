@@ -38,10 +38,35 @@ Describe 'Example-MigrationImpact.csv' {
         # The registration report offers more fields than this. They were dropped because
         # none of them changed what anybody did with the file.
         $columns = $script:Assessment[0].PSObject.Properties.Name
-        $columns.Count | Should -BeLessOrEqual 14
+        $columns.Count | Should -BeLessOrEqual 15
         $columns | Should -Not -Contain 'IsMfaCapable'
         $columns | Should -Not -Contain 'SystemPreferredMethods'
         $columns | Should -Not -Contain 'RegistrationReportLastUpdatedUtc'
+    }
+
+    It 'has exactly the schema the script writes, in the same order' {
+        # The sample is what somebody maps their PSA import against before they have ever
+        # run the tool. A sample one column behind the script is worse than no sample: it
+        # is a mapping that imports cleanly and puts the wrong data in the wrong field.
+        #
+        # Read out of the script rather than restated here, so this cannot be satisfied by
+        # updating the test. Regenerate with examples/New-ExampleOutput.ps1.
+        $errors = $null
+        $tokens = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+            (Get-AssessmentScriptPath), [ref]$tokens, [ref]$errors)
+
+        $rowLiteral = $ast.FindAll({
+                param($node)
+                if ($node -isnot [System.Management.Automation.Language.HashtableAst]) { return $false }
+                $keys = @($node.KeyValuePairs.Item1.Extent.Text)
+                return (@('Risk', 'Reason', 'NextStep', 'UserId') | Where-Object { $_ -in $keys }).Count -eq 4
+            }, $true) | Select-Object -First 1
+
+        $rowLiteral | Should -Not -BeNullOrEmpty -Because 'the assessment row object should be findable in the script'
+        $schema = @($rowLiteral.KeyValuePairs.Item1.Extent.Text)
+
+        $script:Assessment[0].PSObject.Properties.Name | Should -Be $schema
     }
 
     It 'still carries every column the diff tool matches on' {

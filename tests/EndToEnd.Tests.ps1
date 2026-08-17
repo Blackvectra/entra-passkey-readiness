@@ -33,13 +33,55 @@ function Get-MgContext {
         Scopes   = @('Policy.Read.All','AuditLog.Read.All','User.Read.All','GroupMember.Read.All')
     }
 }
+
+# Legacy per-user MFA fixture. Rosalind is the shape the whole feature exists for: a phone
+# method outside every modern policy scope, which reads as a stale registration until you
+# look here and find her enforced. u-clear is the second shape -- in scope via legacy only,
+# with no phone method at all, so nothing else in the row would keep her in the export.
+$script:LegacyMfaState = @{
+    'u-admin'  = 'disabled'; 'u-member' = 'disabled'; 'u-safe' = 'disabled'
+    'u-legacy' = 'enforced'; 'u-clear'  = 'enabled';  'u-svc'  = 'disabled'
+}
+$script:ThrottledOnce = @{}
+
 function Invoke-MgGraphRequest {
     param(
         [string]$Method,
         [string]$Uri,
         [string]$OutputType,
+        [string]$Body,
+        [string]$ContentType,
         [Parameter(ValueFromRemainingArguments)]$Rest
     )
+
+    if ($Uri -match '/beta/\$batch$') {
+        if ($Method -ne 'POST') { throw "Stub Graph expected POST to \$batch, got $Method" }
+        $parsed = $Body | ConvertFrom-Json
+        if (@($parsed.requests).Count -gt 20) { throw 'Stub Graph received more than 20 requests in one batch.' }
+
+        $responses = foreach ($request in @($parsed.requests)) {
+            $subject = ($request.url -replace '^/users/', '') -replace '/authentication/requirements$', ''
+
+            if ($subject -eq 'u-noreport') {
+                # Denied for this one principal. Must land as (unreadable), never as clean.
+                [PSCustomObject]@{ id = $request.id; status = 403
+                    body = [PSCustomObject]@{ error = [PSCustomObject]@{ code = 'Authorization_RequestDenied' } } }
+            }
+            elseif ($subject -eq 'u-member' -and -not $script:ThrottledOnce.ContainsKey($subject)) {
+                # A 429 inside a batch: the batch itself returns 200, so nothing outside
+                # the per-request loop will ever retry this. Succeeds on the second round.
+                $script:ThrottledOnce[$subject] = $true
+                [PSCustomObject]@{ id = $request.id; status = 429; body = $null }
+            }
+            else {
+                [PSCustomObject]@{ id = $request.id; status = 200
+                    body = [PSCustomObject]@{ perUserMfaState = $script:LegacyMfaState[$subject] } }
+            }
+        }
+        # Deliberately reversed: Graph does not promise response order, and correlation is
+        # by id. A stub that answers in request order would hide an ordering assumption.
+        return [PSCustomObject]@{ responses = @($responses | Sort-Object -Property id -Descending) }
+    }
 
     if ($Uri -match '/users\?') {
         return [PSCustomObject]@{ value = @(
@@ -166,13 +208,24 @@ Describe 'A default run against a stubbed tenant' {
         (Join-Path $script:OutDir 'assessment.html') | Should -Not -Exist
     }
 
-    It 'writes the trimmed fourteen-column schema' {
+    It 'writes the trimmed fifteen-column schema' {
         $columns = (Import-Csv -LiteralPath $script:CsvPath)[0].PSObject.Properties.Name
         $columns | Should -Be @(
             'Risk', 'Reason', 'NextStep', 'BlockedAtRetirement', 'DisplayName', 'UserPrincipalName',
-            'UserType', 'IsAdmin', 'InSmsPolicyScope', 'InVoicePolicyScope',
+            'UserType', 'IsAdmin', 'InSmsPolicyScope', 'InVoicePolicyScope', 'PerUserMfaState',
             'PhoneMethodsRegistered', 'AllMethodsRegistered', 'IsPasswordlessCapable', 'UserId'
         )
+    }
+
+    It 'writes PerUserMfaState on a run that did not check it, rather than dropping the column' {
+        # A column that appears only on some runs breaks the diff tool and every
+        # spreadsheet built on the file. And it must not be blank: an empty cell reads
+        # as "no legacy MFA", which is the one answer this column must never imply.
+        $rows = @(Import-Csv -LiteralPath $script:CsvPath)
+        foreach ($row in $rows) { $row.PerUserMfaState | Should -Be '(not checked)' }
+
+        $script:Summary.LegacyPerUserMfaChecked | Should -BeFalse
+        $script:Summary.LegacyPerUserMfaInForce | Should -Be 0
     }
 
     It 'excludes the disabled user, because the registration report does not return them' {
@@ -351,5 +404,111 @@ Describe 'A run with -ExcludeUpnPattern' {
     It 'does not touch anybody who does not match' {
         $rosalind = $script:ExRows | Where-Object UserPrincipalName -eq 'rosalind@fabrikam-example.com'
         $rosalind.Risk | Should -Be 'Moderate'
+    }
+}
+
+Describe 'A run with -IncludeLegacyPerUserMfa' {
+
+    # The tenant is the same one the default run assessed. Everything that changes here
+    # changes because the run read a state the default run could not see, which is the
+    # entire argument for the switch: same directory, different verdict.
+
+    BeforeAll {
+        $pwshPath = if ($IsWindows) { Join-Path $PSHOME 'pwsh.exe' } else { Join-Path $PSHOME 'pwsh' }
+        if (-not (Test-Path -LiteralPath $pwshPath)) { $pwshPath = 'pwsh' }
+
+        $script:LegacyCsv = Join-Path $script:OutDir 'legacy.csv'
+        $script:LegacySummaryPath = Join-Path $script:Root 'legacy-summary.json'
+        $legacyStdErr = Join-Path $script:Root 'legacy-stderr.txt'
+
+        $legacyCommand = @"
+`$env:PSModulePath = '$(Join-Path $script:Root 'Modules')' + [IO.Path]::PathSeparator + `$env:PSModulePath
+`$summary = & '$(Get-AssessmentScriptPath)' -TenantId 'fabrikam-example.com' ``
+    -OutputPath '$script:LegacyCsv' -IncludeLegacyPerUserMfa -SkipAclHardening
+`$summary | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath '$script:LegacySummaryPath'
+"@
+
+        $legacyProcess = Start-Process -FilePath $pwshPath -PassThru -Wait -NoNewWindow `
+            -RedirectStandardOutput (Join-Path $script:Root 'legacy-stdout.txt') `
+            -RedirectStandardError $legacyStdErr `
+            -ArgumentList @('-NoProfile', '-NonInteractive', '-Command', $legacyCommand)
+
+        $script:LegacyExit = $legacyProcess.ExitCode
+        $script:LegacyStdErr = if (Test-Path $legacyStdErr) { Get-Content -LiteralPath $legacyStdErr -Raw } else { '' }
+        $script:LegacyRows = if (Test-Path $script:LegacyCsv) { @(Import-Csv -LiteralPath $script:LegacyCsv) } else { @() }
+        $script:LegacySummary = if (Test-Path $script:LegacySummaryPath) {
+            Get-Content -LiteralPath $script:LegacySummaryPath -Raw | ConvertFrom-Json
+        } else { $null }
+    }
+
+    It 'completes without error' {
+        $script:LegacyExit | Should -Be 0 -Because "the run failed: $script:LegacyStdErr"
+    }
+
+    It 'promotes the user the default run could only guess at' {
+        # Rosalind: officePhone, outside both modern policy scopes, not passwordless-capable.
+        # The default run can say no more than "go and check the legacy portal", and files
+        # her as Moderate. Reading the state finds her enforced, which is real exposure.
+        $baseline = $script:Rows_Default = @(Import-Csv -LiteralPath $script:CsvPath)
+        ($baseline | Where-Object UserPrincipalName -eq 'rosalind@fabrikam-example.com').Risk |
+            Should -Be 'Moderate' -Because 'this is what the tenant looks like without the switch'
+
+        $rosalind = $script:LegacyRows | Where-Object UserPrincipalName -eq 'rosalind@fabrikam-example.com'
+        $rosalind.PerUserMfaState | Should -Be 'enforced'
+        $rosalind.Risk | Should -Be 'High'
+        $rosalind.Reason | Should -Match 'legacy per-user MFA'
+        $rosalind.NextStep | Should -Match 'Convert them to the modern authentication methods policy first'
+    }
+
+    It 'keeps a user who is in scope through legacy MFA alone' {
+        # In neither policy scope and holding no phone method, so every other term in the
+        # export filter is false. Without legacy scope being a term of its own the row is
+        # dropped, and the tenant's only legacy-scoped account never reaches the file.
+        $clear = $script:LegacyRows | Where-Object UserPrincipalName -eq 'clear@fabrikam-example.com'
+
+        $clear | Should -Not -BeNullOrEmpty
+        $clear.PerUserMfaState | Should -Be 'enabled'
+        $clear.InSmsPolicyScope | Should -Be 'False'
+        $clear.PhoneMethodsRegistered | Should -BeNullOrEmpty
+        # Passwordless-capable, so in scope but mitigated.
+        $clear.Risk | Should -Be 'Low'
+    }
+
+    It 'stops telling people to check a portal it has already checked' {
+        $marcus = $script:LegacyRows | Where-Object UserPrincipalName -eq 'marcus@fabrikam-example.com'
+        $marcus.PerUserMfaState | Should -Be 'disabled'
+
+        # Dale is Critical either way; what changes is that no row still carries the
+        # "go and look in the legacy portal yourself" instruction.
+        $script:LegacyRows.NextStep | Should -Not -Contain 'Check this user in the legacy per-user MFA service settings.'
+    }
+
+    It 'retries a request throttled inside the batch rather than marking it unreadable' {
+        # A 429 on an individual request comes back inside a batch that itself returned
+        # 200, so nothing above the per-request loop will ever retry it. Marcus is
+        # throttled on his first appearance and answered on the second.
+        $marcus = $script:LegacyRows | Where-Object UserPrincipalName -eq 'marcus@fabrikam-example.com'
+        $marcus.PerUserMfaState | Should -Be 'disabled'
+    }
+
+    It 'marks a denied read unreadable rather than clean' {
+        # The failure that matters: a user Graph will not answer for must never read as
+        # having no legacy MFA, because that is indistinguishable from a real all-clear.
+        $ghost = $script:LegacyRows | Where-Object UserPrincipalName -eq 'ghost@fabrikam-example.com'
+
+        $ghost.PerUserMfaState | Should -Be '(unreadable)'
+        $script:LegacySummary.LegacyPerUserMfaUnreadable | Should -Be 1
+    }
+
+    It 'reports what it found in the summary' {
+        $script:LegacySummary.LegacyPerUserMfaChecked | Should -BeTrue
+        $script:LegacySummary.LegacyPerUserMfaInForce | Should -Be 2
+    }
+
+    It 'still changes nothing in the tenant' {
+        # The batch envelope is a POST, which is the only non-GET this script issues. The
+        # stub throws on any other method and on any URL that is not a requirements read.
+        $script:LegacyStdErr | Should -Not -Match 'unexpected URI'
+        $script:LegacyStdErr | Should -Not -Match 'expected POST'
     }
 }
