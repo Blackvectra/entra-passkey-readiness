@@ -40,11 +40,35 @@
     migration candidates: users in SMS/voice policy scope or users with a
     phone-based authentication method registered.
 
+.PARAMETER HtmlReport
+    Also writes a self-contained HTML client report beside the CSVs. Off by default: a run
+    produces spreadsheets, which is what gets attached to a ticket and worked from.
+
+.PARAMETER ExportTickets
+    Also writes a PSA-importable ticket queue. Off by default: most teams raise their own
+    tickets and attach the action list, which needs no extra switch.
+
+.PARAMETER TicketHistoryPath
+    Records which users have already had a ticket raised, so a re-run does not raise a
+    second one for everyone who has not remediated yet. A user returns to the queue only
+    if their risk band got worse. Defaults to a file beside the ticket CSV; if you write
+    to dated output folders, point this at a stable path per customer or the history will
+    not be found.
+
+.PARAMETER IgnoreTicketHistory
+    Ticket every actionable user regardless of previous runs. For rebuilding a queue that
+    was lost, not for routine use.
+
 .PARAMETER PassThru
     Emits the per-user assessment objects to the pipeline in addition to the summary.
 
 .EXAMPLE
+    # Assess a tenant. Writes two spreadsheets: the full assessment and the action list.
     .\Get-EntraSmsVoiceMigrationImpact.ps1 -TenantId contoso.onmicrosoft.com
+
+.EXAMPLE
+    .\Get-EntraSmsVoiceMigrationImpact.ps1 -TenantId contoso.onmicrosoft.com `
+        -CustomerName "Contoso Manufacturing" -OutputPath D:\ClientEvidence\contoso.csv
 
 .EXAMPLE
     .\Get-EntraSmsVoiceMigrationImpact.ps1 -IncludeUnaffected -OutputPath C:\Reports\Entra-Migration.csv -Verbose
@@ -66,8 +90,8 @@
     Data source limitations:
       - userRegistrationDetails does not return disabled users. This script reads
         accountEnabled separately and assesses enabled users only.
-      - The registration report has reporting latency. RegistrationReportLastUpdatedUtc
-        is included per row so the age of the evidence is visible.
+      - The registration report has reporting latency. OldestReportRowUtc is reported in
+        the summary so the age of the evidence is visible.
       - Entra does not store "SMS" and "voice" as separate registrations. It stores a
         phone number with a type, and the type determines capability. mobilePhone can
         serve both SMS and voice; officePhone is voice-only. There is no clean split.
@@ -96,36 +120,41 @@ param(
     [ValidatePattern('^[0-9a-fA-F]{40}$')]
     [string]$CertificateThumbprint,
 
+    # Defaults to a timestamped file beside the script, with -CustomerName folded into the
+    # filename when supplied. Computed after the param block so it can see -CustomerName.
     [Parameter()]
-    [ValidateNotNullOrEmpty()]
-    [string]$OutputPath = (Join-Path -Path $(if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }) -ChildPath "EntraSmsVoiceMigrationImpact_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"),
+    [string]$OutputPath,
 
     [Parameter()]
     [switch]$IncludeUnaffected,
 
-    # Produces a self-contained HTML report next to the CSV. No external assets, no CDN,
-    # no JavaScript dependencies, so it survives being emailed or archived offline.
-    [Parameter()]
-    [switch]$HtmlReport,
-
     [Parameter()]
     [string]$CustomerName,
 
-    # Writes a UPN-only CSV suitable for bulk-importing the migration security group that
-    # Microsoft's guidance tells you to create as step one. Read-only: it produces a list,
-    # it does not create or populate any group.
+    # Also writes the self-contained HTML client report. Off by default: a run produces
+    # spreadsheets, because that is what gets attached to a ticket and worked from. The
+    # HTML is for when you want something to hand a client directly.
     [Parameter()]
-    [switch]$ExportRemediationGroup,
+    [switch]$HtmlReport,
 
-    # Writes a PSA-importable ticket queue. Critical and High users get individual tickets;
-    # everything else rolls into batch tickets, because 400 individual tickets is a backlog
-    # nobody works, not a remediation plan.
+    # Writes a PSA-importable ticket queue. Off by default: most teams raise their own
+    # tickets and attach the action list, which needs no extra switch.
     [Parameter()]
     [switch]$ExportTickets,
 
     [Parameter()]
     [ValidateRange(1, 500)]
     [int]$MaxIndividualTickets = 50,
+
+    # Users already ticketed by a previous run, so a re-run does not raise a second ticket
+    # for everyone who has not remediated yet. Defaults to a file beside the ticket CSV.
+    # If you write to dated output folders, point this at a stable path per customer or the
+    # history will not be found. Pass -IgnoreTicketHistory to deliberately re-raise.
+    [Parameter()]
+    [string]$TicketHistoryPath,
+
+    [Parameter()]
+    [switch]$IgnoreTicketHistory,
 
     # Output files are restricted to the file owner and local Administrators by default.
     # Use this only where the filesystem rejects ACL changes and you control access another way.
@@ -138,6 +167,30 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if (-not $OutputPath) {
+    # Every artefact of a run is named from this one path, so folding the customer in here
+    # names all of them at once. Running five clients back to back otherwise produces five
+    # sets of files distinguishable only by timestamp, which is a poor thing to be sorting
+    # out at the point you are attaching one of them to a ticket.
+    #
+    # The tool stem stays at the front: the .gitignore rule that stops a live export being
+    # committed anchors on it, and a filename that quietly slips past that rule is worse
+    # than one that reads slightly less naturally.
+    $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+    $baseDirectory = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+
+    $customerPart = ''
+    if ($CustomerName) {
+        # Operator-supplied and often pasted from a PSA export, so treat it as untrusted:
+        # strip path characters and traversal before it reaches a filename.
+        $safeCustomer = ($CustomerName -replace '[\\/:*?"<>|]', '_') -replace '\s+', '-'
+        $safeCustomer = [System.IO.Path]::GetFileName($safeCustomer.Trim().Trim('.'))
+        if ($safeCustomer) { $customerPart = "$safeCustomer`_" }
+    }
+
+    $OutputPath = Join-Path -Path $baseDirectory -ChildPath "EntraSmsVoiceMigrationImpact_$customerPart$stamp.csv"
+}
 
 # Graph endpoints are declared once so the read-only surface of this script is auditable at a glance.
 $script:GraphBase = 'https://graph.microsoft.com/v1.0'
@@ -429,6 +482,84 @@ function Get-RiskAssessment {
     return @('Informational', 'No resolved SMS/voice migration exposure.')
 }
 
+function Test-OnlyPhoneBasedMfa {
+    # Microsoft's criterion for the 2027-02-01 blocking prompt: the user's only available
+    # MFA method is SMS or voice. This is narrower than "not passwordless-capable", which
+    # also sweeps up everyone holding Microsoft Authenticator push -- a method that is not
+    # being retired and whose holders are not stopped at sign-in.
+    #
+    # Getting this wrong in the lenient direction costs somebody their Monday morning, so
+    # a method this function does not recognise counts as not surviving.
+    param(
+        # Null as well as empty: a user with no registration-report row has no methods, and
+        # that is an ordinary case rather than a caller error.
+        [Parameter(Mandatory)][AllowNull()][AllowEmptyCollection()][string[]]$MethodsRegistered,
+        [Parameter(Mandatory)][string[]]$PhoneMethods,
+        [Parameter(Mandatory)][string[]]$SurvivingMfaMethods
+    )
+
+    if ($null -eq $MethodsRegistered) { return $false }
+
+    $phone = @($MethodsRegistered | Where-Object { $_ -in $PhoneMethods })
+    if ($phone.Count -eq 0) { return $false }
+
+    $surviving = @($MethodsRegistered | Where-Object { $_ -in $SurvivingMfaMethods })
+    return ($surviving.Count -eq 0)
+}
+
+function Get-RemediationStep {
+    # The single source of the per-user next step. It reaches the CSV as the NextStep
+    # column, the HTML report under each row's reason, and the opening line of every
+    # ticket description, so the three deliverables cannot drift into recommending
+    # different things for the same person.
+    #
+    # One sentence or two, imperative, specific to what this user actually has. A row
+    # that says "High" and stops makes the reader work out the action themselves, which
+    # is the part they are paying for and the part most likely to be got wrong.
+    #
+    # Policy scope, passwordless capability, and privilege are deliberately not parameters:
+    # the risk band is already derived from all three, so taking them again would let a
+    # caller pass a combination the band contradicts.
+    param(
+        [Parameter(Mandatory)][string]$Risk,
+        [bool]$HasPhoneMethodRegistered,
+        [string]$UserType,
+        [string]$PhoneMethodsRegistered
+    )
+
+    # Named so the instruction says which registration to remove, not "the phone method".
+    $methods = if ([string]::IsNullOrWhiteSpace($PhoneMethodsRegistered)) { 'the phone method' } else { $PhoneMethodsRegistered }
+
+    # Every sequence below registers the surviving method before removing the phone
+    # method. The other order creates the lockout the whole exercise exists to prevent.
+    switch ($Risk) {
+        'Critical' {
+            return "Contact the user and schedule a session; do not leave a privileged account to a self-service nudge. Register a FIDO2 security key or platform passkey, confirm with a real test sign-in, then remove $methods. Check that the account recovery path does not also depend on a phone number, and if this is an emergency-access account, confirm at least one break-glass account uses a method outside the retirement scope."
+        }
+        'High' {
+            if ($UserType -eq 'Guest') {
+                return "Include in the passkey registration campaign, but confirm this guest can register before committing to a date: B2B and internal guest passkey support follows a separate Microsoft timeline. Leave $methods in place until a surviving method is confirmed working."
+            }
+            if ($HasPhoneMethodRegistered) {
+                return "Include in the passkey registration campaign. Direct the user to register a passkey or Microsoft Authenticator for their device type, confirm the registration landed, then remove $methods."
+            }
+            return 'Include in the passkey registration campaign. The user is targeted by policy with no method that survives the retirement, so they will be auto-enabled and nudged on 2026-09-01 whether or not you act first.'
+        }
+        'Moderate' {
+            return "Check this user in the legacy per-user MFA service settings. If they are enabled for SMS or voice there, convert them to the modern authentication methods policy so the exposure becomes measurable, then remediate as High. If the registration is simply stale, remove $methods once a phishing-resistant method is confirmed."
+        }
+        'Low' {
+            if ($HasPhoneMethodRegistered) {
+                return "No action required before the retirement; the user already holds a surviving method. Optionally remove $methods to reduce account-recovery attack surface, which is worth doing independently of this change."
+            }
+            return 'No action required. The user is in policy scope but already holds a method that survives the retirement. Expect a registration nudge on 2026-09-01.'
+        }
+        default {
+            return 'No action required. No resolved exposure to the SMS and voice retirement.'
+        }
+    }
+}
+
 function ConvertTo-SafeHtml {
     # Directory display names are attacker-influenceable in some tenants (self-service
     # profile edits, B2B invite metadata). An unencoded display name containing markup
@@ -438,6 +569,93 @@ function ConvertTo-SafeHtml {
 
     if ($null -eq $Value) { return '' }
     return [System.Net.WebUtility]::HtmlEncode([string]$Value)
+}
+
+function Get-ExecutiveSummary {
+    # Prose, generated from the same numbers as the cards. A client report that only
+    # shows counts makes the reader do the interpretation, and the interpretation is the
+    # part they are paying for. Returns an array of paragraphs.
+    param(
+        [Parameter(Mandatory)]$Summary,
+
+        # Distinct users in SMS or voice scope. Passed in rather than derived from the
+        # summary, because InSmsPolicyScope and InVoicePolicyScope overlap: a user
+        # targeted by both methods appears in both counts, and adding them together
+        # reports more users in scope than the tenant has.
+        [Parameter(Mandatory)][int]$InScopeCount
+    )
+
+    $asInt = {
+        param($value)
+        $parsed = 0
+        if ([int]::TryParse([string]$value, [ref]$parsed)) { return $parsed }
+        return 0
+    }
+
+    $critical = & $asInt $Summary.Critical
+    $high = & $asInt $Summary.High
+    $moderate = & $asInt $Summary.Moderate
+    $candidates = & $asInt $Summary.MigrationCandidates
+    $assessed = & $asInt $Summary.EnabledUsersAssessed
+    $inScope = $InScopeCount
+    $ready = & $asInt $Summary.PasswordlessCapableInScope
+    $missing = & $asInt $Summary.UsersMissingFromReport
+
+    $paragraphs = [System.Collections.Generic.List[string]]::new()
+
+    if ($candidates -eq 0) {
+        $paragraphs.Add("No users resolved into SMS or voice policy scope, and no phone-based authentication methods are registered across the $assessed enabled users assessed. This tenant has no measurable exposure through the modern authentication methods policy.")
+        $paragraphs.Add('That is not the same as no exposure. Legacy per-user MFA service settings are in scope for the retirement and cannot be read by this assessment. Confirm that population in the legacy MFA portal before treating this tenant as finished.')
+        return $paragraphs
+    }
+
+    $blocked = $critical + $high
+    $paragraphs.Add("$candidates of $assessed enabled users are migration candidates: they are targeted by the SMS or voice authentication methods policy, they have a phone-based method registered, or both.")
+
+    if ($blocked -gt 0) {
+        $paragraphs.Add("$blocked of them have no phishing-resistant method registered today, so they are the population a passkey campaign needs to reach.")
+    }
+
+    # The number that answers "will anybody actually be stuck on the Monday". Kept separate
+    # from the risk bands because it is narrower: a user holding Microsoft Authenticator
+    # push is not passwordless-capable and is also not blocked, since Authenticator is not
+    # being retired. Conflating the two overstates the emergency by everyone in that group.
+    # Read through the accessor: StrictMode throws on a missing property, and this function
+    # is also handed summaries rebuilt from older exports that predate these fields.
+    $stopped = & $asInt (Get-PropertyValue $Summary 'BlockedAtRetirement')
+    $stoppedAdmins = & $asInt (Get-PropertyValue $Summary 'BlockedAdminsAtRetirement')
+
+    if ($stopped -gt 0) {
+        $sentence = "Of those, $stopped hold a phone number as their only method that satisfies MFA. These are the accounts that stop working on 1 February 2027: at their next sign-in they meet a passkey registration prompt they cannot skip, and until they complete it they cannot get in."
+        if ($stoppedAdmins -gt 0) {
+            $sentence += " $stoppedAdmins of them are privileged."
+        }
+        $paragraphs.Add($sentence)
+        $paragraphs.Add('Anyone who cannot complete that registration at the moment they are stopped -- no compatible device to hand, signing in from a shared terminal, or on the phone to the help desk from an airport -- is unable to work until they can. Driving this number to zero before the date is the whole job; the other counts describe how much campaign work stands between here and that.')
+    }
+    elseif ($candidates -gt 0) {
+        $paragraphs.Add('No user holds a phone number as their only method that satisfies MFA, so on current data nobody is stopped at sign-in on 1 February 2027. The population below still needs migrating, but the immediate lockout risk is clear.')
+    }
+
+    if ($critical -gt 0) {
+        $word = if ($critical -eq 1) { 'account holds' } else { 'accounts hold' }
+        $paragraphs.Add("$critical of those $word a privileged role. Privileged accounts are the first remediation priority: if one is blocked at sign-in and its recovery path also depends on a phone number, the result is an availability problem on top of an authentication problem. Confirm the emergency-access accounts specifically.")
+    }
+
+    if ($moderate -gt 0) {
+        $paragraphs.Add("$moderate user(s) have a phone method registered but did not resolve into the modern policy scope. That pattern usually means legacy per-user MFA, which is equally in scope for the retirement and is not readable through the least-privilege Graph surface this assessment uses. Treat it as a finding to validate manually, not as a clean result.")
+    }
+
+    if ($inScope -gt 0) {
+        $percent = [math]::Round(($ready / $inScope) * 100)
+        $paragraphs.Add("$ready of the $inScope users in policy scope ($percent%) already hold a method that survives the retirement. That figure is the progress measure worth tracking between runs.")
+    }
+
+    if ($missing -gt 0) {
+        $paragraphs.Add("$missing enabled user(s) had no row in the authentication methods registration report. Their registration fields default to 'not capable', so they are reported as more exposed rather than quietly dropped. Recently created accounts and reporting latency both produce this; re-run in 24 to 48 hours before acting on that subset.")
+    }
+
+    return $paragraphs
 }
 
 function New-HtmlReport {
@@ -451,44 +669,128 @@ function New-HtmlReport {
     $now = Get-Date
     $autoEnableDate = [datetime]'2026-09-01'
     $retirementDate = [datetime]'2027-02-01'
+    $providerDate = [datetime]'2026-10-30'
     $daysToAutoEnable = [math]::Max(0, [int]($autoEnableDate - $now).TotalDays)
     $daysToRetirement = [math]::Max(0, [int]($retirementDate - $now).TotalDays)
 
+    $heading = if ($Customer) { $Customer } else { 'Microsoft Entra ID' }
     $title = if ($Customer) { "$Customer - Entra SMS/Voice Migration Impact" } else { 'Entra SMS/Voice Migration Impact' }
 
-    # Only actionable rows go in the table. Low and Informational are in the CSV; putting
+    $asInt = {
+        param($value)
+        $parsed = 0
+        if ([int]::TryParse([string]$value, [ref]$parsed)) { return $parsed }
+        return 0
+    }
+
+    $critical = & $asInt $Summary.Critical
+    $high = & $asInt $Summary.High
+    $moderate = & $asInt $Summary.Moderate
+    $low = & $asInt $Summary.Low
+    $candidates = & $asInt $Summary.MigrationCandidates
+    $blockedAtRetirement = & $asInt (Get-PropertyValue $Summary 'BlockedAtRetirement')
+
+    # Only actionable rows go in the tables. Low and Informational are in the CSV; putting
     # them here would bury the ten accounts that actually matter under four hundred that don't.
     $actionable = @($Rows | Where-Object { $_.Risk -in @('Critical', 'High', 'Moderate') })
 
-    $tableRows = foreach ($row in $actionable) {
-        $badgeClass = switch ($row.Risk) {
-            'Critical' { 'b-crit' }
-            'High'     { 'b-high' }
-            'Moderate' { 'b-mod' }
-            default    { 'b-low' }
-        }
-        $adminMark = if ($row.IsAdmin) { '<span class="admin">ADMIN</span>' } else { '' }
-        $scope = @()
-        if ($row.InSmsPolicyScope) { $scope += 'SMS' }
-        if ($row.InVoicePolicyScope) { $scope += 'Voice' }
-        $scopeText = if ($scope.Count -gt 0) { $scope -join ' + ' } else { 'not in AMP scope' }
+    # Distinct users in either method's scope. Summing the two policy counts would
+    # double-count anyone targeted by both.
+    $inScopeCount = @($Rows | Where-Object { $_.InSmsPolicyScope -or $_.InVoicePolicyScope }).Count
 
-        @"
+    $summaryParagraphs = Get-ExecutiveSummary -Summary $Summary -InScopeCount $inScopeCount
+    $summaryHtml = ($summaryParagraphs | ForEach-Object { "<p>$(ConvertTo-SafeHtml $_)</p>" }) -join "`n"
+
+    # Proportional bar across the four bands. Pure CSS widths computed here, because the
+    # report carries no JavaScript and has to render identically offline in five years.
+    $barTotal = $critical + $high + $moderate + $low
+    $barSegments = if ($barTotal -gt 0) {
+        $segments = @(
+            @{ Class = 's-crit'; Count = $critical; Label = 'Critical' }
+            @{ Class = 's-high'; Count = $high; Label = 'High' }
+            @{ Class = 's-mod'; Count = $moderate; Label = 'Moderate' }
+            @{ Class = 's-low'; Count = $low; Label = 'Low' }
+        )
+        ($segments | Where-Object { $_.Count -gt 0 } | ForEach-Object {
+            $percent = [math]::Round(($_.Count / $barTotal) * 100, 2)
+            "<div class=""seg $($_.Class)"" style=""width:$percent%"" title=""$($_.Label): $($_.Count)""></div>"
+        }) -join ''
+    } else { '' }
+
+    # One table per band rather than one long table. A technician works Critical to
+    # completion before touching High, and the band boundary is where that decision is made.
+    $bandSections = foreach ($band in @('Critical', 'High', 'Moderate')) {
+        $bandRows = @($actionable | Where-Object Risk -eq $band)
+        if ($bandRows.Count -eq 0) { continue }
+
+        $bandClass = switch ($band) {
+            'Critical' { 'crit' }
+            'High' { 'high' }
+            default { 'mod' }
+        }
+
+        $bandBlurb = switch ($band) {
+            'Critical' { 'Privileged accounts, targeted by policy, with a phone method and no phishing-resistant alternative. Individual work, scheduled, verified with a real test sign-in.' }
+            'High'     { 'Targeted by policy with no method that survives the retirement. Remediate as a scoped registration campaign rather than one ticket at a time.' }
+            default    { 'A phone method is registered but the user is outside the resolved modern policy scope. Usually legacy per-user MFA. Validate this population manually before concluding it is unaffected.' }
+        }
+
+        $rowsHtml = foreach ($row in $bandRows) {
+            $adminMark = if ($row.IsAdmin) { '<span class="admin">ADMIN</span>' } else { '' }
+            $scope = @()
+            if ($row.InSmsPolicyScope) { $scope += 'SMS' }
+            if ($row.InVoicePolicyScope) { $scope += 'Voice' }
+            $scopeText = if ($scope.Count -gt 0) { $scope -join ' + ' } else { 'not in AMP scope' }
+            $phone = if ($row.PhoneMethodsRegistered) { $row.PhoneMethodsRegistered } else { 'none reported' }
+            $pwlessClass = if ($row.IsPasswordlessCapable) { 'yes' } else { 'no' }
+            $pwlessText = if ($row.IsPasswordlessCapable) { 'Yes' } else { 'No' }
+
+            # Prefer the NextStep already on the row. Recomputing keeps the report working
+            # when it is handed rows from an older export that predates the column.
+            $nextStep = Get-PropertyValue $row 'NextStep'
+            if ([string]::IsNullOrWhiteSpace($nextStep)) {
+                $nextStep = Get-RemediationStep -Risk ([string]$row.Risk) `
+                    -HasPhoneMethodRegistered ([bool]$row.PhoneMethodsRegistered) `
+                    -UserType ([string]$row.UserType) `
+                    -PhoneMethodsRegistered ([string]$row.PhoneMethodsRegistered)
+            }
+
+            @"
 <tr>
-<td><span class="badge $badgeClass">$(ConvertTo-SafeHtml $row.Risk)</span></td>
-<td class="name">$(ConvertTo-SafeHtml $row.DisplayName) $adminMark<br><span class="upn">$(ConvertTo-SafeHtml $row.UserPrincipalName)</span></td>
+<td class="name">$(ConvertTo-SafeHtml $row.DisplayName)$adminMark<div class="upn">$(ConvertTo-SafeHtml $row.UserPrincipalName)</div></td>
 <td>$(ConvertTo-SafeHtml $row.UserType)</td>
 <td>$(ConvertTo-SafeHtml $scopeText)</td>
-<td>$(ConvertTo-SafeHtml $row.PhoneMethodsRegistered)</td>
-<td class="$(if ($row.IsPasswordlessCapable) { 'yes' } else { 'no' })">$(if ($row.IsPasswordlessCapable) { 'Yes' } else { 'No' })</td>
-<td class="reason">$(ConvertTo-SafeHtml $row.Reason)</td>
+<td class="mono">$(ConvertTo-SafeHtml $phone)</td>
+<td class="$pwlessClass">$pwlessText</td>
+<td class="reason">$(ConvertTo-SafeHtml $row.Reason)
+<div class="next"><span class="next-l">Next step</span>$(ConvertTo-SafeHtml $nextStep)</div></td>
 </tr>
+"@
+        }
+
+        @"
+<section class="band">
+<h3 class="band-h $bandClass">$band <span class="band-n">$($bandRows.Count)</span></h3>
+<p class="band-blurb">$(ConvertTo-SafeHtml $bandBlurb)</p>
+<table>
+<colgroup><col class="c-user"><col class="c-type"><col class="c-scope"><col class="c-phone"><col class="c-pwless"><col class="c-why"></colgroup>
+<thead><tr>
+<th>User</th><th>Type</th><th>AMP scope</th><th>Phone methods</th><th>Passwordless</th><th>Why, and what to do</th>
+</tr></thead>
+<tbody>
+$($rowsHtml -join "`n")
+</tbody>
+</table>
+</section>
 "@
     }
 
-    $emptyState = if ($actionable.Count -eq 0) {
-        '<tr><td colspan="7" class="empty">No Critical, High, or Moderate findings. Verify against the portal and check legacy per-user MFA settings separately.</td></tr>'
-    } else { '' }
+    $findingsHtml = if ($actionable.Count -eq 0) {
+        '<div class="empty"><strong>No Critical, High, or Moderate findings.</strong><br>Verify against the Entra portal, and check legacy per-user MFA service settings separately: that population is in scope for the retirement and is not readable from the Graph surface this assessment uses.</div>'
+    }
+    else {
+        $bandSections -join "`n"
+    }
 
     $html = @"
 <!DOCTYPE html>
@@ -502,81 +804,226 @@ function New-HtmlReport {
 <meta name="referrer" content="no-referrer">
 <title>$(ConvertTo-SafeHtml $title)</title>
 <style>
+/* Light document, brand accents. This file gets emailed, archived, and printed to PDF;
+   a dark background costs a reader half a toner cartridge and reads as a dashboard
+   screenshot rather than a deliverable. */
 :root {
-  --navy: #0E1B2C; --panel: #16273D; --line: #24384F;
-  --accent: #22D99D; --text: #E8EEF5; --muted: #8FA3B8;
-  --crit: #FF4D4D; --high: #FF8A3D; --mod: #FFC53D; --low: #22D99D;
+  --navy: #0E1B2C; --navy-2: #16273D; --accent: #0F9D6E;
+  --ink: #14202E; --ink-2: #4A5C70; --ink-3: #6E8095;
+  --rule: #DDE4EC; --panel: #F5F8FB; --page: #FFFFFF;
+  --crit: #C22B2B; --high: #C25E17; --mod: #A8820A; --low: #0F9D6E;
 }
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--navy); color: var(--text);
-  font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
-.wrap { max-width: 1180px; margin: 0 auto; padding: 32px 20px 64px; }
-h1 { font-size: 26px; margin: 0 0 4px; letter-spacing: -0.3px; }
-h2 { font-size: 15px; text-transform: uppercase; letter-spacing: 1.4px;
-  color: var(--accent); margin: 40px 0 14px; font-weight: 600; }
-.sub { color: var(--muted); font-size: 13px; margin-bottom: 28px; }
-.readonly { display: inline-block; border: 1px solid var(--accent); color: var(--accent);
-  border-radius: 3px; padding: 2px 8px; font-size: 11px; letter-spacing: 1px; margin-left: 8px; }
-.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
-.card { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 16px 18px; }
-.card .n { font-size: 30px; font-weight: 700; line-height: 1.1; }
-.card .l { font-size: 11px; text-transform: uppercase; letter-spacing: 1.2px; color: var(--muted); margin-top: 6px; }
+html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+body { margin: 0; background: var(--page); color: var(--ink);
+  font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+
+.masthead { background: var(--navy); color: #fff; padding: 30px 0 26px;
+  border-bottom: 4px solid var(--accent); }
+.wrap { max-width: 1140px; margin: 0 auto; padding: 0 28px; }
+.eyebrow { font-size: 11px; letter-spacing: 2.2px; text-transform: uppercase;
+  color: var(--accent); font-weight: 700; margin-bottom: 8px; }
+h1 { font-size: 30px; margin: 0 0 6px; letter-spacing: -0.4px; font-weight: 650; }
+.masthead .sub { color: #A9BDD2; font-size: 13.5px; }
+.tag { display: inline-block; border: 1px solid var(--accent); color: var(--accent);
+  border-radius: 3px; padding: 2px 9px; font-size: 10.5px; letter-spacing: 1.4px;
+  font-weight: 700; vertical-align: 4px; margin-left: 10px; }
+
+main { padding: 8px 0 60px; }
+h2 { font-size: 12.5px; text-transform: uppercase; letter-spacing: 1.6px;
+  color: var(--ink-3); margin: 42px 0 14px; font-weight: 700;
+  padding-bottom: 8px; border-bottom: 1px solid var(--rule); }
+
+.lede p { margin: 0 0 12px; font-size: 16px; line-height: 1.65; max-width: 74ch; }
+.lede p:first-child { font-size: 17.5px; color: var(--ink); font-weight: 500; }
+
+.clock { display: flex; gap: 14px; flex-wrap: wrap; margin: 18px 0 4px; }
+/* Direct children only. A bare `.clock div` also matches the nested .d and .t blocks
+   and paints a card border around each line inside the card. */
+.clock > div { background: var(--panel); border: 1px solid var(--rule);
+  border-left: 3px solid var(--accent); border-radius: 4px; padding: 13px 17px; flex: 1 1 240px; }
+.clock .d { font-size: 21px; font-weight: 700; letter-spacing: -0.3px; }
+.clock .t { font-size: 12px; color: var(--ink-2); margin-top: 3px; line-height: 1.45; }
+
+/* The one number a reader should leave with. Given its own band above the risk cards
+   because it answers a different question: not "how much work", but "who stops working". */
+.headline { display: flex; align-items: center; gap: 22px; border: 1px solid var(--rule);
+  border-left: 4px solid var(--crit); border-radius: 6px; padding: 20px 24px;
+  background: var(--panel); }
+.headline.good { border-left-color: var(--low); }
+.headline .hn { font-size: 46px; font-weight: 700; line-height: 1; letter-spacing: -1.5px;
+  color: var(--crit); font-variant-numeric: tabular-nums; }
+.headline.good .hn { color: var(--low); }
+.headline .ht { font-size: 13.5px; line-height: 1.55; color: var(--ink); max-width: 74ch; }
+
+.bar { display: flex; height: 12px; border-radius: 3px; overflow: hidden;
+  background: var(--panel); border: 1px solid var(--rule); margin: 4px 0 10px; }
+.seg { height: 100%; }
+.s-crit { background: var(--crit); } .s-high { background: var(--high); }
+.s-mod { background: var(--mod); }  .s-low { background: var(--low); }
+.legend { display: flex; gap: 18px; flex-wrap: wrap; font-size: 12px; color: var(--ink-2); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.dot { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px; margin-top: 16px; }
+.card { background: var(--panel); border: 1px solid var(--rule); border-radius: 5px;
+  padding: 15px 17px; }
+.card .n { font-size: 27px; font-weight: 700; line-height: 1.1; letter-spacing: -0.5px; }
+.card .l { font-size: 10.5px; text-transform: uppercase; letter-spacing: 1.1px;
+  color: var(--ink-3); margin-top: 6px; font-weight: 600; }
 .card.crit .n { color: var(--crit); } .card.high .n { color: var(--high); }
-.card.mod .n { color: var(--mod); }  .card.low .n { color: var(--low); }
-.clock { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 12px; }
-.clock div { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--accent);
-  border-radius: 4px; padding: 12px 16px; flex: 1 1 260px; }
-.clock .d { font-size: 22px; font-weight: 700; }
-.clock .t { font-size: 12px; color: var(--muted); margin-top: 3px; }
-table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 13.5px; }
-th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 1px;
-  color: var(--muted); border-bottom: 1px solid var(--line); padding: 10px 10px; font-weight: 600; }
-td { border-bottom: 1px solid var(--line); padding: 12px 10px; vertical-align: top; }
-tr:hover td { background: rgba(34,217,157,0.04); }
-.badge { display: inline-block; border-radius: 3px; padding: 3px 9px; font-size: 11px;
-  font-weight: 700; letter-spacing: 0.6px; color: var(--navy); }
-.b-crit { background: var(--crit); color: #fff; } .b-high { background: var(--high); }
-.b-mod { background: var(--mod); } .b-low { background: var(--low); }
-.admin { background: var(--crit); color: #fff; font-size: 9.5px; font-weight: 700;
-  padding: 2px 5px; border-radius: 2px; letter-spacing: 0.8px; vertical-align: middle; }
-.name { font-weight: 600; } .upn { font-weight: 400; color: var(--muted); font-size: 12px; }
-.reason { color: var(--muted); font-size: 12.5px; max-width: 300px; }
-.yes { color: var(--accent); font-weight: 600; } .no { color: var(--crit); font-weight: 600; }
-.empty { text-align: center; color: var(--muted); padding: 32px; }
-dl { display: grid; grid-template-columns: 220px 1fr; gap: 8px 18px; margin: 0;
-  background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 18px 20px; }
-dt { color: var(--muted); font-size: 12.5px; } dd { margin: 0; font-size: 13.5px; word-break: break-word; }
-.note { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--mod);
-  border-radius: 4px; padding: 16px 20px; font-size: 13px; color: var(--muted); }
-.note ul { margin: 8px 0 0; padding-left: 18px; } .note li { margin-bottom: 6px; }
-footer { margin-top: 44px; padding-top: 18px; border-top: 1px solid var(--line);
-  color: var(--muted); font-size: 12px; }
-@media print { body { background: #fff; color: #000; } .card, dl, .note, .clock div { border-color: #ccc; background: #fff; } }
+.card.mod .n { color: var(--mod); }   .card.low .n { color: var(--low); }
+
+dl { display: grid; grid-template-columns: 240px 1fr; gap: 0; margin: 0;
+  border: 1px solid var(--rule); border-radius: 5px; overflow: hidden; }
+dt { color: var(--ink-2); font-size: 12.5px; font-weight: 600;
+  padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--rule); }
+dd { margin: 0; font-size: 13px; padding: 10px 16px; word-break: break-word;
+  border-bottom: 1px solid var(--rule); }
+dl > dt:last-of-type, dl > dd:last-of-type { border-bottom: 0; }
+
+.band { margin-top: 30px; }
+.band-h { font-size: 15px; margin: 0 0 4px; font-weight: 700; letter-spacing: 0.2px;
+  padding-left: 11px; border-left: 4px solid var(--rule); }
+.band-h.crit { border-left-color: var(--crit); color: var(--crit); }
+.band-h.high { border-left-color: var(--high); color: var(--high); }
+.band-h.mod  { border-left-color: var(--mod);  color: var(--mod); }
+.band-n { background: var(--panel); border: 1px solid var(--rule); color: var(--ink-2);
+  font-size: 11.5px; border-radius: 10px; padding: 1px 9px; margin-left: 6px;
+  vertical-align: 2px; font-weight: 700; }
+.band-blurb { font-size: 12.5px; color: var(--ink-2); margin: 6px 0 12px;
+  padding-left: 15px; max-width: 88ch; }
+
+.tablewrap { overflow-x: auto; }
+/* Fixed layout so every band's table lines up with the others. With auto layout each
+   table sizes to its own content and the columns visibly jump between bands. */
+table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
+col.c-user { width: 20%; } col.c-type { width: 6%; } col.c-scope { width: 10%; }
+col.c-phone { width: 13%; } col.c-pwless { width: 12%; } col.c-why { width: 39%; }
+/* Header labels are single words wider than their columns under fixed layout, which
+   makes them overrun the next header instead of wrapping. */
+th { text-align: left; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.9px;
+  color: var(--ink-3); border-bottom: 2px solid var(--rule); padding: 9px 10px; font-weight: 700;
+  background: var(--panel); overflow-wrap: anywhere; }
+td { border-bottom: 1px solid var(--rule); padding: 11px 10px; vertical-align: top; }
+tbody tr:nth-child(even) td { background: #FAFCFE; }
+.name { font-weight: 600; }
+/* Guest UPNs carry the #EXT# suffix and run long; fixed layout needs an explicit
+   instruction to break them rather than push the column open. */
+.name, .upn, .mono { overflow-wrap: anywhere; }
+.upn { font-weight: 400; color: var(--ink-3); font-size: 11.5px; margin-top: 2px; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; }
+.reason { color: var(--ink-2); font-size: 12px; }
+/* The next step is the operative half of this column, so it is set apart from the
+   diagnosis above it rather than running on as one paragraph. */
+.next { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--rule);
+  color: var(--ink); font-size: 12px; line-height: 1.5; }
+.next-l { display: block; font-size: 9.5px; letter-spacing: 1px; text-transform: uppercase;
+  color: var(--accent); font-weight: 700; margin-bottom: 3px; }
+.yes { color: var(--low); font-weight: 700; } .no { color: var(--crit); font-weight: 700; }
+.admin { background: var(--crit); color: #fff; font-size: 9px; font-weight: 700;
+  padding: 2px 5px; border-radius: 2px; letter-spacing: 0.8px; margin-left: 7px;
+  vertical-align: 1px; }
+.empty { background: var(--panel); border: 1px solid var(--rule); border-radius: 5px;
+  padding: 26px; color: var(--ink-2); font-size: 13.5px; line-height: 1.6; }
+
+.note { background: var(--panel); border: 1px solid var(--rule);
+  border-left: 3px solid var(--mod); border-radius: 4px; padding: 16px 22px;
+  font-size: 13px; color: var(--ink-2); }
+.note ul { margin: 0; padding-left: 18px; } .note li { margin-bottom: 9px; }
+.note li:last-child { margin-bottom: 0; }
+.note strong { color: var(--ink); }
+
+.method { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; font-size: 12.5px;
+  color: var(--ink-2); }
+.method h4 { font-size: 12px; text-transform: uppercase; letter-spacing: 1px;
+  color: var(--ink); margin: 0 0 8px; }
+.method ul { margin: 0; padding-left: 17px; } .method li { margin-bottom: 6px; }
+
+footer { margin-top: 46px; padding-top: 18px; border-top: 1px solid var(--rule);
+  color: var(--ink-3); font-size: 11.5px; line-height: 1.6; }
+
+@media (max-width: 720px) {
+  dl { grid-template-columns: 1fr; }
+  dt { border-bottom: 0; padding-bottom: 2px; }
+  .method { grid-template-columns: 1fr; }
+}
+
+@media print {
+  @page { margin: 14mm; }
+  body { font-size: 10.5pt; }
+  .wrap { max-width: none; padding: 0; }
+  .masthead { padding: 0 0 12px; background: #fff; color: var(--ink);
+    border-bottom: 3px solid var(--navy); }
+  .masthead .sub { color: var(--ink-2); }
+  .eyebrow { color: var(--navy); }
+  .tag { border-color: var(--ink-3); color: var(--ink-3); }
+  h2 { margin-top: 22px; page-break-after: avoid; }
+  .band, .card, .clock div, .note, .empty { page-break-inside: avoid; }
+  .band-h { page-break-after: avoid; }
+  /* Repeat column headers when a band's table spans pages, or page two is unreadable. */
+  thead { display: table-header-group; }
+  tr { page-break-inside: avoid; }
+  a { text-decoration: none; color: inherit; }
+}
 </style>
 </head>
 <body>
-<div class="wrap">
 
-<h1>$(ConvertTo-SafeHtml $title)<span class="readonly">READ-ONLY</span></h1>
+<header class="masthead">
+<div class="wrap">
+<div class="eyebrow">Entra ID &middot; SMS and voice retirement</div>
+<h1>$(ConvertTo-SafeHtml $heading)<span class="tag">READ-ONLY</span></h1>
 <div class="sub">
+Migration impact assessment &middot;
 Tenant $(ConvertTo-SafeHtml $Summary.TenantId) &middot;
-Assessed $(ConvertTo-SafeHtml $now.ToString('yyyy-MM-dd HH:mm')) local &middot;
+$(ConvertTo-SafeHtml $now.ToString('d MMMM yyyy, HH:mm')) local &middot;
 $(ConvertTo-SafeHtml $Summary.EnabledUsersAssessed) enabled users evaluated &middot;
 No tenant settings were changed
 </div>
+</div>
+</header>
+
+<main class="wrap">
+
+<h2>Summary</h2>
+<div class="lede">
+$summaryHtml
+</div>
 
 <div class="clock">
-<div><div class="d">$daysToAutoEnable days</div><div class="t">Until 2026-09-01: users in SMS/voice scope auto-enabled for passkeys and nudged to register</div></div>
-<div><div class="d">$daysToRetirement days</div><div class="t">Until 2027-02-01: Microsoft-provided SMS/voice delivery retired. No opt-out</div></div>
+<div><div class="d">$daysToAutoEnable days</div><div class="t"><strong>1 September 2026</strong> &mdash; users in SMS or voice scope are auto-enabled for passkeys and nudged to register at next MFA sign-in.</div></div>
+<div><div class="d">$daysToRetirement days</div><div class="t"><strong>1 February 2027</strong> &mdash; Microsoft-provided SMS and voice delivery is retired. No opt-out. Also the deadline to have a customer-managed telecom provider configured.</div></div>
+</div>
+
+<h2>Stopped at sign-in on 1 February 2027</h2>
+<div class="headline $(if ($blockedAtRetirement -gt 0) { 'bad' } else { 'good' })">
+<div class="hn">$blockedAtRetirement</div>
+<div class="ht">
+$(if ($blockedAtRetirement -gt 0) {
+"user$(if ($blockedAtRetirement -ne 1) { 's' }) hold a phone number as their only method that satisfies MFA. At their next sign-in after the retirement they meet a passkey registration prompt they cannot skip, and cannot work until they complete it. Drive this number to zero before the date."
+} else {
+'No user holds a phone number as their only method that satisfies MFA. On current data nobody is stopped at sign-in on the retirement date. The migration below still needs doing, but the immediate lockout risk is clear.'
+})
+</div>
 </div>
 
 <h2>Exposure</h2>
+<div class="bar">$barSegments</div>
+<div class="legend">
+<span><i class="dot s-crit"></i>Critical $critical</span>
+<span><i class="dot s-high"></i>High $high</span>
+<span><i class="dot s-mod"></i>Moderate $moderate</span>
+<span><i class="dot s-low"></i>Low $low</span>
+</div>
+
 <div class="grid">
-<div class="card crit"><div class="n">$(ConvertTo-SafeHtml $Summary.Critical)</div><div class="l">Critical</div></div>
-<div class="card high"><div class="n">$(ConvertTo-SafeHtml $Summary.High)</div><div class="l">High</div></div>
-<div class="card mod"><div class="n">$(ConvertTo-SafeHtml $Summary.Moderate)</div><div class="l">Moderate</div></div>
-<div class="card low"><div class="n">$(ConvertTo-SafeHtml $Summary.Low)</div><div class="l">Low</div></div>
-<div class="card"><div class="n">$(ConvertTo-SafeHtml $Summary.MigrationCandidates)</div><div class="l">Migration candidates</div></div>
+<div class="card crit"><div class="n">$critical</div><div class="l">Critical</div></div>
+<div class="card high"><div class="n">$high</div><div class="l">High</div></div>
+<div class="card mod"><div class="n">$moderate</div><div class="l">Moderate</div></div>
+<div class="card low"><div class="n">$low</div><div class="l">Low</div></div>
+<div class="card"><div class="n">$candidates</div><div class="l">Migration candidates</div></div>
 <div class="card"><div class="n">$(ConvertTo-SafeHtml $Summary.PasswordlessCapableInScope)</div><div class="l">Already passwordless</div></div>
 </div>
 
@@ -591,39 +1038,55 @@ No tenant settings were changed
 <dt>Voice exclude targets</dt><dd>$(ConvertTo-SafeHtml $(if ($Summary.VoicePolicyExclude) { $Summary.VoicePolicyExclude } else { 'none' }))</dd>
 <dt>Users in SMS scope</dt><dd>$(ConvertTo-SafeHtml $Summary.InSmsPolicyScope)</dd>
 <dt>Users in voice scope</dt><dd>$(ConvertTo-SafeHtml $Summary.InVoicePolicyScope)</dd>
-<dt>Oldest report row</dt><dd>$(ConvertTo-SafeHtml $Summary.OldestReportRowUtc) (registration report lags live directory state)</dd>
+<dt>Oldest report row</dt><dd>$(ConvertTo-SafeHtml $Summary.OldestReportRowUtc) &mdash; the registration report lags live directory state, so this is the age of the evidence</dd>
 <dt>Users missing from report</dt><dd>$(ConvertTo-SafeHtml $Summary.UsersMissingFromReport)</dd>
 </dl>
 
 <h2>Actionable findings ($($actionable.Count))</h2>
-<table>
-<thead><tr>
-<th>Risk</th><th>User</th><th>Type</th><th>AMP scope</th>
-<th>Phone methods</th><th>Passwordless</th><th>Why</th>
-</tr></thead>
-<tbody>
-$($tableRows -join "`n")$emptyState
-</tbody>
-</table>
+<div class="tablewrap">
+$findingsHtml
+</div>
 
 <h2>Read this before acting</h2>
 <div class="note">
 <ul>
 <li><strong>Critical rows are individual work.</strong> Privileged accounts that cannot satisfy MFA after retirement. Register a FIDO2 key or platform passkey and verify with a real test sign-in. Check emergency-access accounts specifically; they are the ones most likely to have a phone number attached that nobody has looked at in a year.</li>
+<li><strong>Register the new method before removing the phone method.</strong> Doing it in the other order creates the lockout you are working to prevent.</li>
 <li><strong>A large Moderate count means legacy per-user MFA.</strong> Those users have a phone method registered but do not resolve into modern AMP scope. They are still in scope for the retirement. This assessment cannot read legacy per-user MFA service settings; validate that population manually.</li>
 <li><strong>Policy scope is not effective sign-in behaviour.</strong> Conditional Access is not evaluated here. A user in AMP scope may never be challenged, and a user outside it may still be blocked by a grant control this assessment does not read.</li>
-<li><strong>Disabled users are excluded</strong> because the registration report does not return them. Accounts re-enabled after this run are not represented.</li>
 <li><strong>Guests follow a separate Microsoft timeline</strong> for passkey support. Validate B2B readiness independently before assuming a guest can register on the same schedule as a member.</li>
 </ul>
 </div>
 
+<h2>Scope and method</h2>
+<div class="method">
+<div>
+<h4>What was assessed</h4>
+<ul>
+<li>Every enabled user object returned by Graph, members and guests, with full pagination.</li>
+<li>SMS and voice authentication methods policy include and exclude targets, resolved to users through nested group membership.</li>
+<li>The authentication methods registration report, per user.</li>
+<li>Registration campaign state, which Microsoft sets to Microsoft managed for in-scope tenants on 1 September 2026.</li>
+</ul>
+</div>
+<div>
+<h4>What was not</h4>
+<ul>
+<li>Disabled users. The registration report does not return them.</li>
+<li>Legacy per-user MFA service settings. Reading them requires beta endpoints and broader permissions than this assessment holds.</li>
+<li>Conditional Access. Policy scope is not the same as being challenged at sign-in.</li>
+<li>Non-human accounts. Shared mailboxes and service accounts appear as ordinary users and should be reviewed before they become tickets.</li>
+</ul>
+</div>
+</div>
+
 <footer>
-Generated by Get-EntraSmsVoiceMigrationImpact.ps1 &middot; Read-only assessment, no tenant settings modified &middot;
-This report contains identity-security metadata including administrative status and registered authentication methods.
-Handle and retain it with the same controls you apply to a penetration test report.
+Generated by Get-EntraSmsVoiceMigrationImpact.ps1. Read-only assessment; every Microsoft Graph call was a GET and no tenant setting was modified.<br>
+This report contains identity-security metadata including administrative status and registered authentication methods. Handle and retain it with the same controls you apply to a penetration test report.<br>
+Timeline dates are per Microsoft Learn: passkeys by default and retirement of Microsoft-provided SMS and voice authentication. Customer-managed telecom providers can be configured from $($providerDate.ToString('d MMMM yyyy')).
 </footer>
 
-</div>
+</main>
 </body>
 </html>
 "@
@@ -631,6 +1094,129 @@ Handle and retain it with the same controls you apply to a penetration test repo
     $html | Out-File -LiteralPath $Path -Encoding utf8 -Force
     if (-not $SkipAclHardening) { Protect-OutputFile -Path $Path }
     return $Path
+}
+
+function New-ActionList {
+    # Two jobs, one file. It is the membership list for the migration security group
+    # Microsoft's guidance tells you to create in step one, and it is the action list you
+    # attach to a ticket you raised yourself. Both want the same population; the second
+    # also wants to know what to do, which is why PhoneMethodsRegistered and NextStep are
+    # here and the diagnostic columns are not.
+    #
+    # A function rather than inline export code so the published sample in examples/ can be
+    # generated by the same path a real run takes, instead of by something that resembles it.
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Rows)
+
+    $order = @{ Critical = 0; High = 1; Moderate = 2; Low = 3; Informational = 4 }
+
+    # Same read order as the main CSV: worst first, admins ahead of standard users. This
+    # file is worked top-down by whoever opens the ticket, so directory order is useless.
+    # Blocked users first inside a band: they are the ones who stop working, and a Moderate
+    # user with only a phone is stopped while a High user holding Authenticator is not.
+    return @($Rows |
+        Where-Object { $_.Risk -in @('Critical', 'High', 'Moderate') } |
+        Sort-Object `
+            @{ Expression = { $order[[string]$_.Risk] }; Ascending = $true }, `
+            @{ Expression = { [bool]$_.BlockedAtRetirement }; Descending = $true }, `
+            @{ Expression = { [bool]$_.IsAdmin }; Descending = $true }, `
+            @{ Expression = { [string]$_.DisplayName }; Ascending = $true } |
+        Select-Object Risk, BlockedAtRetirement, DisplayName, UserPrincipalName, IsAdmin,
+            PhoneMethodsRegistered, IsPasswordlessCapable, NextStep, UserId)
+}
+
+function Get-TicketNextStep {
+    # The row already carries NextStep. Recomputing is the fallback for rows handed in
+    # from an export that predates the column, so the ticket queue never silently loses
+    # its opening instruction.
+    param([Parameter(Mandatory)]$Row)
+
+    $existing = Get-PropertyValue $Row 'NextStep'
+    if (-not [string]::IsNullOrWhiteSpace($existing)) { return [string]$existing }
+
+    return Get-RemediationStep -Risk ([string]$Row.Risk) `
+        -HasPhoneMethodRegistered ([bool]$Row.PhoneMethodsRegistered) `
+        -UserType ([string]$Row.UserType) `
+        -PhoneMethodsRegistered ([string]$Row.PhoneMethodsRegistered)
+}
+
+function Get-TicketHistory {
+    # Users an earlier run already raised a ticket for, as a map of user id to the risk
+    # band they were at when it was raised.
+    #
+    # Without this, a second run regenerates the whole queue and imports a duplicate ticket
+    # for everyone who has not remediated yet. On a monthly cadence that is how a PSA queue
+    # fills with copies of work already in progress and stops being trusted.
+    [CmdletBinding()]
+    param([string]$Path)
+
+    $empty = @{}
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) { return $empty }
+
+    try {
+        $raw = Get-Content -LiteralPath $Path -Raw
+        if ([string]::IsNullOrWhiteSpace($raw)) { return $empty }
+
+        $parsed = $raw | ConvertFrom-Json -AsHashtable
+        $entries = if ($parsed -is [hashtable] -and $parsed.ContainsKey('Ticketed')) { $parsed['Ticketed'] } else { $parsed }
+        if ($entries -isnot [hashtable]) { return $empty }
+
+        $history = @{}
+        foreach ($key in $entries.Keys) { $history[[string]$key] = [string]$entries[$key] }
+        return $history
+    }
+    catch {
+        # A corrupt history must not stop the assessment. Warn and behave as a first run,
+        # which duplicates tickets rather than dropping them; the safe direction.
+        Write-Warning "Could not read ticket history at $Path, treating this as a first run. $($_.Exception.Message)"
+        return $empty
+    }
+}
+
+function Save-TicketHistory {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][hashtable]$History
+    )
+
+    $directory = Split-Path -Parent $Path
+    if ($directory -and -not (Test-Path -LiteralPath $directory)) {
+        New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    }
+
+    # Object ids and risk bands only. No names, no UPNs: this file sits wherever the
+    # operator points it and does not need to carry identifying data to do its job.
+    [PSCustomObject]@{
+        Schema      = 1
+        UpdatedUtc  = (Get-Date).ToUniversalTime().ToString('o')
+        Ticketed    = $History
+    } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Path -Encoding utf8
+
+    if (-not $SkipAclHardening) { Protect-OutputFile -Path $Path }
+}
+
+function Test-NeedsTicket {
+    # A user needs a ticket if they have never had one, or if they have got worse since
+    # the one they had. Somebody who was High last month and is High today is already in
+    # somebody's queue; raising it again does not add information.
+    param(
+        # Empty is allowed and means "ticket them": a row with no object id cannot be
+        # matched against history, and dropping it silently is the wrong failure.
+        [Parameter(Mandatory)][AllowEmptyString()][string]$UserId,
+        [Parameter(Mandatory)][string]$CurrentRisk,
+        [Parameter(Mandatory)][AllowEmptyCollection()][hashtable]$History
+    )
+
+    if ([string]::IsNullOrWhiteSpace($UserId)) { return $true }
+    if (-not $History.ContainsKey($UserId)) { return $true }
+
+    $order = @{ Critical = 0; High = 1; Moderate = 2; Low = 3; Informational = 4 }
+    $previous = $order[[string]$History[$UserId]]
+    $current = $order[$CurrentRisk]
+
+    # An unrecognised band on either side falls back to raising the ticket.
+    if ($null -eq $previous -or $null -eq $current) { return $true }
+
+    return ($current -lt $previous)
 }
 
 function New-TicketExport {
@@ -641,7 +1227,11 @@ function New-TicketExport {
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Rows,
         [Parameter(Mandatory)][string]$Path,
         [string]$Customer,
-        [int]$MaxIndividual = 50
+        [int]$MaxIndividual = 50,
+
+        # User ids already ticketed by an earlier run, mapped to the risk band they were at
+        # when the ticket was raised. Empty for a first run.
+        [AllowEmptyCollection()][hashtable]$History = @{}
     )
 
     $today = Get-Date
@@ -653,9 +1243,25 @@ function New-TicketExport {
     $primaryDeadline = if ($today -lt $autoEnable) { $autoEnable } else { $retirement }
     $company = if ($Customer) { $Customer } else { 'Unassigned' }
 
-    $criticalRows = @($Rows | Where-Object Risk -eq 'Critical' | Sort-Object DisplayName)
-    $highRows = @($Rows | Where-Object Risk -eq 'High' | Sort-Object -Property @{ Expression = 'IsAdmin'; Descending = $true }, DisplayName)
-    $moderateRows = @($Rows | Where-Object Risk -eq 'Moderate' | Sort-Object DisplayName)
+    # Everyone in an actionable band, before history is applied. Used to report how many
+    # were suppressed, so a near-empty queue reads as "already ticketed" rather than
+    # "assessment found nothing".
+    $allActionable = @($Rows | Where-Object { $_.Risk -in @('Critical', 'High', 'Moderate') })
+
+    # A user is ticketed once. They come back only if they got worse, because somebody who
+    # was High last month and is High today is already in a queue and a second ticket adds
+    # no information, just noise the technician has to close.
+    $needsTicket = {
+        param($row)
+        Test-NeedsTicket -UserId ([string]$row.UserId) -CurrentRisk ([string]$row.Risk) -History $History
+    }
+
+    $criticalRows = @($Rows | Where-Object Risk -eq 'Critical' | Where-Object { & $needsTicket $_ } | Sort-Object DisplayName)
+    $highRows = @($Rows | Where-Object Risk -eq 'High' | Where-Object { & $needsTicket $_ } |
+        Sort-Object -Property @{ Expression = 'IsAdmin'; Descending = $true }, DisplayName)
+    $moderateRows = @($Rows | Where-Object Risk -eq 'Moderate' | Where-Object { & $needsTicket $_ } | Sort-Object DisplayName)
+
+    $suppressed = $allActionable.Count - ($criticalRows.Count + $highRows.Count + $moderateRows.Count)
 
     $tickets = [System.Collections.Generic.List[object]]::new()
 
@@ -694,6 +1300,9 @@ This account holds a privileged role, is targeted by the Entra SMS/voice authent
 methods policy, and has no phishing-resistant method registered. When Microsoft-provided
 SMS and voice delivery is retired on 2027-02-01 this account cannot satisfy MFA and will
 be blocked at sign-in with no opt-out.
+
+Next step
+$(Get-TicketNextStep -Row $row)
 
 Actions
 1. Contact the user and schedule a short session; do not rely on a self-service nudge for
@@ -735,6 +1344,9 @@ Passwordless capable: No
 
 Why this ticket exists
 $($row.Reason)
+
+Next step
+$(Get-TicketNextStep -Row $row)
 
 Actions
 1. Direct the user to register a passkey or Microsoft Authenticator, with guidance for their
@@ -824,7 +1436,22 @@ $sample
     }
 
     Export-AssessmentCsv -Data $tickets.ToArray() -Path $Path
-    return [PSCustomObject]@{ Path = $Path; Count = $tickets.Count }
+
+    # History carries forward everything it already held plus everyone ticketed this run,
+    # so a user who remediates and later regresses is still recognised as previously seen.
+    $updatedHistory = @{}
+    foreach ($key in $History.Keys) { $updatedHistory[[string]$key] = [string]$History[$key] }
+    foreach ($row in @($criticalRows) + @($highRows) + @($moderateRows)) {
+        $id = [string]$row.UserId
+        if (-not [string]::IsNullOrWhiteSpace($id)) { $updatedHistory[$id] = [string]$row.Risk }
+    }
+
+    return [PSCustomObject]@{
+        Path       = $Path
+        Count      = $tickets.Count
+        Suppressed = $suppressed
+        History    = $updatedHistory
+    }
 }
 
 function Protect-CsvInjection {
@@ -928,10 +1555,52 @@ foreach ($registration in $registrations) { $registrationIndex[[string](Get-Prop
 # primary SMS sign-in. All four are retired with Microsoft-provided telecom delivery.
 $phoneMethods = @('mobilePhone', 'alternateMobilePhone', 'officePhone', 'smsSignIn')
 
+# Methods that both survive the retirement and can satisfy MFA on their own.
+#
+# This list is the difference between "has no passkey" and "cannot sign in". Microsoft's
+# blocking prompt on 2027-02-01 applies to users whose ONLY available MFA method is SMS or
+# voice. A user with Microsoft Authenticator push is not passwordless-capable and is not
+# blocked either, because Authenticator is not being retired.
+#
+# Deliberately excluded: email and securityQuestion satisfy self-service password reset,
+# not MFA. temporaryAccessPass is time-limited by design and is a remediation aid rather
+# than a durable method, so counting it would mark somebody safe who is not.
+$survivingMfaMethods = @(
+    'microsoftAuthenticatorPush'
+    'softwareOneTimePasscode'
+    'hardwareOneTimePasscode'
+    'fido2SecurityKey'
+    'windowsHelloForBusiness'
+    'passKeyDeviceBound'
+    'passKeyDeviceBoundAuthenticator'
+    'passKeyDeviceBoundWindowsHello'
+    'macOsSecureEnclaveKey'
+    'x509Certificate'
+    'x509CertificateSingleFactor'
+    'x509CertificateMultiFactor'
+)
+
+# Anything Microsoft adds later, or that this list has not caught up with, is treated as
+# NOT surviving, so an unrecognised method makes a user look more exposed rather than less.
+# Over-warning costs a review; under-warning costs somebody their Monday morning. The
+# unrecognised names are surfaced in the summary so the list can be maintained.
+$script:UnrecognisedMethods = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+# Stands in for the dropped InRegistrationReport column. Defined once because the summary
+# counts these rows and the CSV displays them, and the two must not drift apart.
+$script:NoReportRowMarker = '(no row in registration report)'
+$nonMfaMethods = @('email', 'securityQuestion', 'temporaryAccessPass', 'temporaryAccessPassMultiUse', 'appPassword')
+
 $rows = foreach ($user in $enabledUsers) {
     $id = [string](Get-PropertyValue $user 'id')
     $registration = $registrationIndex[$id]
-    $methods = if ($registration) { @((Get-PropertyValue $registration 'methodsRegistered')) } else { @() }
+    # Assigned in two statements deliberately. `$x = if (...) { @() }` yields $null, not an
+    # empty array, because PowerShell unrolls an empty collection to nothing on the way out
+    # of the expression. Every user absent from the registration report went down that
+    # branch, so anything downstream that would not take $null crashed the whole run on any
+    # tenant with a recently created account.
+    $methods = @()
+    if ($registration) { $methods = @(Get-PropertyValue $registration 'methodsRegistered') }
     $matchingMethods = @($methods | Where-Object { $_ -in $phoneMethods })
 
     $inSmsScope = $smsScope.UserIds.Contains($id)
@@ -945,25 +1614,48 @@ $rows = foreach ($user in $enabledUsers) {
     $risk = Get-RiskAssessment -InPolicyScope $inPolicyScope -HasPhoneMethodRegistered $hasPhoneMethod `
         -IsPasswordlessCapable $isPasswordlessCapable -IsAdmin $isAdmin -UserType $userType
 
+    $phoneMethodList = ($matchingMethods -join '; ')
+
+    # The precise Microsoft criterion for the 2027-02-01 blocking prompt: a phone method
+    # registered and nothing else that both survives the retirement and satisfies MFA.
+    # This is a narrower and more actionable population than "not passwordless-capable",
+    # which also sweeps up everyone holding Authenticator push.
+    foreach ($method in $methods) {
+        if ($method -notin $phoneMethods -and $method -notin $survivingMfaMethods -and $method -notin $nonMfaMethods) {
+            [void]$script:UnrecognisedMethods.Add([string]$method)
+        }
+    }
+    $onlyPhoneBasedMfa = Test-OnlyPhoneBasedMfa -MethodsRegistered ([string[]]$methods) `
+        -PhoneMethods $phoneMethods -SurvivingMfaMethods $survivingMfaMethods
+
+    $nextStep = Get-RemediationStep -Risk $risk[0] -HasPhoneMethodRegistered $hasPhoneMethod `
+        -UserType $userType -PhoneMethodsRegistered $phoneMethodList
+
+    # A user with no row in the registration report is not the same as a user with nothing
+    # registered, and the difference matters: the first is missing data, the second is a
+    # finding. Rather than carry a separate InRegistrationReport column for it, the absence
+    # is stated in the column somebody actually reads.
+    $allMethods = if ($registration) { ($methods -join '; ') } else { $script:NoReportRowMarker }
+
+    # Fourteen columns, chosen so the file is readable in Excel. The registration report
+    # also returns isMfaCapable, isMfaRegistered, systemPreferredAuthenticationMethods and
+    # a per-row timestamp; none of them changed what anybody did with the file, and the
+    # evidence age is still reported once, as OldestReportRowUtc in the summary.
     [PSCustomObject][ordered]@{
-        Risk                             = $risk[0]
-        Reason                           = $risk[1]
-        DisplayName                      = [string](Get-PropertyValue $user 'displayName')
-        UserPrincipalName                = [string](Get-PropertyValue $user 'userPrincipalName')
-        UserId                           = $id
-        UserType                         = $userType
-        IsAdmin                          = $isAdmin
-        InSmsPolicyScope                 = $inSmsScope
-        InVoicePolicyScope               = $inVoiceScope
-        HasPhoneMethodRegistered         = $hasPhoneMethod
-        PhoneMethodsRegistered           = ($matchingMethods -join '; ')
-        AllMethodsRegistered             = ($methods -join '; ')
-        IsPasswordlessCapable            = $isPasswordlessCapable
-        IsMfaCapable                     = if ($registration) { [bool](Get-PropertyValue $registration 'isMfaCapable') } else { $false }
-        IsMfaRegistered                  = if ($registration) { [bool](Get-PropertyValue $registration 'isMfaRegistered') } else { $false }
-        SystemPreferredMethods           = if ($registration) { (@((Get-PropertyValue $registration 'systemPreferredAuthenticationMethods')) -join '; ') } else { '' }
-        InRegistrationReport             = [bool]$registration
-        RegistrationReportLastUpdatedUtc = if ($registration) { Get-PropertyValue $registration 'lastUpdatedDateTime' } else { $null }
+        Risk                  = $risk[0]
+        Reason                = $risk[1]
+        NextStep              = $nextStep
+        BlockedAtRetirement   = $onlyPhoneBasedMfa
+        DisplayName           = [string](Get-PropertyValue $user 'displayName')
+        UserPrincipalName     = [string](Get-PropertyValue $user 'userPrincipalName')
+        UserType              = $userType
+        IsAdmin               = $isAdmin
+        InSmsPolicyScope      = $inSmsScope
+        InVoicePolicyScope    = $inVoiceScope
+        PhoneMethodsRegistered = $phoneMethodList
+        AllMethodsRegistered  = $allMethods
+        IsPasswordlessCapable = $isPasswordlessCapable
+        UserId                = $id
     }
 }
 
@@ -990,7 +1682,12 @@ Export-AssessmentCsv -Data $exportRows -Path $OutputPath
 
 # The registration report lags live directory state; the oldest row age is the honest
 # confidence marker for the whole assessment, so it is surfaced in the summary.
-$reportTimestamps = @($rows | Where-Object { $_.RegistrationReportLastUpdatedUtc } | ForEach-Object { $_.RegistrationReportLastUpdatedUtc })
+#
+# Read from the raw Graph payloads rather than the assessment rows: the per-row timestamp
+# is no longer written to the CSV, and the rows carry only what the CSV needs.
+$reportTimestamps = @($registrations |
+    ForEach-Object { Get-PropertyValue $_ 'lastUpdatedDateTime' } |
+    Where-Object { $_ })
 
 $summary = [PSCustomObject][ordered]@{
     TenantId                   = $graphContext.TenantId
@@ -1011,7 +1708,13 @@ $summary = [PSCustomObject][ordered]@{
     Moderate                   = @($affectedRows | Where-Object Risk -eq 'Moderate').Count
     Low                        = @($affectedRows | Where-Object Risk -eq 'Low').Count
     PasswordlessCapableInScope = @($affectedRows | Where-Object { ($_.InSmsPolicyScope -or $_.InVoicePolicyScope) -and $_.IsPasswordlessCapable }).Count
-    UsersMissingFromReport     = @($rows | Where-Object { -not $_.InRegistrationReport }).Count
+    # The headline operational number: users who hit the blocking registration prompt on
+    # 2027-02-01 because a phone is the only thing they have that satisfies MFA. Narrower
+    # than the risk bands, and the one to drive to zero before the date.
+    BlockedAtRetirement        = @($affectedRows | Where-Object BlockedAtRetirement).Count
+    BlockedAdminsAtRetirement  = @($affectedRows | Where-Object { $_.BlockedAtRetirement -and $_.IsAdmin }).Count
+    UnrecognisedMethods        = (@($script:UnrecognisedMethods | Sort-Object) -join '; ')
+    UsersMissingFromReport     = @($rows | Where-Object { $_.AllMethodsRegistered -eq $script:NoReportRowMarker }).Count
     OldestReportRowUtc         = if ($reportTimestamps.Count -gt 0) { ($reportTimestamps | Sort-Object | Select-Object -First 1) } else { $null }
     OutputPath                 = (Resolve-Path -LiteralPath $OutputPath).Path
 }
@@ -1019,39 +1722,69 @@ $summary = [PSCustomObject][ordered]@{
 Write-Host "`n===== ENTRA SMS/VOICE MIGRATION IMPACT =====" -ForegroundColor Magenta
 $summary | Format-List | Out-Host
 
-# Optional artefacts. Both are derived from data already in memory; no extra Graph calls.
-if ($ExportRemediationGroup) {
-    # The migration security group Microsoft's guidance tells you to create in step one.
-    # Emitting the membership list is read-only; creating and populating the group is
-    # a deliberate manual step, because that is a write and this tool does not write.
-    $groupPath = [System.IO.Path]::ChangeExtension($OutputPath, $null).TrimEnd('.') + '_RemediationGroup.csv'
-    $groupMembers = @($rows |
-        Where-Object { $_.Risk -in @('Critical', 'High', 'Moderate') } |
-        Select-Object UserPrincipalName, DisplayName, UserId, Risk, IsAdmin)
+# The action list is written on every run: it is the spreadsheet a technician works from,
+# and it costs nothing, being derived from data already in memory. No extra Graph calls.
+#
+# Emitting the list is read-only. Creating and populating the migration security group
+# stays a deliberate manual step, because that is a write and this tool does not write.
+$actionListPath = [System.IO.Path]::ChangeExtension($OutputPath, $null).TrimEnd('.') + '_ActionList.csv'
+$actionListRows = New-ActionList -Rows $rows
 
-    Export-AssessmentCsv -Data $groupMembers -Path $groupPath
-    $summary | Add-Member -NotePropertyName RemediationGroupPath -NotePropertyValue (Resolve-Path -LiteralPath $groupPath).Path
-    Write-Host "Remediation group membership list ($($groupMembers.Count) users): $groupPath" -ForegroundColor Green
-}
-
-if ($ExportTickets) {
-    $ticketPath = [System.IO.Path]::ChangeExtension($OutputPath, $null).TrimEnd('.') + '_Tickets.csv'
-    $ticketResult = New-TicketExport -Rows $rows -Path $ticketPath -Customer $CustomerName -MaxIndividual $MaxIndividualTickets
-    $summary | Add-Member -NotePropertyName TicketExportPath -NotePropertyValue (Resolve-Path -LiteralPath $ticketResult.Path).Path
-    $summary | Add-Member -NotePropertyName TicketsGenerated -NotePropertyValue $ticketResult.Count
-    Write-Host "Ticket queue ($($ticketResult.Count) tickets): $($ticketResult.Path)" -ForegroundColor Green
-}
+Export-AssessmentCsv -Data $actionListRows -Path $actionListPath
+$summary | Add-Member -NotePropertyName ActionListPath -NotePropertyValue (Resolve-Path -LiteralPath $actionListPath).Path
+Write-Host "Action list ($($actionListRows.Count) users, attach this to a ticket): $actionListPath" -ForegroundColor Green
 
 if ($HtmlReport) {
     $htmlPath = [System.IO.Path]::ChangeExtension($OutputPath, 'html')
     $written = New-HtmlReport -Summary $summary -Rows $exportRows -Path $htmlPath -Customer $CustomerName
     $summary | Add-Member -NotePropertyName HtmlReportPath -NotePropertyValue (Resolve-Path -LiteralPath $written).Path
-    Write-Host "HTML report: $written" -ForegroundColor Green
+    Write-Host "Client report: $written" -ForegroundColor Green
+}
+
+if ($ExportTickets) {
+    $ticketPath = [System.IO.Path]::ChangeExtension($OutputPath, $null).TrimEnd('.') + '_Tickets.csv'
+
+    # Default the history beside the ticket CSV. With dated output folders that will not be
+    # found, which is why -TicketHistoryPath exists and why the console says which file was used.
+    $historyPath = if ($TicketHistoryPath) { $TicketHistoryPath }
+                   else { [System.IO.Path]::ChangeExtension($OutputPath, $null).TrimEnd('.') + '_TicketHistory.json' }
+
+    $history = if ($IgnoreTicketHistory) { @{} } else { Get-TicketHistory -Path $historyPath }
+
+    $ticketResult = New-TicketExport -Rows $rows -Path $ticketPath -Customer $CustomerName `
+        -MaxIndividual $MaxIndividualTickets -History $history
+
+    Save-TicketHistory -Path $historyPath -History $ticketResult.History
+
+    $summary | Add-Member -NotePropertyName TicketExportPath -NotePropertyValue (Resolve-Path -LiteralPath $ticketResult.Path).Path
+    $summary | Add-Member -NotePropertyName TicketsGenerated -NotePropertyValue $ticketResult.Count
+    $summary | Add-Member -NotePropertyName TicketsSuppressedAsAlreadyRaised -NotePropertyValue $ticketResult.Suppressed
+    $summary | Add-Member -NotePropertyName TicketHistoryPath -NotePropertyValue (Resolve-Path -LiteralPath $historyPath).Path
+
+    Write-Host "Ticket queue ($($ticketResult.Count) tickets): $($ticketResult.Path)" -ForegroundColor Green
+    if ($ticketResult.Suppressed -gt 0) {
+        Write-Host "  $($ticketResult.Suppressed) user(s) already ticketed by an earlier run and not raised again. History: $historyPath" -ForegroundColor Cyan
+    }
+    if ($IgnoreTicketHistory) {
+        Write-Host '  -IgnoreTicketHistory was set, so every actionable user was ticketed regardless of previous runs.' -ForegroundColor Yellow
+    }
+}
+
+if ($summary.BlockedAtRetirement -gt 0) {
+    $adminNote = if ($summary.BlockedAdminsAtRetirement -gt 0) { " $($summary.BlockedAdminsAtRetirement) of them privileged." } else { '' }
+    Write-Host "`n$($summary.BlockedAtRetirement) user(s) hold a phone number as their ONLY method that satisfies MFA.$adminNote" -ForegroundColor Red
+    Write-Host 'These are the accounts stopped at sign-in on 2027-02-01 until they register a passkey. Drive this to zero.' -ForegroundColor Red
+}
+else {
+    Write-Host "`nNo user holds a phone number as their only method that satisfies MFA. Nobody is stopped at sign-in on 2027-02-01 on current data." -ForegroundColor Green
+}
+if ($summary.UnrecognisedMethods) {
+    Write-Host "Unrecognised authentication methods seen: $($summary.UnrecognisedMethods). Treated as NOT surviving the retirement, so affected users are reported as more exposed rather than less." -ForegroundColor Yellow
 }
 
 Write-Host '2026-09-01  Users in SMS/voice scope auto-enabled for passkeys; registration campaign set to Microsoft managed.' -ForegroundColor Yellow
-Write-Host '2027-01-28  Deadline to configure a customer-managed telecom provider via the Microsoft Security Store.' -ForegroundColor Yellow
-Write-Host '2027-02-01  Microsoft-provided SMS/voice delivery retired. No opt-out.' -ForegroundColor Red
+Write-Host '2026-10-30  Customer-managed telecom providers can first be configured via the Microsoft Security Store.' -ForegroundColor Yellow
+Write-Host '2027-02-01  Microsoft-provided SMS/voice delivery retired. No opt-out. Also the deadline to have a customer-managed telecom provider configured.' -ForegroundColor Red
 Write-Host 'Interpretation: Critical/High rows deserve validation first; Moderate rows may reveal legacy per-user MFA exposure.' -ForegroundColor Yellow
 Write-Host 'Passkey deployment guide: https://aka.ms/passkey-deployment-guide' -ForegroundColor Cyan
 Write-Host 'No tenant settings were changed.' -ForegroundColor Green
