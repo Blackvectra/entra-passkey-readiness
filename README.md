@@ -15,7 +15,7 @@ Microsoft announced on July 13, 2026 that Microsoft-provided SMS and voice authe
 | Date | What happens |
 |---|---|
 | 2026-09-01 | Users enabled for SMS or voice in the Authentication Methods Policy (AMP) or legacy per-user MFA are auto-enabled for passkeys. The registration campaign is set to Microsoft managed and users are nudged to register. |
-| 2026-09-18 | Customer-managed telecom provider pricing published. |
+| 2026-09-18 | Customer-managed telecom provider options, terms, and pricing published through the Microsoft Security Store. |
 | 2026-10-30 | Customer-managed telecom providers can be configured through the Microsoft Security Store. |
 | 2027-02-01 | Microsoft-provided SMS and voice delivery is retired. No opt-out. Users whose only MFA method is a phone number are blocked and forced to register a phishing-resistant method. |
 
@@ -44,7 +44,12 @@ Microsoft publishes [entra-sms-voice-usage-analyzer](https://github.com/microsof
 
 Run Microsoft's script for the authoritative tenant-level policy and campaign view. Run this one to build the remediation work queue.
 
-**Date discrepancy worth knowing.** Microsoft's script prints `Jan 28, 2027` as the retirement date in its impact summary. Per Microsoft Learn, **February 1, 2027** is the retirement; **January 28, 2027** is the deadline for configuring a customer-managed telecom provider through the Security Store. This tool prints both dates with the correct meaning attached to each. Expect a client who has run both tools to ask.
+**Date discrepancy worth knowing.** Microsoft's script prints `Jan 28, 2027` as the retirement date in its impact summary. Microsoft Learn does not use that date anywhere. What Learn states is:
+
+- **2027-02-01** is the retirement, and the date by which a customer-managed telecom provider must be configured to keep using SMS or voice.
+- **2026-10-30** is when configuring a provider through the Security Store first becomes possible.
+
+Treat `Jan 28, 2027` as an artefact of Microsoft's analyzer rather than a published milestone, and work to February 1. Expect a client who has run both tools to ask.
 
 ---
 
@@ -171,7 +176,7 @@ Ticket volume is managed deliberately:
 | Risk | Ticketing |
 |---|---|
 | Critical | One ticket per user, always. Privileged accounts are never batched. |
-| High | One ticket per user up to `-MaxIndividualTickets` (default 50), then a single campaign ticket for the remainder. |
+| High | One ticket per user until Critical plus High individual tickets together reach `-MaxIndividualTickets` (default 50), then a single campaign ticket for the remainder. |
 | Moderate | One investigation ticket for the whole population. The finding is about tenant configuration, not any individual. |
 | Low / Informational | No ticket. |
 
@@ -256,7 +261,7 @@ Summarised here; full logic and remediation guidance in [docs/Risk-Classificatio
 |---|---|
 | **Critical** | Privileged user, in policy scope, phone method registered, not passwordless-capable |
 | **High** | In policy scope with a registered phone method and no passwordless method, or in policy scope and not passwordless-capable |
-| **Moderate** | Phone method registered but outside resolved modern policy scope — usually legacy per-user MFA exposure |
+| **Moderate** | Phone method registered, no passwordless method, but outside resolved modern policy scope — usually legacy per-user MFA exposure |
 | **Low** | Exposed to the change but already passwordless-capable |
 | **Informational** | No resolved exposure |
 
@@ -324,6 +329,7 @@ This tool processes identity-security metadata. See [SECURITY.md](SECURITY.md).
 
 - [Passkeys by default and retirement of Microsoft-provided SMS and voice authentication](https://learn.microsoft.com/en-us/entra/identity/authentication/concept-sms-voice-retirement)
 - [FAQ for Microsoft-provided SMS and voice retirement](https://learn.microsoft.com/en-us/entra/identity/authentication/concept-sms-voice-retirement-faq)
+- [Choose a telephony provider for SMS and voice authentication](https://learn.microsoft.com/en-us/entra/identity/authentication/concept-phone-providers)
 - [Microsoft's SMS/voice usage analyzer (official)](https://github.com/microsoft/entra-sms-voice-usage-analyzer)
 - [Graph API: list userRegistrationDetails](https://learn.microsoft.com/en-us/graph/api/authenticationmethodsroot-list-userregistrationdetails?view=graph-rest-1.0)
 - [Authentication methods activity](https://learn.microsoft.com/en-us/entra/identity/authentication/howto-authentication-methods-activity)

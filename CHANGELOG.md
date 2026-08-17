@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+- Repository layout now matches every path referenced in the project. Docs moved to `docs/`, samples to `examples/`. Previously all files sat at the repository root, which made the seven `docs/` and `examples/` links in `README.md` dead, left the script's help-text reference to `docs/Microsoft-Migration-Background.md` pointing at nothing, and stopped the `!examples/...` negations in `.gitignore` from applying — most consequentially, `tenants.sample.csv` at the root was matched by the `tenants.*.csv` rule with no negation to rescue it.
+- Removed the `2027-01-28` line from the assessment's console timeline. That date is not published in Microsoft Learn, in either the retirement article or the FAQ, and the script was printing it as a customer-managed telecom provider configuration deadline. Learn gives `2026-10-30` as the date provider configuration first becomes possible and `2027-02-01` as the date by which it must be in place; the timeline now prints those.
+
+### Changed
+- `README.md` "date discrepancy" note rewritten. It previously attributed the `Jan 28, 2027` date to Microsoft Learn while describing it as a Security Store deadline. It now states that Learn does not use the date at all and frames it as an artefact of Microsoft's analyzer output.
+- `README.md` risk-band summary for Moderate now includes the "no passwordless method" condition, matching `Get-RiskAssessment` and `docs/Risk-Classification.md`.
+- `README.md` ticketing table now states that `-MaxIndividualTickets` is a combined budget across Critical and High individual tickets, which is what the code does, rather than a High-only cap.
+- Added the Choose Your Own Telephony Provider article to `README.md` references.
+- `Invoke-EntraSmsVoiceSweep.ps1` now actually guards the per-tenant `Disconnect-MgGraph` call with its `Get-Command` check. The check ran and discarded its result, so it guarded nothing.
+
 ### Planned
 - Optional HTML summary output for client-facing delivery.
 - Optional read of legacy per-user MFA state behind an explicit opt-in switch, so the least-privilege default is preserved.

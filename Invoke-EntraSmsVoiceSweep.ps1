@@ -197,8 +197,9 @@ end {
         try {
             # Fresh context per tenant. Belt and braces: the assessment does this too
             # on the app-only path, but interactive runs rely on this call.
-            Get-Command -Name Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
-            Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
+            if (Get-Command -Name Disconnect-MgGraph -ErrorAction SilentlyContinue) {
+                Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
+            }
 
             $summary = & $AssessmentScriptPath @arguments
 

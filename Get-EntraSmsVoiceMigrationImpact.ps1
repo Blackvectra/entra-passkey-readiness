@@ -1050,8 +1050,8 @@ if ($HtmlReport) {
 }
 
 Write-Host '2026-09-01  Users in SMS/voice scope auto-enabled for passkeys; registration campaign set to Microsoft managed.' -ForegroundColor Yellow
-Write-Host '2027-01-28  Deadline to configure a customer-managed telecom provider via the Microsoft Security Store.' -ForegroundColor Yellow
-Write-Host '2027-02-01  Microsoft-provided SMS/voice delivery retired. No opt-out.' -ForegroundColor Red
+Write-Host '2026-10-30  Customer-managed telecom providers can first be configured via the Microsoft Security Store.' -ForegroundColor Yellow
+Write-Host '2027-02-01  Microsoft-provided SMS/voice delivery retired. No opt-out. Also the deadline to have a customer-managed telecom provider configured.' -ForegroundColor Red
 Write-Host 'Interpretation: Critical/High rows deserve validation first; Moderate rows may reveal legacy per-user MFA exposure.' -ForegroundColor Yellow
 Write-Host 'Passkey deployment guide: https://aka.ms/passkey-deployment-guide' -ForegroundColor Cyan
 Write-Host 'No tenant settings were changed.' -ForegroundColor Green
