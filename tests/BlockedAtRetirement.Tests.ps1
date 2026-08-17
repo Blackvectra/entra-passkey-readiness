@@ -117,3 +117,18 @@ Describe 'Test-OnlyPhoneBasedMfa' {
         }
     }
 }
+
+Describe 'Test-OnlyPhoneBasedMfa with no registration data' {
+
+    It 'treats a null method list as not blocked rather than failing' {
+        # A user absent from the registration report reaches here with no methods at all.
+        # That is an ordinary case: the assessment already surfaces them as High because
+        # every registration-derived field defaults to false. Rejecting null here crashed
+        # the whole run on any tenant holding a recently created account.
+        { Test-OnlyPhoneBasedMfa -MethodsRegistered $null `
+                -PhoneMethods $script:Phone -SurvivingMfaMethods $script:Surviving } | Should -Not -Throw
+
+        Test-OnlyPhoneBasedMfa -MethodsRegistered $null `
+            -PhoneMethods $script:Phone -SurvivingMfaMethods $script:Surviving | Should -BeFalse
+    }
+}

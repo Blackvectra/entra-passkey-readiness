@@ -90,8 +90,8 @@
     Data source limitations:
       - userRegistrationDetails does not return disabled users. This script reads
         accountEnabled separately and assesses enabled users only.
-      - The registration report has reporting latency. RegistrationReportLastUpdatedUtc
-        is included per row so the age of the evidence is visible.
+      - The registration report has reporting latency. OldestReportRowUtc is reported in
+        the summary so the age of the evidence is visible.
       - Entra does not store "SMS" and "voice" as separate registrations. It stores a
         phone number with a type, and the type determines capability. mobilePhone can
         serve both SMS and voice; officePhone is voice-only. There is no clean split.
@@ -491,10 +491,14 @@ function Test-OnlyPhoneBasedMfa {
     # Getting this wrong in the lenient direction costs somebody their Monday morning, so
     # a method this function does not recognise counts as not surviving.
     param(
-        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$MethodsRegistered,
+        # Null as well as empty: a user with no registration-report row has no methods, and
+        # that is an ordinary case rather than a caller error.
+        [Parameter(Mandatory)][AllowNull()][AllowEmptyCollection()][string[]]$MethodsRegistered,
         [Parameter(Mandatory)][string[]]$PhoneMethods,
         [Parameter(Mandatory)][string[]]$SurvivingMfaMethods
     )
+
+    if ($null -eq $MethodsRegistered) { return $false }
 
     $phone = @($MethodsRegistered | Where-Object { $_ -in $PhoneMethods })
     if ($phone.Count -eq 0) { return $false }
@@ -1590,7 +1594,13 @@ $nonMfaMethods = @('email', 'securityQuestion', 'temporaryAccessPass', 'temporar
 $rows = foreach ($user in $enabledUsers) {
     $id = [string](Get-PropertyValue $user 'id')
     $registration = $registrationIndex[$id]
-    $methods = if ($registration) { @((Get-PropertyValue $registration 'methodsRegistered')) } else { @() }
+    # Assigned in two statements deliberately. `$x = if (...) { @() }` yields $null, not an
+    # empty array, because PowerShell unrolls an empty collection to nothing on the way out
+    # of the expression. Every user absent from the registration report went down that
+    # branch, so anything downstream that would not take $null crashed the whole run on any
+    # tenant with a recently created account.
+    $methods = @()
+    if ($registration) { $methods = @(Get-PropertyValue $registration 'methodsRegistered') }
     $matchingMethods = @($methods | Where-Object { $_ -in $phoneMethods })
 
     $inSmsScope = $smsScope.UserIds.Contains($id)
@@ -1672,7 +1682,12 @@ Export-AssessmentCsv -Data $exportRows -Path $OutputPath
 
 # The registration report lags live directory state; the oldest row age is the honest
 # confidence marker for the whole assessment, so it is surfaced in the summary.
-$reportTimestamps = @($rows | Where-Object { $_.RegistrationReportLastUpdatedUtc } | ForEach-Object { $_.RegistrationReportLastUpdatedUtc })
+#
+# Read from the raw Graph payloads rather than the assessment rows: the per-row timestamp
+# is no longer written to the CSV, and the rows carry only what the CSV needs.
+$reportTimestamps = @($registrations |
+    ForEach-Object { Get-PropertyValue $_ 'lastUpdatedDateTime' } |
+    Where-Object { $_ })
 
 $summary = [PSCustomObject][ordered]@{
     TenantId                   = $graphContext.TenantId
