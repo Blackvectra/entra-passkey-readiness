@@ -12,6 +12,17 @@
 BeforeAll {
     . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
     $script:RepoRoot = Split-Path -Parent $PSScriptRoot
+
+    # Filename suffixes that mean "this is tenant evidence". Kept in one place because two
+    # tests use them: one looks for such files in the repo, the other checks this list has
+    # not fallen behind the names the scripts write.
+    $script:EvidenceSuffixes = @(
+        '_ActionList\.csv$'
+        '_RemediationGroup\.csv$'
+        '_Tickets\.csv$'
+        '_TicketHistory\.json$'
+        '^TicketHistory\.json$'
+    )
 }
 
 Describe 'Repository layout' {
@@ -130,14 +141,42 @@ Describe 'Evidence hygiene' {
         # The .gitignore is a safety net, not a control. A real export names privileged
         # accounts and states which of them lack a phishing-resistant method; it belongs
         # in the client documentation store, never here.
+        #
+        # The name patterns are parenthesised as a group. Without that, `A -and B -or C`
+        # binds as `(A -and B) -or C`, so the .git exclusion only guards the first pattern.
         $suspect = Get-ChildItem -Path $script:RepoRoot -Recurse -File |
             Where-Object {
                 $_.FullName -notmatch '[\\/]\.git[\\/]' -and
-                $_.Name -match '^(EntraSmsVoiceMigrationImpact_|SweepSummary_)' -or
-                $_.Name -match '_RemediationGroup\.csv$|_Tickets\.csv$'
-            } |
-            Where-Object { $_.FullName -notmatch '[\\/]examples[\\/]' }
+                $_.FullName -notmatch '[\\/]examples[\\/]' -and
+                (
+                    $_.Name -match '^(EntraSmsVoiceMigrationImpact_|SweepSummary_)' -or
+                    $_.Name -match ($script:EvidenceSuffixes -join '|')
+                )
+            }
 
         $suspect | Should -BeNullOrEmpty -Because "these look like live exports:`n$($suspect.Name -join "`n")"
+    }
+
+    It 'covers every artefact the scripts actually write' {
+        # The check above went stale once already: outputs were renamed and the pattern
+        # list was not, so the safety net silently stopped covering the new filenames.
+        # Rather than trust a hand-maintained list, read the suffixes the scripts build and
+        # require each one to be matched.
+        $literals = [System.Collections.Generic.HashSet[string]]::new()
+        foreach ($file in Get-ChildItem -Path $script:RepoRoot -Filter '*.ps1' -File) {
+            $content = Get-Content -LiteralPath $file.FullName -Raw
+            foreach ($match in [regex]::Matches($content, "'(?<s>_[A-Za-z]+\.(?:csv|json))'")) {
+                [void]$literals.Add($match.Groups['s'].Value)
+            }
+        }
+
+        $literals.Count | Should -BeGreaterThan 0 -Because 'the scripts build output names from suffix literals'
+
+        $uncovered = foreach ($suffix in $literals) {
+            $sample = "EntraSmsVoiceMigrationImpact_Contoso_20260817$suffix"
+            if ($sample -notmatch ($script:EvidenceSuffixes -join '|')) { $suffix }
+        }
+
+        $uncovered | Should -BeNullOrEmpty -Because "the evidence check does not cover:`n$($uncovered -join "`n")"
     }
 }
