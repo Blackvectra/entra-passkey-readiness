@@ -1,0 +1,137 @@
+﻿Priority,Summary,Company,ContactName,ContactEmail,UserId,Risk,Category,DueDate,Status,Source,Description
+P1 - Critical,Passkey migration (privileged): Dale Hendricks,Fabrikam Clinic Group,Dale Hendricks,dale.hendricks@fabrikam-example.com,11111111-aaaa-4bbb-8ccc-000000000001,Critical,Identity / MFA migration,2026-09-01,New,Entra SMS/Voice migration assessment,"PRIVILEGED ACCOUNT AT RISK OF SIGN-IN LOCKOUT
+
+User: Dale Hendricks <dale.hendricks@fabrikam-example.com>
+Object ID: 11111111-aaaa-4bbb-8ccc-000000000001
+Registered phone methods: mobilePhone
+All registered methods: mobilePhone; email
+Passwordless capable: No
+
+Why this ticket exists
+This account holds a privileged role, is targeted by the Entra SMS/voice authentication
+methods policy, and has no phishing-resistant method registered. When Microsoft-provided
+SMS and voice delivery is retired on 2027-02-01 this account cannot satisfy MFA and will
+be blocked at sign-in with no opt-out.
+
+Actions
+1. Contact the user and schedule a short session; do not rely on a self-service nudge for
+   a privileged account.
+2. Register a FIDO2 security key or platform passkey (Windows Hello, iOS, Android).
+3. Verify with an actual test sign-in. Registration alone is not confirmation.
+4. Confirm the account recovery path does not also depend on a phone number.
+5. If this is an emergency-access or break-glass account, confirm the documented exclusion
+   strategy still holds and that at least one break-glass account uses a method outside the
+   retirement scope.
+6. Leave the phone method registered until the passkey is verified working, then remove it.
+
+Do not remove the phone method first. That creates the lockout you are trying to prevent."
+P1 - Critical,Passkey migration (privileged): Priya Raghunathan,Fabrikam Clinic Group,Priya Raghunathan,priya.raghunathan@fabrikam-example.com,11111111-aaaa-4bbb-8ccc-000000000002,Critical,Identity / MFA migration,2026-09-01,New,Entra SMS/Voice migration assessment,"PRIVILEGED ACCOUNT AT RISK OF SIGN-IN LOCKOUT
+
+User: Priya Raghunathan <priya.raghunathan@fabrikam-example.com>
+Object ID: 11111111-aaaa-4bbb-8ccc-000000000002
+Registered phone methods: mobilePhone; officePhone
+All registered methods: mobilePhone; officePhone
+Passwordless capable: No
+
+Why this ticket exists
+This account holds a privileged role, is targeted by the Entra SMS/voice authentication
+methods policy, and has no phishing-resistant method registered. When Microsoft-provided
+SMS and voice delivery is retired on 2027-02-01 this account cannot satisfy MFA and will
+be blocked at sign-in with no opt-out.
+
+Actions
+1. Contact the user and schedule a short session; do not rely on a self-service nudge for
+   a privileged account.
+2. Register a FIDO2 security key or platform passkey (Windows Hello, iOS, Android).
+3. Verify with an actual test sign-in. Registration alone is not confirmation.
+4. Confirm the account recovery path does not also depend on a phone number.
+5. If this is an emergency-access or break-glass account, confirm the documented exclusion
+   strategy still holds and that at least one break-glass account uses a method outside the
+   retirement scope.
+6. Leave the phone method registered until the passkey is verified working, then remove it.
+
+Do not remove the phone method first. That creates the lockout you are trying to prevent."
+P2 - High,Passkey migration: Marcus Whitfield,Fabrikam Clinic Group,Marcus Whitfield,marcus.whitfield@fabrikam-example.com,11111111-aaaa-4bbb-8ccc-000000000003,High,Identity / MFA migration,2026-09-01,New,Entra SMS/Voice migration assessment,"USER AT RISK OF SIGN-IN LOCKOUT
+
+User: Marcus Whitfield <marcus.whitfield@fabrikam-example.com>
+Object ID: 11111111-aaaa-4bbb-8ccc-000000000003
+User type: Member
+Registered phone methods: mobilePhone
+All registered methods: mobilePhone
+Passwordless capable: No
+
+Why this ticket exists
+User is targeted, has a phone method registered, and is not passwordless-capable.
+
+Actions
+1. Direct the user to register a passkey or Microsoft Authenticator, with guidance for their
+   device type.
+2. Confirm registration completed. The registration report lags, so verify in the portal or
+   re-run the assessment rather than assuming.
+3. Leave the existing phone method in place until the new method is confirmed working."
+P2 - High,Passkey migration: Ingrid Solberg,Fabrikam Clinic Group,Ingrid Solberg,ingrid.solberg_northwind-example.com#EXT#@fabrikam-example.onmicrosoft.com,11111111-aaaa-4bbb-8ccc-000000000004,High,Identity / MFA migration,2026-09-01,New,Entra SMS/Voice migration assessment,"USER AT RISK OF SIGN-IN LOCKOUT
+
+User: Ingrid Solberg <ingrid.solberg_northwind-example.com#EXT#@fabrikam-example.onmicrosoft.com>
+Object ID: 11111111-aaaa-4bbb-8ccc-000000000004
+User type: Guest
+Registered phone methods: mobilePhone
+All registered methods: mobilePhone
+Passwordless capable: No
+
+Why this ticket exists
+Guest is targeted, has a phone method registered, and lacks a reported passwordless method; validate B2B passkey readiness.
+
+Actions
+1. Direct the user to register a passkey or Microsoft Authenticator, with guidance for their
+   device type.
+2. Confirm registration completed. The registration report lags, so verify in the portal or
+   re-run the assessment rather than assuming.
+3. Leave the existing phone method in place until the new method is confirmed working.
+
+Guest account. Passkey support for B2B and internal guest users follows a separate Microsoft timeline. Confirm the user can register before promising a date."
+P2 - High,Passkey migration: Tobias Lindqvist,Fabrikam Clinic Group,Tobias Lindqvist,tobias.lindqvist@fabrikam-example.com,11111111-aaaa-4bbb-8ccc-000000000005,High,Identity / MFA migration,2026-09-01,New,Entra SMS/Voice migration assessment,"USER AT RISK OF SIGN-IN LOCKOUT
+
+User: Tobias Lindqvist <tobias.lindqvist@fabrikam-example.com>
+Object ID: 11111111-aaaa-4bbb-8ccc-000000000005
+User type: Member
+Registered phone methods: none reported
+All registered methods: softwareOneTimePasscode
+Passwordless capable: No
+
+Why this ticket exists
+User is targeted by SMS/voice policy and is not passwordless-capable.
+
+Actions
+1. Direct the user to register a passkey or Microsoft Authenticator, with guidance for their
+   device type.
+2. Confirm registration completed. The registration report lags, so verify in the portal or
+   re-run the assessment rather than assuming.
+3. Leave the existing phone method in place until the new method is confirmed working."
+P3 - Moderate,Validate legacy per-user MFA exposure: 2 users,Fabrikam Clinic Group,,,,Moderate,Identity / configuration review,2027-02-01,New,Entra SMS/Voice migration assessment,"VALIDATE LEGACY PER-USER MFA EXPOSURE
+
+Affected users: 2
+
+Why this ticket exists
+These users have a phone-based authentication method registered but did not resolve into
+the modern authentication methods policy scope for SMS or voice. That usually means one of:
+
+  - They are enabled for SMS or voice through legacy per-user MFA service settings, which
+    ARE in scope for the retirement and which this assessment cannot read.
+  - Phone numbers were registered under legacy policy and never cleaned up.
+  - The registration report is stale relative to a recent policy change.
+
+The first case is the one that matters. Those users are exposed to the 2027-02-01 cutoff
+and will not appear in any assessment that only reads the modern policy.
+
+Actions
+1. Check legacy per-user MFA service settings for this population.
+2. If users are enabled for SMS or voice there, convert them to the modern authentication
+   methods policy so the exposure becomes measurable.
+3. Fold any confirmed exposure into the main migration campaign.
+4. For users who are simply carrying a stale phone registration, remove it once a
+   phishing-resistant method is confirmed. This reduces account-recovery attack surface
+   independently of the retirement.
+
+First 10 users:
+  - Rosalind Achebe <rosalind.achebe@fabrikam-example.com> [officePhone]
+  - Service Account - Scanner <svc-scanner@fabrikam-example.com> [alternateMobilePhone]"

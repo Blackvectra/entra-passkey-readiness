@@ -1,0 +1,64 @@
+# ---------------------------------------------------------------------------
+# Tenant evidence. Never commit a real export, not even to a private repo.
+# These exports contain UPNs, admin status, registered auth methods, and
+# identity-security posture. Treat them like a pen test report.
+# ---------------------------------------------------------------------------
+EntraSmsVoiceMigrationImpact_*.csv
+*.tenant.csv
+/reports/
+/output/
+/exports/
+
+# Allow the fictional sample only
+!examples/Example-MigrationImpact.csv
+
+# Secrets and credentials
+*.pfx
+*.cer
+*.key
+*.pem
+*.credential
+*.clixml
+secrets.json
+appsettings.*.json
+.env
+.env.*
+
+# PowerShell
+*.ps1xml.bak
+PSScriptAnalyzerSettings.user.psd1
+/Output/
+/BuildOutput/
+/TestResults/
+testResults*.xml
+coverage*.xml
+*.pester.xml
+
+# Module staging
+/Modules/
+/.pester/
+
+# Editors and OS
+.vscode/
+!.vscode/extensions.json
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs and transcripts
+*.log
+Transcript_*.txt
+
+# Real tenant lists. Only the sample is tracked.
+tenants.csv
+tenants.*.csv
+!examples/tenants.sample.csv
+SweepSummary_*.csv
+EntraSmsVoiceMigrationImpact_*.html
+*_RemediationGroup.csv
+!examples/Example-Report.html
+*_Tickets.csv
+!examples/Example-Tickets.csv
