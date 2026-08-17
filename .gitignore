@@ -59,6 +59,10 @@ tenants.*.csv
 SweepSummary_*.csv
 EntraSmsVoiceMigrationImpact_*.html
 *_RemediationGroup.csv
+*_ActionList.csv
+*_TicketHistory.json
+TicketHistory.json
+!examples/Example-ActionList.csv
 !examples/Example-Report.html
 *_Tickets.csv
 !examples/Example-Tickets.csv

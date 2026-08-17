@@ -40,14 +40,38 @@
     migration candidates: users in SMS/voice policy scope or users with a
     phone-based authentication method registered.
 
+.PARAMETER CsvOnly
+    Writes only the assessment CSV. By default a run also produces the self-contained
+    HTML client report and the action list, because those are what the run is for.
+
+.PARAMETER ExportTickets
+    Also writes a PSA-importable ticket queue. Off by default: most teams raise their own
+    tickets and attach the action list, which needs no extra switch.
+
+.PARAMETER TicketHistoryPath
+    Records which users have already had a ticket raised, so a re-run does not raise a
+    second one for everyone who has not remediated yet. A user returns to the queue only
+    if their risk band got worse. Defaults to a file beside the ticket CSV; if you write
+    to dated output folders, point this at a stable path per customer or the history will
+    not be found.
+
+.PARAMETER IgnoreTicketHistory
+    Ticket every actionable user regardless of previous runs. For rebuilding a queue that
+    was lost, not for routine use.
+
 .PARAMETER PassThru
     Emits the per-user assessment objects to the pipeline in addition to the summary.
 
 .EXAMPLE
+    # Assess a tenant and write the CSV, the client report, and the action list.
     .\Get-EntraSmsVoiceMigrationImpact.ps1 -TenantId contoso.onmicrosoft.com
 
 .EXAMPLE
-    .\Get-EntraSmsVoiceMigrationImpact.ps1 -IncludeUnaffected -OutputPath C:\Reports\Entra-Migration.csv -Verbose
+    .\Get-EntraSmsVoiceMigrationImpact.ps1 -TenantId contoso.onmicrosoft.com `
+        -CustomerName "Contoso Manufacturing" -OutputPath D:\ClientEvidence\contoso.csv
+
+.EXAMPLE
+    .\Get-EntraSmsVoiceMigrationImpact.ps1 -IncludeUnaffected -CsvOnly -OutputPath C:\Reports\Entra-Migration.csv -Verbose
 
 .EXAMPLE
     # Unattended app-only run for a multi-tenant sweep
@@ -103,29 +127,33 @@ param(
     [Parameter()]
     [switch]$IncludeUnaffected,
 
-    # Produces a self-contained HTML report next to the CSV. No external assets, no CDN,
-    # no JavaScript dependencies, so it survives being emailed or archived offline.
-    [Parameter()]
-    [switch]$HtmlReport,
-
     [Parameter()]
     [string]$CustomerName,
 
-    # Writes a UPN-only CSV suitable for bulk-importing the migration security group that
-    # Microsoft's guidance tells you to create as step one. Read-only: it produces a list,
-    # it does not create or populate any group.
+    # Writes only the assessment CSV. By default a run also produces the self-contained
+    # HTML report and the action list, because those are what the run is for; having to
+    # ask for them meant the common case carried three switches it should not have needed.
     [Parameter()]
-    [switch]$ExportRemediationGroup,
+    [switch]$CsvOnly,
 
-    # Writes a PSA-importable ticket queue. Critical and High users get individual tickets;
-    # everything else rolls into batch tickets, because 400 individual tickets is a backlog
-    # nobody works, not a remediation plan.
+    # Writes a PSA-importable ticket queue. Off by default: most teams raise their own
+    # tickets and attach the action list, which needs no extra switch.
     [Parameter()]
     [switch]$ExportTickets,
 
     [Parameter()]
     [ValidateRange(1, 500)]
     [int]$MaxIndividualTickets = 50,
+
+    # Users already ticketed by a previous run, so a re-run does not raise a second ticket
+    # for everyone who has not remediated yet. Defaults to a file beside the ticket CSV.
+    # If you write to dated output folders, point this at a stable path per customer or the
+    # history will not be found. Pass -IgnoreTicketHistory to deliberately re-raise.
+    [Parameter()]
+    [string]$TicketHistoryPath,
+
+    [Parameter()]
+    [switch]$IgnoreTicketHistory,
 
     # Output files are restricted to the file owner and local Administrators by default.
     # Use this only where the filesystem rejects ACL changes and you control access another way.
@@ -1090,6 +1118,86 @@ function Get-TicketNextStep {
         -PhoneMethodsRegistered ([string]$Row.PhoneMethodsRegistered)
 }
 
+function Get-TicketHistory {
+    # Users an earlier run already raised a ticket for, as a map of user id to the risk
+    # band they were at when it was raised.
+    #
+    # Without this, a second run regenerates the whole queue and imports a duplicate ticket
+    # for everyone who has not remediated yet. On a monthly cadence that is how a PSA queue
+    # fills with copies of work already in progress and stops being trusted.
+    [CmdletBinding()]
+    param([string]$Path)
+
+    $empty = @{}
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) { return $empty }
+
+    try {
+        $raw = Get-Content -LiteralPath $Path -Raw
+        if ([string]::IsNullOrWhiteSpace($raw)) { return $empty }
+
+        $parsed = $raw | ConvertFrom-Json -AsHashtable
+        $entries = if ($parsed -is [hashtable] -and $parsed.ContainsKey('Ticketed')) { $parsed['Ticketed'] } else { $parsed }
+        if ($entries -isnot [hashtable]) { return $empty }
+
+        $history = @{}
+        foreach ($key in $entries.Keys) { $history[[string]$key] = [string]$entries[$key] }
+        return $history
+    }
+    catch {
+        # A corrupt history must not stop the assessment. Warn and behave as a first run,
+        # which duplicates tickets rather than dropping them; the safe direction.
+        Write-Warning "Could not read ticket history at $Path, treating this as a first run. $($_.Exception.Message)"
+        return $empty
+    }
+}
+
+function Save-TicketHistory {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][hashtable]$History
+    )
+
+    $directory = Split-Path -Parent $Path
+    if ($directory -and -not (Test-Path -LiteralPath $directory)) {
+        New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    }
+
+    # Object ids and risk bands only. No names, no UPNs: this file sits wherever the
+    # operator points it and does not need to carry identifying data to do its job.
+    [PSCustomObject]@{
+        Schema      = 1
+        UpdatedUtc  = (Get-Date).ToUniversalTime().ToString('o')
+        Ticketed    = $History
+    } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Path -Encoding utf8
+
+    if (-not $SkipAclHardening) { Protect-OutputFile -Path $Path }
+}
+
+function Test-NeedsTicket {
+    # A user needs a ticket if they have never had one, or if they have got worse since
+    # the one they had. Somebody who was High last month and is High today is already in
+    # somebody's queue; raising it again does not add information.
+    param(
+        # Empty is allowed and means "ticket them": a row with no object id cannot be
+        # matched against history, and dropping it silently is the wrong failure.
+        [Parameter(Mandatory)][AllowEmptyString()][string]$UserId,
+        [Parameter(Mandatory)][string]$CurrentRisk,
+        [Parameter(Mandatory)][AllowEmptyCollection()][hashtable]$History
+    )
+
+    if ([string]::IsNullOrWhiteSpace($UserId)) { return $true }
+    if (-not $History.ContainsKey($UserId)) { return $true }
+
+    $order = @{ Critical = 0; High = 1; Moderate = 2; Low = 3; Informational = 4 }
+    $previous = $order[[string]$History[$UserId]]
+    $current = $order[$CurrentRisk]
+
+    # An unrecognised band on either side falls back to raising the ticket.
+    if ($null -eq $previous -or $null -eq $current) { return $true }
+
+    return ($current -lt $previous)
+}
+
 function New-TicketExport {
     # Generic PSA-shaped columns. ConnectWise, Autotask, Halo, and Freshservice all import
     # from a flat CSV; the column names differ per platform, so map them at import time
@@ -1098,7 +1206,11 @@ function New-TicketExport {
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Rows,
         [Parameter(Mandatory)][string]$Path,
         [string]$Customer,
-        [int]$MaxIndividual = 50
+        [int]$MaxIndividual = 50,
+
+        # User ids already ticketed by an earlier run, mapped to the risk band they were at
+        # when the ticket was raised. Empty for a first run.
+        [AllowEmptyCollection()][hashtable]$History = @{}
     )
 
     $today = Get-Date
@@ -1110,9 +1222,25 @@ function New-TicketExport {
     $primaryDeadline = if ($today -lt $autoEnable) { $autoEnable } else { $retirement }
     $company = if ($Customer) { $Customer } else { 'Unassigned' }
 
-    $criticalRows = @($Rows | Where-Object Risk -eq 'Critical' | Sort-Object DisplayName)
-    $highRows = @($Rows | Where-Object Risk -eq 'High' | Sort-Object -Property @{ Expression = 'IsAdmin'; Descending = $true }, DisplayName)
-    $moderateRows = @($Rows | Where-Object Risk -eq 'Moderate' | Sort-Object DisplayName)
+    # Everyone in an actionable band, before history is applied. Used to report how many
+    # were suppressed, so a near-empty queue reads as "already ticketed" rather than
+    # "assessment found nothing".
+    $allActionable = @($Rows | Where-Object { $_.Risk -in @('Critical', 'High', 'Moderate') })
+
+    # A user is ticketed once. They come back only if they got worse, because somebody who
+    # was High last month and is High today is already in a queue and a second ticket adds
+    # no information, just noise the technician has to close.
+    $needsTicket = {
+        param($row)
+        Test-NeedsTicket -UserId ([string]$row.UserId) -CurrentRisk ([string]$row.Risk) -History $History
+    }
+
+    $criticalRows = @($Rows | Where-Object Risk -eq 'Critical' | Where-Object { & $needsTicket $_ } | Sort-Object DisplayName)
+    $highRows = @($Rows | Where-Object Risk -eq 'High' | Where-Object { & $needsTicket $_ } |
+        Sort-Object -Property @{ Expression = 'IsAdmin'; Descending = $true }, DisplayName)
+    $moderateRows = @($Rows | Where-Object Risk -eq 'Moderate' | Where-Object { & $needsTicket $_ } | Sort-Object DisplayName)
+
+    $suppressed = $allActionable.Count - ($criticalRows.Count + $highRows.Count + $moderateRows.Count)
 
     $tickets = [System.Collections.Generic.List[object]]::new()
 
@@ -1287,7 +1415,22 @@ $sample
     }
 
     Export-AssessmentCsv -Data $tickets.ToArray() -Path $Path
-    return [PSCustomObject]@{ Path = $Path; Count = $tickets.Count }
+
+    # History carries forward everything it already held plus everyone ticketed this run,
+    # so a user who remediates and later regresses is still recognised as previously seen.
+    $updatedHistory = @{}
+    foreach ($key in $History.Keys) { $updatedHistory[[string]$key] = [string]$History[$key] }
+    foreach ($row in @($criticalRows) + @($highRows) + @($moderateRows)) {
+        $id = [string]$row.UserId
+        if (-not [string]::IsNullOrWhiteSpace($id)) { $updatedHistory[$id] = [string]$row.Risk }
+    }
+
+    return [PSCustomObject]@{
+        Path       = $Path
+        Count      = $tickets.Count
+        Suppressed = $suppressed
+        History    = $updatedHistory
+    }
 }
 
 function Protect-CsvInjection {
@@ -1539,31 +1682,51 @@ $summary = [PSCustomObject][ordered]@{
 Write-Host "`n===== ENTRA SMS/VOICE MIGRATION IMPACT =====" -ForegroundColor Magenta
 $summary | Format-List | Out-Host
 
-# Optional artefacts. Both are derived from data already in memory; no extra Graph calls.
-if ($ExportRemediationGroup) {
+# The reports are what the run is for, so they are produced unless -CsvOnly says otherwise.
+# All of it comes from data already in memory; no extra Graph calls.
+if (-not $CsvOnly) {
     # Emitting the list is read-only. Creating and populating the group stays a deliberate
     # manual step, because that is a write and this tool does not write.
-    $groupPath = [System.IO.Path]::ChangeExtension($OutputPath, $null).TrimEnd('.') + '_RemediationGroup.csv'
+    $groupPath = [System.IO.Path]::ChangeExtension($OutputPath, $null).TrimEnd('.') + '_ActionList.csv'
     $groupMembers = New-ActionList -Rows $rows
 
     Export-AssessmentCsv -Data $groupMembers -Path $groupPath
-    $summary | Add-Member -NotePropertyName RemediationGroupPath -NotePropertyValue (Resolve-Path -LiteralPath $groupPath).Path
-    Write-Host "Action list / remediation group membership ($($groupMembers.Count) users): $groupPath" -ForegroundColor Green
+    $summary | Add-Member -NotePropertyName ActionListPath -NotePropertyValue (Resolve-Path -LiteralPath $groupPath).Path
+    Write-Host "Action list ($($groupMembers.Count) users, attach this to a ticket): $groupPath" -ForegroundColor Green
+
+    $htmlPath = [System.IO.Path]::ChangeExtension($OutputPath, 'html')
+    $written = New-HtmlReport -Summary $summary -Rows $exportRows -Path $htmlPath -Customer $CustomerName
+    $summary | Add-Member -NotePropertyName HtmlReportPath -NotePropertyValue (Resolve-Path -LiteralPath $written).Path
+    Write-Host "Client report: $written" -ForegroundColor Green
 }
 
 if ($ExportTickets) {
     $ticketPath = [System.IO.Path]::ChangeExtension($OutputPath, $null).TrimEnd('.') + '_Tickets.csv'
-    $ticketResult = New-TicketExport -Rows $rows -Path $ticketPath -Customer $CustomerName -MaxIndividual $MaxIndividualTickets
+
+    # Default the history beside the ticket CSV. With dated output folders that will not be
+    # found, which is why -TicketHistoryPath exists and why the console says which file was used.
+    $historyPath = if ($TicketHistoryPath) { $TicketHistoryPath }
+                   else { [System.IO.Path]::ChangeExtension($OutputPath, $null).TrimEnd('.') + '_TicketHistory.json' }
+
+    $history = if ($IgnoreTicketHistory) { @{} } else { Get-TicketHistory -Path $historyPath }
+
+    $ticketResult = New-TicketExport -Rows $rows -Path $ticketPath -Customer $CustomerName `
+        -MaxIndividual $MaxIndividualTickets -History $history
+
+    Save-TicketHistory -Path $historyPath -History $ticketResult.History
+
     $summary | Add-Member -NotePropertyName TicketExportPath -NotePropertyValue (Resolve-Path -LiteralPath $ticketResult.Path).Path
     $summary | Add-Member -NotePropertyName TicketsGenerated -NotePropertyValue $ticketResult.Count
-    Write-Host "Ticket queue ($($ticketResult.Count) tickets): $($ticketResult.Path)" -ForegroundColor Green
-}
+    $summary | Add-Member -NotePropertyName TicketsSuppressedAsAlreadyRaised -NotePropertyValue $ticketResult.Suppressed
+    $summary | Add-Member -NotePropertyName TicketHistoryPath -NotePropertyValue (Resolve-Path -LiteralPath $historyPath).Path
 
-if ($HtmlReport) {
-    $htmlPath = [System.IO.Path]::ChangeExtension($OutputPath, 'html')
-    $written = New-HtmlReport -Summary $summary -Rows $exportRows -Path $htmlPath -Customer $CustomerName
-    $summary | Add-Member -NotePropertyName HtmlReportPath -NotePropertyValue (Resolve-Path -LiteralPath $written).Path
-    Write-Host "HTML report: $written" -ForegroundColor Green
+    Write-Host "Ticket queue ($($ticketResult.Count) tickets): $($ticketResult.Path)" -ForegroundColor Green
+    if ($ticketResult.Suppressed -gt 0) {
+        Write-Host "  $($ticketResult.Suppressed) user(s) already ticketed by an earlier run and not raised again. History: $historyPath" -ForegroundColor Cyan
+    }
+    if ($IgnoreTicketHistory) {
+        Write-Host '  -IgnoreTicketHistory was set, so every actionable user was ticketed regardless of previous runs.' -ForegroundColor Yellow
+    }
 }
 
 if ($summary.BlockedAtRetirement -gt 0) {

@@ -38,6 +38,14 @@
 .PARAMETER IncludeUnaffected
     Passed through to the assessment. Produces a full inventory rather than only candidates.
 
+.PARAMETER CsvOnly
+    Passed through to the assessment. Writes only the per-tenant CSVs, skipping the client
+    report and action list that are otherwise produced for every tenant.
+
+.PARAMETER ExportTickets
+    Also writes a ticket queue per tenant. Ticket history is kept per tenant folder, so a
+    repeat sweep raises tickets only for users who are new or who got worse.
+
 .PARAMETER ThrottleLimit
     Tenants assessed concurrently, 1 to 16. Default 1, which is sequential.
 
@@ -119,11 +127,10 @@ param(
     [Parameter()]
     [switch]$IncludeUnaffected,
 
+    # The client report and action list are produced for every tenant by default; this
+    # writes only the assessment CSVs.
     [Parameter()]
-    [switch]$HtmlReport,
-
-    [Parameter()]
-    [switch]$ExportRemediationGroup,
+    [switch]$CsvOnly,
 
     [Parameter()]
     [switch]$ExportTickets,
@@ -300,20 +307,17 @@ end {
             $arguments.CertificateThumbprint = $CertificateThumbprint
         }
         if ($IncludeUnaffected) { $arguments.IncludeUnaffected = $true }
-        if ($HtmlReport) {
-            $arguments.HtmlReport = $true
-            # The customer label becomes the report heading, so each HTML is client-ready
-            # without hand-editing after the sweep.
-            $arguments.CustomerName = $target.Label
-        }
-        if ($ExportRemediationGroup) { $arguments.ExportRemediationGroup = $true }
+        if ($CsvOnly) { $arguments.CsvOnly = $true }
         if ($SkipAclHardening) { $arguments.SkipAclHardening = $true }
+        # The customer label becomes the report heading and the ticket company, so every
+        # artefact is client-ready without hand-editing after the sweep.
+        $arguments.CustomerName = $target.Label
         if ($ExportTickets) {
             $arguments.ExportTickets = $true
             $arguments.MaxIndividualTickets = $MaxIndividualTickets
-            # Company on every ticket comes from the tenant list label, so the queue
-            # imports straight into the right customer record without hand-editing.
-            $arguments.CustomerName = $target.Label
+            # Ticket history lives per tenant folder rather than per dated run, so a
+            # monthly sweep does not re-raise tickets already in somebody's queue.
+            $arguments.TicketHistoryPath = Join-Path $tenantDir 'TicketHistory.json'
         }
 
         $jobs.Add([PSCustomObject]@{

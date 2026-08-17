@@ -14,7 +14,7 @@ BeforeAll {
     $script:ExamplesDir = Join-Path (Split-Path -Parent $PSScriptRoot) 'examples'
 
     $script:Assessment = @(Import-Csv -LiteralPath (Join-Path $script:ExamplesDir 'Example-MigrationImpact.csv'))
-    $script:ActionList = @(Import-Csv -LiteralPath (Join-Path $script:ExamplesDir 'Example-RemediationGroup.csv'))
+    $script:ActionList = @(Import-Csv -LiteralPath (Join-Path $script:ExamplesDir 'Example-ActionList.csv'))
     $script:Tickets = @(Import-Csv -LiteralPath (Join-Path $script:ExamplesDir 'Example-Tickets.csv'))
 
     $script:RiskOrder = @{ Critical = 0; High = 1; Moderate = 2; Low = 3; Informational = 4 }
@@ -44,7 +44,7 @@ Describe 'Example-MigrationImpact.csv' {
     }
 }
 
-Describe 'Example-RemediationGroup.csv' {
+Describe 'Example-ActionList.csv' {
 
     It 'exposes the columns a technician needs and none of the diagnostic ones' {
         $script:ActionList[0].PSObject.Properties.Name | Should -Be @(

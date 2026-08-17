@@ -16,19 +16,20 @@ Every Microsoft Graph call is a GET. It does not modify users, groups, policies,
 ```powershell
 Install-Module Microsoft.Graph.Authentication -Scope CurrentUser
 
-.\Get-EntraSmsVoiceMigrationImpact.ps1 -TenantId contoso.onmicrosoft.com `
-    -CustomerName "Contoso Manufacturing" -HtmlReport -ExportRemediationGroup
+.\Get-EntraSmsVoiceMigrationImpact.ps1 -TenantId contoso.onmicrosoft.com
 ```
 
-Sign in as Global Reader or Security Reader. You get three files beside each other:
+That is the whole thing. Sign in as Global Reader or Security Reader, and you get three files beside each other:
 
 | File | What it is |
 |---|---|
 | `...Impact.csv` | One risk-ranked row per exposed user, highest risk first |
 | `...Impact.html` | A self-contained client report ([sample](examples/Example-Report.html)) |
-| `..._RemediationGroup.csv` | The action list: affected users, what they have, what to do. Attach it to a ticket ([sample](examples/Example-RemediationGroup.csv)) |
+| `..._ActionList.csv` | Affected users, what they have, what to do. Attach it to a ticket ([sample](examples/Example-ActionList.csv)) |
 
-Add `-ExportTickets` if you want a fourth file shaped for bulk PSA import ([sample](examples/Example-Tickets.csv)). Skip it if you raise tickets yourself — nothing is created in any external system either way.
+Add `-CustomerName "Contoso Manufacturing"` to put the client's name on the report. That is the only switch most runs need.
+
+Everything else is optional: `-CsvOnly` skips the report and action list, and `-ExportTickets` adds a fourth file shaped for bulk PSA import ([sample](examples/Example-Tickets.csv)). Nothing is created in any external system by any of it — every output is a file on disk.
 
 ## The three scripts
 
@@ -266,10 +267,10 @@ When `-TenantId` is supplied as a GUID, the script verifies the established Grap
 
 ```powershell
 .\Get-EntraSmsVoiceMigrationImpact.ps1 -TenantId contoso.onmicrosoft.com `
-    -CustomerName "Contoso Manufacturing" -HtmlReport -ExportRemediationGroup
+    -CustomerName "Contoso Manufacturing"
 ```
 
-`-HtmlReport` writes a self-contained HTML file beside the CSV. No CDN, no external assets, no JavaScript, so it survives being emailed, archived, or opened offline years later.
+The report is written on every run unless you pass `-CsvOnly`. It is a self-contained HTML file beside the CSV. No CDN, no external assets, no JavaScript, so it survives being emailed, archived, or opened offline years later.
 
 It is designed as a document rather than a dashboard, because it gets printed:
 
@@ -289,12 +290,12 @@ See [examples/Example-Report.html](examples/Example-Report.html) for a rendered 
 
 ### The action list
 
-`-ExportRemediationGroup` writes a second CSV containing just the Critical, High, and Moderate users. It does two jobs:
+The action list is written on every run unless you pass `-CsvOnly`. It contains just the Critical, High, and Moderate users, and does two jobs:
 
 - **The file you attach to a ticket you raised yourself.** Eight columns, sorted worst-first with admins ahead of standard users, so it is worked top-down: `Risk`, `DisplayName`, `UserPrincipalName`, `IsAdmin`, `PhoneMethodsRegistered`, `IsPasswordlessCapable`, `NextStep`, `UserId`. Everything a technician needs and none of the diagnostic columns that make the full export wide.
 - **The membership list** for the migration security group Microsoft's guidance tells you to create as step one, ready for bulk import on `UserPrincipalName`.
 
-See [examples/Example-RemediationGroup.csv](examples/Example-RemediationGroup.csv).
+See [examples/Example-ActionList.csv](examples/Example-ActionList.csv).
 
 Producing the list is read-only. Creating and populating the group stays a deliberate manual action, because that is a write and this tool does not write.
 
@@ -304,7 +305,7 @@ Producing the list is read-only. Creating and populating the group stays a delib
 
 ```powershell
 .\Get-EntraSmsVoiceMigrationImpact.ps1 -TenantId contoso.onmicrosoft.com `
-    -CustomerName "Contoso Manufacturing" -ExportTickets -ExportRemediationGroup -HtmlReport
+    -CustomerName "Contoso Manufacturing" -ExportTickets
 ```
 
 `-ExportTickets` writes a flat CSV shaped for PSA import. Columns: `Priority`, `Summary`, `Company`, `ContactName`, `ContactEmail`, `UserId`, `Risk`, `Category`, `DueDate`, `Status`, `Source`, `Description`. Generic on purpose, since ConnectWise, Autotask, Halo, and Freshservice each name these differently; map them at import rather than baking one vendor's schema into the tool.
@@ -332,6 +333,31 @@ See [examples/Example-Tickets.csv](examples/Example-Tickets.csv) for a sample bu
 
 **Note on multiline descriptions.** Ticket bodies contain embedded newlines inside quoted CSV fields. This is valid RFC 4180 and handled by every PSA tested, but some older importers reject it. Check against the sample first.
 
+### Re-running without duplicating tickets
+
+A monthly re-run must not raise a second ticket for everyone who has not remediated yet. It does not: the run records which users it ticketed, and a later run only raises a ticket for a user who is **new**, or whose risk band **got worse**.
+
+Somebody who was High last month and is High today is already in somebody's queue, so raising it again adds no information — just a ticket a technician has to close.
+
+```
+Ticket queue (3 tickets): D:\ClientEvidence\contoso_Tickets.csv
+  14 user(s) already ticketed by an earlier run and not raised again. History: D:\ClientEvidence\contoso_TicketHistory.json
+```
+
+The history file holds object IDs and risk bands only — no names, no UPNs — so it can sit wherever is convenient without carrying identifying data.
+
+**One thing to get right.** The history defaults to a file beside the ticket CSV. If you write to dated output folders — which the [playbook](docs/Operations-Playbook.md) recommends — each run lands somewhere new and finds no history, so every run looks like a first run. Point `-TicketHistoryPath` at a stable path per customer:
+
+```powershell
+.\Get-EntraSmsVoiceMigrationImpact.ps1 -TenantId contoso.onmicrosoft.com `
+    -OutputPath "D:\ClientEvidence\Contoso\$(Get-Date -f yyyy-MM-dd)\contoso.csv" `
+    -ExportTickets -TicketHistoryPath 'D:\ClientEvidence\Contoso\TicketHistory.json'
+```
+
+The sweep does this for you: history lives in the per-tenant folder rather than the dated run folder, so a repeat sweep across the estate is already deduplicated.
+
+`-IgnoreTicketHistory` raises tickets for everyone regardless, for rebuilding a queue that was lost. `TicketsSuppressedAsAlreadyRaised` in the summary tells you how many were held back, so a near-empty queue reads as "already ticketed" rather than "assessment found nothing".
+
 ### Parameters
 
 #### `Get-EntraSmsVoiceMigrationImpact.ps1`
@@ -343,17 +369,18 @@ See [examples/Example-Tickets.csv](examples/Example-Tickets.csv) for a sample bu
 | `-CertificateThumbprint` | string | none | Certificate thumbprint for app-only auth. |
 | `-OutputPath` | string | timestamped CSV beside the script | Destination CSV path. Parent directory is created if missing. |
 | `-IncludeUnaffected` | switch | off | Include every enabled user, not just migration candidates. |
-| `-HtmlReport` | switch | off | Also write a self-contained HTML report beside the CSV. |
+| `-CsvOnly` | switch | off | Write only the assessment CSV, skipping the report and action list. |
 | `-CustomerName` | string | none | Heading used on the HTML report. |
-| `-ExportRemediationGroup` | switch | off | Write a UPN list of Critical/High/Moderate users for bulk group import. |
-| `-ExportTickets` | switch | off | Write a PSA-importable ticket queue. |
+| `-ExportTickets` | switch | off | Also write a PSA-importable ticket queue. |
 | `-MaxIndividualTickets` | int | 50 | Cap on individual tickets before High findings batch into a campaign ticket. |
+| `-TicketHistoryPath` | string | beside the ticket CSV | Users already ticketed, so a re-run does not raise duplicates. See [Re-running without duplicating tickets](#re-running-without-duplicating-tickets). |
+| `-IgnoreTicketHistory` | switch | off | Ticket every actionable user regardless of previous runs. |
 | `-SkipAclHardening` | switch | off | Skip restricting output file permissions. Use only where the filesystem rejects ACL changes. |
 | `-PassThru` | switch | off | Emit per-user objects to the pipeline in addition to the summary. |
 
 #### `Invoke-EntraSmsVoiceSweep.ps1`
 
-Accepts and passes through `-IncludeUnaffected`, `-HtmlReport`, `-ExportRemediationGroup`, `-ExportTickets`, `-MaxIndividualTickets`, and `-SkipAclHardening`. Its own parameters:
+Accepts and passes through `-IncludeUnaffected`, `-CsvOnly`, `-ExportTickets`, `-MaxIndividualTickets`, and `-SkipAclHardening`. Its own parameters:
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|

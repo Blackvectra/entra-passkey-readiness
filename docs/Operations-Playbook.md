@@ -164,16 +164,23 @@ $real | Where-Object Risk -eq 'Critical' | Format-Table DisplayName, UserPrincip
 
 Do this **before** generating tickets, not after. Reviewing the exclusions once per customer and recording the pattern in your runbook turns an hours-long first pass into a thirty-second one on every later run.
 
-### Ticket duplication on re-runs
+### Ticket history, and the one way to get it wrong
 
-`-ExportTickets` generates the full queue from the current assessment every time. It has no memory of what you imported last month, so importing a second export creates a second ticket for every user who has not yet remediated.
+Re-runs no longer duplicate tickets. The run records which users it ticketed, and a later run raises one only for a user who is new or whose risk band got worse. Somebody who was High last month and is High today is already in a queue.
 
-Until that changes, pick one:
+The one way to lose that: the history file defaults to sitting beside the ticket CSV, and this playbook recommends writing each run to a dated folder. Those two together mean every run lands somewhere new, finds no history, and behaves like a first run.
 
-- Generate tickets **once**, at the start of the campaign, and track completion through the diff rather than through new tickets.
-- Or diff first, and only import tickets for users the change report marks `New` or `Regressed`.
+The sweep handles it — history lives in the per-tenant folder rather than the dated run folder. For single-tenant runs, point `-TicketHistoryPath` at something stable:
 
-The second is the better habit. It also keeps the PSA queue honest about what is actually new.
+```powershell
+.\Get-EntraSmsVoiceMigrationImpact.ps1 -TenantId contoso.onmicrosoft.com `
+    -OutputPath "D:\ClientEvidence\Contoso\$stamp\contoso.csv" `
+    -ExportTickets -TicketHistoryPath 'D:\ClientEvidence\Contoso\TicketHistory.json'
+```
+
+Check `TicketsSuppressedAsAlreadyRaised` in the summary. If it is zero on a second run against an unchanged tenant, the history is not being found.
+
+The file holds object IDs and risk bands only, so it carries no identifying data and can live wherever is convenient. Back it up with the evidence: losing it means the next run re-raises everything.
 
 ### Legacy per-user MFA
 
@@ -210,8 +217,7 @@ Gaps worth knowing about, roughly in order of how much time each would save an e
 
 | Idea | Why it would help |
 |---|---|
-| Ticket state carried across runs | Removes the duplication problem above, which is the sharpest edge in a recurring engagement. |
-| `-ExcludeUpnPattern` parameter | Every operator writes the same `Where-Object` filter for service accounts. Making it a parameter puts it in the ticket and remediation-group paths too, not just the pipeline. |
+| `-ExcludeUpnPattern` parameter | Every operator writes the same `Where-Object` filter for service accounts. Making it a parameter puts it in the ticket and action-list paths too, not just the pipeline. |
 | Estate-wide HTML report | Reports are per-tenant today. A single roll-up ranking customers by Critical count is what an account manager actually wants. |
 | Legacy per-user MFA read behind an explicit opt-in switch | Would close the largest coverage gap, at the cost of beta endpoints and broader scopes. Opt-in keeps the least-privilege default intact. |
 | Trend series rather than pairwise diff | The diff compares two runs. Ten runs plotted would show whether a campaign is decelerating, which is the thing you want to catch early. |
