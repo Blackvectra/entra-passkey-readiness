@@ -29,11 +29,14 @@ BeforeAll {
     $script:BatchCalls = [System.Collections.Generic.List[object]]::new()
     $script:SeenCount = @{}
 
+    # Signature matches the real function apart from -MaxAttempts, which is deliberately
+    # absent: that governs retry of the batch envelope itself, and nothing in the call path
+    # under test sets it. Declaring a parameter this stub would ignore would misrepresent
+    # what is being exercised.
     function Invoke-GraphBatch {
         param(
             [Parameter(Mandatory)][string]$Uri,
-            [Parameter(Mandatory)][object[]]$Request,
-            [int]$MaxAttempts = 5
+            [Parameter(Mandatory)][object[]]$Request
         )
 
         $script:BatchCalls.Add([PSCustomObject]@{ Uri = $Uri; Count = $Request.Count })

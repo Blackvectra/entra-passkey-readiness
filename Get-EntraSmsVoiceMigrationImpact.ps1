@@ -914,7 +914,15 @@ function New-HtmlReport {
         [string]$Customer
     )
 
-    $now = Get-Date
+    # The assessment time, not the moment this HTML was written. In a real run they are
+    # seconds apart, so nothing changes there -- but the report is a statement about when
+    # the data was gathered, and the countdowns below are only honest measured from that.
+    # It also makes the report a pure function of the summary, so regenerating the
+    # published sample produces no diff and nobody learns to skip regenerating it.
+    $now = if ($Summary.PSObject.Properties['AssessmentTimeUtc'] -and $Summary.AssessmentTimeUtc) {
+        ([datetime]$Summary.AssessmentTimeUtc).ToLocalTime()
+    } else { Get-Date }
+
     $autoEnableDate = [datetime]'2026-09-01'
     $retirementDate = [datetime]'2027-02-01'
     $providerDate = [datetime]'2026-10-30'

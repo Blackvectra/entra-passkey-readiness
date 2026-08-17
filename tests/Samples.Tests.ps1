@@ -260,3 +260,44 @@ Describe 'The samples are fictional' {
         }
     }
 }
+
+Describe 'The samples are reproducible' {
+
+    # A generator whose output churns on every run teaches people not to run it. The
+    # published report used to stamp the moment the HTML was written rather than the
+    # moment the assessment ran, so regenerating produced a diff even when nothing about
+    # the data had changed -- and a diff nobody can explain is a diff nobody regenerates.
+
+    It 'regenerates byte-identical files from unchanged inputs' {
+        $generator = Join-Path (Split-Path -Parent $PSScriptRoot) 'examples/New-ExampleOutput.ps1'
+        $generator | Should -Exist
+
+        $samples = @(
+            'Example-MigrationImpact.csv'
+            'Example-ActionList.csv'
+            'Example-Tickets.csv'
+            'Example-Report.html'
+        ) | ForEach-Object { Join-Path $script:ExamplesDir $_ }
+
+        $before = @{}
+        foreach ($sample in $samples) {
+            $before[$sample] = (Get-FileHash -LiteralPath $sample -Algorithm SHA256).Hash
+        }
+
+        # A child process, so nothing the generator dot-sources leaks into the suite.
+        $pwshPath = if ($IsWindows) { Join-Path $PSHOME 'pwsh.exe' } else { Join-Path $PSHOME 'pwsh' }
+        if (-not (Test-Path -LiteralPath $pwshPath)) { $pwshPath = 'pwsh' }
+
+        $process = Start-Process -FilePath $pwshPath -PassThru -Wait -NoNewWindow `
+            -RedirectStandardOutput ([System.IO.Path]::GetTempFileName()) `
+            -RedirectStandardError ([System.IO.Path]::GetTempFileName()) `
+            -ArgumentList @('-NoProfile', '-NonInteractive', '-File', $generator)
+
+        $process.ExitCode | Should -Be 0 -Because 'the sample generator must run cleanly'
+
+        foreach ($sample in $samples) {
+            (Get-FileHash -LiteralPath $sample -Algorithm SHA256).Hash |
+                Should -Be $before[$sample] -Because "$(Split-Path -Leaf $sample) changed with no change to its inputs"
+        }
+    }
+}

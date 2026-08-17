@@ -195,7 +195,12 @@ $customer = 'Fabrikam Manufacturing'
 # Read by Export-AssessmentCsv, which is the script's single choke point for writing a CSV.
 # These samples are invented data that ships in a public repository, so the ACL lockdown a
 # real export gets would be theatre here -- and it is a no-op off Windows in any case.
+#
+# Lifted functions read it out of this scope, which no static analyser can see, so it is
+# stated rather than merely set. Anything reading these files should know they carry none
+# of the protection a real export gets, because they need none.
 $SkipAclHardening = $true
+Write-Verbose "ACL hardening skipped for generated samples: SkipAclHardening=$SkipAclHardening"
 
 $assessmentPath = Join-Path $examplesDir 'Example-MigrationImpact.csv'
 Export-AssessmentCsv -Data $rows -Path $assessmentPath
