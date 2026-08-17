@@ -40,9 +40,9 @@
     migration candidates: users in SMS/voice policy scope or users with a
     phone-based authentication method registered.
 
-.PARAMETER CsvOnly
-    Writes only the assessment CSV. By default a run also produces the self-contained
-    HTML client report and the action list, because those are what the run is for.
+.PARAMETER HtmlReport
+    Also writes a self-contained HTML client report beside the CSVs. Off by default: a run
+    produces spreadsheets, which is what gets attached to a ticket and worked from.
 
 .PARAMETER ExportTickets
     Also writes a PSA-importable ticket queue. Off by default: most teams raise their own
@@ -63,7 +63,7 @@
     Emits the per-user assessment objects to the pipeline in addition to the summary.
 
 .EXAMPLE
-    # Assess a tenant and write the CSV, the client report, and the action list.
+    # Assess a tenant. Writes two spreadsheets: the full assessment and the action list.
     .\Get-EntraSmsVoiceMigrationImpact.ps1 -TenantId contoso.onmicrosoft.com
 
 .EXAMPLE
@@ -71,7 +71,7 @@
         -CustomerName "Contoso Manufacturing" -OutputPath D:\ClientEvidence\contoso.csv
 
 .EXAMPLE
-    .\Get-EntraSmsVoiceMigrationImpact.ps1 -IncludeUnaffected -CsvOnly -OutputPath C:\Reports\Entra-Migration.csv -Verbose
+    .\Get-EntraSmsVoiceMigrationImpact.ps1 -IncludeUnaffected -OutputPath C:\Reports\Entra-Migration.csv -Verbose
 
 .EXAMPLE
     # Unattended app-only run for a multi-tenant sweep
@@ -131,11 +131,11 @@ param(
     [Parameter()]
     [string]$CustomerName,
 
-    # Writes only the assessment CSV. By default a run also produces the self-contained
-    # HTML report and the action list, because those are what the run is for; having to
-    # ask for them meant the common case carried three switches it should not have needed.
+    # Also writes the self-contained HTML client report. Off by default: a run produces
+    # spreadsheets, because that is what gets attached to a ticket and worked from. The
+    # HTML is for when you want something to hand a client directly.
     [Parameter()]
-    [switch]$CsvOnly,
+    [switch]$HtmlReport,
 
     # Writes a PSA-importable ticket queue. Off by default: most teams raise their own
     # tickets and attach the action list, which needs no extra switch.
@@ -1707,18 +1707,19 @@ $summary = [PSCustomObject][ordered]@{
 Write-Host "`n===== ENTRA SMS/VOICE MIGRATION IMPACT =====" -ForegroundColor Magenta
 $summary | Format-List | Out-Host
 
-# The reports are what the run is for, so they are produced unless -CsvOnly says otherwise.
-# All of it comes from data already in memory; no extra Graph calls.
-if (-not $CsvOnly) {
-    # Emitting the list is read-only. Creating and populating the group stays a deliberate
-    # manual step, because that is a write and this tool does not write.
-    $groupPath = [System.IO.Path]::ChangeExtension($OutputPath, $null).TrimEnd('.') + '_ActionList.csv'
-    $groupMembers = New-ActionList -Rows $rows
+# The action list is written on every run: it is the spreadsheet a technician works from,
+# and it costs nothing, being derived from data already in memory. No extra Graph calls.
+#
+# Emitting the list is read-only. Creating and populating the migration security group
+# stays a deliberate manual step, because that is a write and this tool does not write.
+$actionListPath = [System.IO.Path]::ChangeExtension($OutputPath, $null).TrimEnd('.') + '_ActionList.csv'
+$actionListRows = New-ActionList -Rows $rows
 
-    Export-AssessmentCsv -Data $groupMembers -Path $groupPath
-    $summary | Add-Member -NotePropertyName ActionListPath -NotePropertyValue (Resolve-Path -LiteralPath $groupPath).Path
-    Write-Host "Action list ($($groupMembers.Count) users, attach this to a ticket): $groupPath" -ForegroundColor Green
+Export-AssessmentCsv -Data $actionListRows -Path $actionListPath
+$summary | Add-Member -NotePropertyName ActionListPath -NotePropertyValue (Resolve-Path -LiteralPath $actionListPath).Path
+Write-Host "Action list ($($actionListRows.Count) users, attach this to a ticket): $actionListPath" -ForegroundColor Green
 
+if ($HtmlReport) {
     $htmlPath = [System.IO.Path]::ChangeExtension($OutputPath, 'html')
     $written = New-HtmlReport -Summary $summary -Rows $exportRows -Path $htmlPath -Customer $CustomerName
     $summary | Add-Member -NotePropertyName HtmlReportPath -NotePropertyValue (Resolve-Path -LiteralPath $written).Path

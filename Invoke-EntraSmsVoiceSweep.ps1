@@ -38,9 +38,9 @@
 .PARAMETER IncludeUnaffected
     Passed through to the assessment. Produces a full inventory rather than only candidates.
 
-.PARAMETER CsvOnly
-    Passed through to the assessment. Writes only the per-tenant CSVs, skipping the client
-    report and action list that are otherwise produced for every tenant.
+.PARAMETER HtmlReport
+    Passed through to the assessment. Also writes an HTML client report per tenant; by
+    default a sweep produces the per-tenant assessment and action list spreadsheets only.
 
 .PARAMETER ExportTickets
     Also writes a ticket queue per tenant. Ticket history is kept per tenant folder, so a
@@ -127,10 +127,10 @@ param(
     [Parameter()]
     [switch]$IncludeUnaffected,
 
-    # The client report and action list are produced for every tenant by default; this
-    # writes only the assessment CSVs.
+    # Also writes the HTML client report per tenant. Off by default: a sweep produces
+    # spreadsheets, which is what gets attached to a ticket and worked from.
     [Parameter()]
-    [switch]$CsvOnly,
+    [switch]$HtmlReport,
 
     [Parameter()]
     [switch]$ExportTickets,
@@ -307,7 +307,7 @@ end {
             $arguments.CertificateThumbprint = $CertificateThumbprint
         }
         if ($IncludeUnaffected) { $arguments.IncludeUnaffected = $true }
-        if ($CsvOnly) { $arguments.CsvOnly = $true }
+        if ($HtmlReport) { $arguments.HtmlReport = $true }
         if ($SkipAclHardening) { $arguments.SkipAclHardening = $true }
         # The customer label becomes the report heading and the ticket company, so every
         # artefact is client-ready without hand-editing after the sweep.

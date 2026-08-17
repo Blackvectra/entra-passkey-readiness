@@ -7,7 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 
 ### Breaking
-- **The client report and action list are now produced on every run**, and `-HtmlReport` and `-ExportRemediationGroup` are gone. Getting the outputs a run exists for should not have needed three switches. `-CsvOnly` skips them. `Invoke-EntraSmsVoiceSweep.ps1` mirrors this: it no longer accepts those two switches and accepts `-CsvOnly` instead, and it now always passes `-CustomerName` so every per-tenant report is client-ready without hand-editing.
+- **A run now produces two spreadsheets and nothing else**: the full assessment CSV and the action list CSV. Both open straight into Excel. The HTML client report moves behind `-HtmlReport` and is off by default — it is for handing a client something directly, not for the normal run, where what gets attached to a ticket and worked from is a spreadsheet. `-ExportRemediationGroup` is gone, since the action list it produced is now written every time. `Invoke-EntraSmsVoiceSweep.ps1` mirrors all of this and now always passes `-CustomerName`, so per-tenant output is client-labelled without hand-editing.
+- `-CustomerName` is folded into the output filenames as well as the report heading. Running several clients back to back previously produced sets of files distinguishable only by timestamp, which is a poor thing to be untangling at the point you are attaching one set to a ticket. The tool stem stays at the front of the filename because the `.gitignore` rule that stops a live export being committed anchors on it. The label is sanitised before it reaches a path.
 - The action list file is named `..._ActionList.csv` rather than `..._RemediationGroup.csv`, and the sample is `examples/Example-ActionList.csv`. It does the same two jobs; the name now matches the one people use it for. `.gitignore` covers both names.
 
 ### Fixed

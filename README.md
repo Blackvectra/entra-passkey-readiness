@@ -19,25 +19,25 @@ Install-Module Microsoft.Graph.Authentication -Scope CurrentUser
 .\Get-EntraSmsVoiceMigrationImpact.ps1 -TenantId contoso.onmicrosoft.com
 ```
 
-That is the whole thing. Sign in as Global Reader or Security Reader, and you get three files beside each other:
+That is the whole thing. Sign in as Global Reader or Security Reader, and you get two spreadsheets beside each other:
 
 | File | What it is |
 |---|---|
-| `...Impact.csv` | One risk-ranked row per exposed user, highest risk first |
-| `...Impact.html` | A self-contained client report ([sample](examples/Example-Report.html)) |
-| `..._ActionList.csv` | Affected users, what they have, what to do. Attach it to a ticket ([sample](examples/Example-ActionList.csv)) |
+| `...Impact.csv` | The full assessment: one risk-ranked row per exposed user, highest risk first |
+| `..._ActionList.csv` | The work list: affected users only, what they have, what to do. Attach it to a ticket ([sample](examples/Example-ActionList.csv)) |
 
-Add `-CustomerName "Contoso Manufacturing"` to put the client's name on the report **and into every filename**, which is what you want when you are running several clients and then attaching one set to that client's ticket:
+Both open straight into Excel. Values that would otherwise be read as formulas are neutralised on the way out, so a display name beginning `=` cannot execute when somebody opens the file.
+
+Add `-CustomerName "Contoso Manufacturing"` to put the client's name into every filename, which is what you want when you are running several clients and then attaching one set to that client's ticket:
 
 ```
 EntraSmsVoiceMigrationImpact_Contoso-Manufacturing_20260817_170000.csv
-EntraSmsVoiceMigrationImpact_Contoso-Manufacturing_20260817_170000.html
 EntraSmsVoiceMigrationImpact_Contoso-Manufacturing_20260817_170000_ActionList.csv
 ```
 
 That is the only switch most runs need. Use `-OutputPath` if you want them somewhere specific; everything else is named from it.
 
-Everything else is optional: `-CsvOnly` skips the report and action list, and `-ExportTickets` adds a fourth file shaped for bulk PSA import ([sample](examples/Example-Tickets.csv)). Nothing is created in any external system by any of it — every output is a file on disk.
+Two optional extras: `-HtmlReport` adds a self-contained HTML report to hand a client directly ([sample](examples/Example-Report.html)), and `-ExportTickets` adds a CSV shaped for bulk PSA import ([sample](examples/Example-Tickets.csv)). Neither is needed for the normal run, and nothing is created in any external system by any of it — every output is a file on disk.
 
 ## The three scripts
 
@@ -278,7 +278,7 @@ When `-TenantId` is supplied as a GUID, the script verifies the established Grap
     -CustomerName "Contoso Manufacturing"
 ```
 
-The report is written on every run unless you pass `-CsvOnly`. It is a self-contained HTML file beside the CSV. No CDN, no external assets, no JavaScript, so it survives being emailed, archived, or opened offline years later.
+`-HtmlReport` writes a self-contained HTML file beside the CSVs. Skip it unless you want something to hand a client directly; the spreadsheets carry the same findings. No CDN, no external assets, no JavaScript, so it survives being emailed, archived, or opened offline years later.
 
 It is designed as a document rather than a dashboard, because it gets printed:
 
@@ -298,7 +298,7 @@ See [examples/Example-Report.html](examples/Example-Report.html) for a rendered 
 
 ### The action list
 
-The action list is written on every run unless you pass `-CsvOnly`. It contains just the Critical, High, and Moderate users, and does two jobs:
+The action list is written on every run. It contains just the Critical, High, and Moderate users, and does two jobs:
 
 - **The file you attach to a ticket you raised yourself.** Eight columns, sorted worst-first with admins ahead of standard users, so it is worked top-down: `Risk`, `DisplayName`, `UserPrincipalName`, `IsAdmin`, `PhoneMethodsRegistered`, `IsPasswordlessCapable`, `NextStep`, `UserId`. Everything a technician needs and none of the diagnostic columns that make the full export wide.
 - **The membership list** for the migration security group Microsoft's guidance tells you to create as step one, ready for bulk import on `UserPrincipalName`.
@@ -377,7 +377,7 @@ The sweep does this for you: history lives in the per-tenant folder rather than 
 | `-CertificateThumbprint` | string | none | Certificate thumbprint for app-only auth. |
 | `-OutputPath` | string | timestamped CSV beside the script, with `-CustomerName` folded in | Destination CSV path. The report and action list are named from it. Parent directory is created if missing. |
 | `-IncludeUnaffected` | switch | off | Include every enabled user, not just migration candidates. |
-| `-CsvOnly` | switch | off | Write only the assessment CSV, skipping the report and action list. |
+| `-HtmlReport` | switch | off | Also write a self-contained HTML client report beside the CSVs. |
 | `-CustomerName` | string | none | Heading used on the HTML report. |
 | `-ExportTickets` | switch | off | Also write a PSA-importable ticket queue. |
 | `-MaxIndividualTickets` | int | 50 | Cap on individual tickets before High findings batch into a campaign ticket. |
@@ -388,7 +388,7 @@ The sweep does this for you: history lives in the per-tenant folder rather than 
 
 #### `Invoke-EntraSmsVoiceSweep.ps1`
 
-Accepts and passes through `-IncludeUnaffected`, `-CsvOnly`, `-ExportTickets`, `-MaxIndividualTickets`, and `-SkipAclHardening`. Its own parameters:
+Accepts and passes through `-IncludeUnaffected`, `-HtmlReport`, `-ExportTickets`, `-MaxIndividualTickets`, and `-SkipAclHardening`. Its own parameters:
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
