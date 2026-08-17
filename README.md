@@ -17,17 +17,18 @@ Every Microsoft Graph call is a GET. It does not modify users, groups, policies,
 Install-Module Microsoft.Graph.Authentication -Scope CurrentUser
 
 .\Get-EntraSmsVoiceMigrationImpact.ps1 -TenantId contoso.onmicrosoft.com `
-    -CustomerName "Contoso Manufacturing" -HtmlReport -ExportTickets -ExportRemediationGroup
+    -CustomerName "Contoso Manufacturing" -HtmlReport -ExportRemediationGroup
 ```
 
-Sign in as Global Reader or Security Reader. You get four files beside each other:
+Sign in as Global Reader or Security Reader. You get three files beside each other:
 
 | File | What it is |
 |---|---|
 | `...Impact.csv` | One risk-ranked row per exposed user, highest risk first |
 | `...Impact.html` | A self-contained client report ([sample](examples/Example-Report.html)) |
-| `..._Tickets.csv` | A PSA-importable work queue ([sample](examples/Example-Tickets.csv)) |
-| `..._RemediationGroup.csv` | The membership list for the migration security group |
+| `..._RemediationGroup.csv` | The action list: affected users, what they have, what to do. Attach it to a ticket ([sample](examples/Example-RemediationGroup.csv)) |
+
+Add `-ExportTickets` if you want a fourth file shaped for bulk PSA import ([sample](examples/Example-Tickets.csv)). Skip it if you raise tickets yourself — nothing is created in any external system either way.
 
 ## The three scripts
 
@@ -285,7 +286,18 @@ All user-supplied strings are HTML-encoded before rendering. Directory display n
 
 See [examples/Example-Report.html](examples/Example-Report.html) for a rendered sample built entirely from fictional data.
 
-`-ExportRemediationGroup` writes a second CSV containing just the Critical, High, and Moderate users. That is the membership list for the migration security group Microsoft's guidance tells you to create as step one, ready for bulk import. Producing the list is read-only; creating and populating the group stays a deliberate manual action, because that is a write and this tool does not write.
+### The action list
+
+`-ExportRemediationGroup` writes a second CSV containing just the Critical, High, and Moderate users. It does two jobs:
+
+- **The file you attach to a ticket you raised yourself.** Eight columns, sorted worst-first with admins ahead of standard users, so it is worked top-down: `Risk`, `DisplayName`, `UserPrincipalName`, `IsAdmin`, `PhoneMethodsRegistered`, `IsPasswordlessCapable`, `NextStep`, `UserId`. Everything a technician needs and none of the diagnostic columns that make the full export wide.
+- **The membership list** for the migration security group Microsoft's guidance tells you to create as step one, ready for bulk import on `UserPrincipalName`.
+
+See [examples/Example-RemediationGroup.csv](examples/Example-RemediationGroup.csv).
+
+Producing the list is read-only. Creating and populating the group stays a deliberate manual action, because that is a write and this tool does not write.
+
+**If you raise tickets yourself, this is the file you want, and you can skip `-ExportTickets` entirely.** Nothing is created in any external system by either switch — every output is a file on disk.
 
 ### Ticket queue for your PSA
 
