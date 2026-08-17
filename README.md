@@ -50,6 +50,8 @@ Sign in as Global Reader or Security Reader. You get four files beside each othe
 - [Development](#development) — tests, linting, contributing
 - [Security](#security)
 
+Running this across an estate? Start with the [Operations Playbook](docs/Operations-Playbook.md): where the time actually goes, what to automate first, and the recurring loop.
+
 ---
 
 ## Why this exists
@@ -500,6 +502,8 @@ This tool processes identity-security metadata. See [SECURITY.md](SECURITY.md).
 - [Authentication methods activity](https://learn.microsoft.com/en-us/entra/identity/authentication/howto-authentication-methods-activity)
 
 Background and framework mapping: [docs/Microsoft-Migration-Background.md](docs/Microsoft-Migration-Background.md).
+
+Running this at estate scale: [docs/Operations-Playbook.md](docs/Operations-Playbook.md).
 
 ---
 
