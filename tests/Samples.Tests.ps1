@@ -9,7 +9,7 @@
 
 BeforeAll {
     . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
-    . (Import-ScriptFunction -Path (Get-AssessmentScriptPath) -Name 'New-ActionList')
+    . (Import-ScriptFunction -Path (Get-AssessmentScriptPath) -Name @('Get-PropertyValue', 'New-ActionList'))
 
     $script:ExamplesDir = Join-Path (Split-Path -Parent $PSScriptRoot) 'examples'
 
@@ -48,7 +48,7 @@ Describe 'Example-RemediationGroup.csv' {
 
     It 'exposes the columns a technician needs and none of the diagnostic ones' {
         $script:ActionList[0].PSObject.Properties.Name | Should -Be @(
-            'Risk', 'DisplayName', 'UserPrincipalName', 'IsAdmin',
+            'Risk', 'BlockedAtRetirement', 'DisplayName', 'UserPrincipalName', 'IsAdmin',
             'PhoneMethodsRegistered', 'IsPasswordlessCapable', 'NextStep', 'UserId'
         )
     }
@@ -63,6 +63,27 @@ Describe 'Example-RemediationGroup.csv' {
         $ranks = $script:ActionList | ForEach-Object { $script:RiskOrder[$_.Risk] }
         for ($i = 1; $i -lt $ranks.Count; $i++) {
             $ranks[$i] | Should -BeGreaterOrEqual $ranks[$i - 1]
+        }
+    }
+
+    It 'puts users who get stopped at sign-in ahead of the rest of their band' {
+        # A Moderate user with only a phone is stopped; a High user holding Authenticator
+        # is not. Within a band, the ones who stop working are worked first.
+        foreach ($band in @('Critical', 'High', 'Moderate')) {
+            $inBand = @($script:ActionList | Where-Object Risk -eq $band)
+            $flags = @($inBand | ForEach-Object { $_.BlockedAtRetirement -eq 'True' })
+            for ($i = 1; $i -lt $flags.Count; $i++) {
+                if ($flags[$i]) { $flags[$i - 1] | Should -BeTrue -Because "$band is not ordered by who gets stopped" }
+            }
+        }
+    }
+
+    It 'agrees with the assessment on who gets stopped at sign-in' {
+        $byUpn = @{}
+        foreach ($row in $script:Assessment) { $byUpn[$row.UserPrincipalName] = $row }
+
+        foreach ($row in $script:ActionList) {
+            $row.BlockedAtRetirement | Should -BeExactly $byUpn[$row.UserPrincipalName].OnlyPhoneBasedMfa
         }
     }
 
@@ -173,7 +194,7 @@ Describe 'New-ActionList' {
         $quiet = @(
             [PSCustomObject]@{ Risk = 'Low'; DisplayName = 'A'; UserPrincipalName = 'a@example.com'
                 IsAdmin = $false; PhoneMethodsRegistered = ''; IsPasswordlessCapable = $true
-                NextStep = 'No action required.'; UserId = '1' }
+                OnlyPhoneBasedMfa = $false; NextStep = 'No action required.'; UserId = '1' }
         )
         @(New-ActionList -Rows $quiet).Count | Should -Be 0
     }

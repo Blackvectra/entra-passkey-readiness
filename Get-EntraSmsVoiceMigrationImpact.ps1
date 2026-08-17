@@ -429,6 +429,27 @@ function Get-RiskAssessment {
     return @('Informational', 'No resolved SMS/voice migration exposure.')
 }
 
+function Test-OnlyPhoneBasedMfa {
+    # Microsoft's criterion for the 2027-02-01 blocking prompt: the user's only available
+    # MFA method is SMS or voice. This is narrower than "not passwordless-capable", which
+    # also sweeps up everyone holding Microsoft Authenticator push -- a method that is not
+    # being retired and whose holders are not stopped at sign-in.
+    #
+    # Getting this wrong in the lenient direction costs somebody their Monday morning, so
+    # a method this function does not recognise counts as not surviving.
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$MethodsRegistered,
+        [Parameter(Mandatory)][string[]]$PhoneMethods,
+        [Parameter(Mandatory)][string[]]$SurvivingMfaMethods
+    )
+
+    $phone = @($MethodsRegistered | Where-Object { $_ -in $PhoneMethods })
+    if ($phone.Count -eq 0) { return $false }
+
+    $surviving = @($MethodsRegistered | Where-Object { $_ -in $SurvivingMfaMethods })
+    return ($surviving.Count -eq 0)
+}
+
 function Get-RemediationStep {
     # The single source of the per-user next step. It reaches the CSV as the NextStep
     # column, the HTML report under each row's reason, and the opening line of every
@@ -535,8 +556,28 @@ function Get-ExecutiveSummary {
     $paragraphs.Add("$candidates of $assessed enabled users are migration candidates: they are targeted by the SMS or voice authentication methods policy, they have a phone-based method registered, or both.")
 
     if ($blocked -gt 0) {
-        $sentence = "$blocked of them have no phishing-resistant method registered today. Unless that changes, those accounts cannot satisfy multifactor authentication once Microsoft-provided SMS and voice delivery is retired on 1 February 2027, and their next sign-in after that date will be a blocking passkey registration prompt."
+        $paragraphs.Add("$blocked of them have no phishing-resistant method registered today, so they are the population a passkey campaign needs to reach.")
+    }
+
+    # The number that answers "will anybody actually be stuck on the Monday". Kept separate
+    # from the risk bands because it is narrower: a user holding Microsoft Authenticator
+    # push is not passwordless-capable and is also not blocked, since Authenticator is not
+    # being retired. Conflating the two overstates the emergency by everyone in that group.
+    # Read through the accessor: StrictMode throws on a missing property, and this function
+    # is also handed summaries rebuilt from older exports that predate these fields.
+    $stopped = & $asInt (Get-PropertyValue $Summary 'BlockedAtRetirement')
+    $stoppedAdmins = & $asInt (Get-PropertyValue $Summary 'BlockedAdminsAtRetirement')
+
+    if ($stopped -gt 0) {
+        $sentence = "Of those, $stopped hold a phone number as their only method that satisfies MFA. These are the accounts that stop working on 1 February 2027: at their next sign-in they meet a passkey registration prompt they cannot skip, and until they complete it they cannot get in."
+        if ($stoppedAdmins -gt 0) {
+            $sentence += " $stoppedAdmins of them are privileged."
+        }
         $paragraphs.Add($sentence)
+        $paragraphs.Add('Anyone who cannot complete that registration at the moment they are stopped -- no compatible device to hand, signing in from a shared terminal, or on the phone to the help desk from an airport -- is unable to work until they can. Driving this number to zero before the date is the whole job; the other counts describe how much campaign work stands between here and that.')
+    }
+    elseif ($candidates -gt 0) {
+        $paragraphs.Add('No user holds a phone number as their only method that satisfies MFA, so on current data nobody is stopped at sign-in on 1 February 2027. The population below still needs migrating, but the immediate lockout risk is clear.')
     }
 
     if ($critical -gt 0) {
@@ -590,6 +631,7 @@ function New-HtmlReport {
     $moderate = & $asInt $Summary.Moderate
     $low = & $asInt $Summary.Low
     $candidates = & $asInt $Summary.MigrationCandidates
+    $blockedAtRetirement = & $asInt (Get-PropertyValue $Summary 'BlockedAtRetirement')
 
     # Only actionable rows go in the tables. Low and Informational are in the CSV; putting
     # them here would bury the ten accounts that actually matter under four hundred that don't.
@@ -746,6 +788,17 @@ h2 { font-size: 12.5px; text-transform: uppercase; letter-spacing: 1.6px;
 .clock .d { font-size: 21px; font-weight: 700; letter-spacing: -0.3px; }
 .clock .t { font-size: 12px; color: var(--ink-2); margin-top: 3px; line-height: 1.45; }
 
+/* The one number a reader should leave with. Given its own band above the risk cards
+   because it answers a different question: not "how much work", but "who stops working". */
+.headline { display: flex; align-items: center; gap: 22px; border: 1px solid var(--rule);
+  border-left: 4px solid var(--crit); border-radius: 6px; padding: 20px 24px;
+  background: var(--panel); }
+.headline.good { border-left-color: var(--low); }
+.headline .hn { font-size: 46px; font-weight: 700; line-height: 1; letter-spacing: -1.5px;
+  color: var(--crit); font-variant-numeric: tabular-nums; }
+.headline.good .hn { color: var(--low); }
+.headline .ht { font-size: 13.5px; line-height: 1.55; color: var(--ink); max-width: 74ch; }
+
 .bar { display: flex; height: 12px; border-radius: 3px; overflow: hidden;
   background: var(--panel); border: 1px solid var(--rule); margin: 4px 0 10px; }
 .seg { height: 100%; }
@@ -887,6 +940,18 @@ $summaryHtml
 <div><div class="d">$daysToRetirement days</div><div class="t"><strong>1 February 2027</strong> &mdash; Microsoft-provided SMS and voice delivery is retired. No opt-out. Also the deadline to have a customer-managed telecom provider configured.</div></div>
 </div>
 
+<h2>Stopped at sign-in on 1 February 2027</h2>
+<div class="headline $(if ($blockedAtRetirement -gt 0) { 'bad' } else { 'good' })">
+<div class="hn">$blockedAtRetirement</div>
+<div class="ht">
+$(if ($blockedAtRetirement -gt 0) {
+"user$(if ($blockedAtRetirement -ne 1) { 's' }) hold a phone number as their only method that satisfies MFA. At their next sign-in after the retirement they meet a passkey registration prompt they cannot skip, and cannot work until they complete it. Drive this number to zero before the date."
+} else {
+'No user holds a phone number as their only method that satisfies MFA. On current data nobody is stopped at sign-in on the retirement date. The migration below still needs doing, but the immediate lockout risk is clear.'
+})
+</div>
+</div>
+
 <h2>Exposure</h2>
 <div class="bar">$barSegments</div>
 <div class="legend">
@@ -987,15 +1052,26 @@ function New-ActionList {
 
     $order = @{ Critical = 0; High = 1; Moderate = 2; Low = 3; Informational = 4 }
 
+    # Named BlockedAtRetirement here rather than carrying the row's OnlyPhoneBasedMfa
+    # column name through. This file is read by whoever picks up the ticket, and the
+    # consequence is more useful to them than the mechanism.
+    $rowsWithFlag = @($Rows | ForEach-Object {
+        $_ | Add-Member -NotePropertyName BlockedAtRetirement `
+            -NotePropertyValue ([bool](Get-PropertyValue $_ 'OnlyPhoneBasedMfa')) -Force -PassThru
+    })
+
     # Same read order as the main CSV: worst first, admins ahead of standard users. This
     # file is worked top-down by whoever opens the ticket, so directory order is useless.
-    return @($Rows |
+    # Blocked users first inside a band: they are the ones who stop working, and a Moderate
+    # user with only a phone is stopped while a High user holding Authenticator is not.
+    return @($rowsWithFlag |
         Where-Object { $_.Risk -in @('Critical', 'High', 'Moderate') } |
         Sort-Object `
             @{ Expression = { $order[[string]$_.Risk] }; Ascending = $true }, `
+            @{ Expression = { [bool]$_.BlockedAtRetirement }; Descending = $true }, `
             @{ Expression = { [bool]$_.IsAdmin }; Descending = $true }, `
             @{ Expression = { [string]$_.DisplayName }; Ascending = $true } |
-        Select-Object Risk, DisplayName, UserPrincipalName, IsAdmin,
+        Select-Object Risk, BlockedAtRetirement, DisplayName, UserPrincipalName, IsAdmin,
             PhoneMethodsRegistered, IsPasswordlessCapable, NextStep, UserId)
 }
 
@@ -1315,6 +1391,38 @@ foreach ($registration in $registrations) { $registrationIndex[[string](Get-Prop
 # primary SMS sign-in. All four are retired with Microsoft-provided telecom delivery.
 $phoneMethods = @('mobilePhone', 'alternateMobilePhone', 'officePhone', 'smsSignIn')
 
+# Methods that both survive the retirement and can satisfy MFA on their own.
+#
+# This list is the difference between "has no passkey" and "cannot sign in". Microsoft's
+# blocking prompt on 2027-02-01 applies to users whose ONLY available MFA method is SMS or
+# voice. A user with Microsoft Authenticator push is not passwordless-capable and is not
+# blocked either, because Authenticator is not being retired.
+#
+# Deliberately excluded: email and securityQuestion satisfy self-service password reset,
+# not MFA. temporaryAccessPass is time-limited by design and is a remediation aid rather
+# than a durable method, so counting it would mark somebody safe who is not.
+$survivingMfaMethods = @(
+    'microsoftAuthenticatorPush'
+    'softwareOneTimePasscode'
+    'hardwareOneTimePasscode'
+    'fido2SecurityKey'
+    'windowsHelloForBusiness'
+    'passKeyDeviceBound'
+    'passKeyDeviceBoundAuthenticator'
+    'passKeyDeviceBoundWindowsHello'
+    'macOsSecureEnclaveKey'
+    'x509Certificate'
+    'x509CertificateSingleFactor'
+    'x509CertificateMultiFactor'
+)
+
+# Anything Microsoft adds later, or that this list has not caught up with, is treated as
+# NOT surviving, so an unrecognised method makes a user look more exposed rather than less.
+# Over-warning costs a review; under-warning costs somebody their Monday morning. The
+# unrecognised names are surfaced in the summary so the list can be maintained.
+$script:UnrecognisedMethods = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$nonMfaMethods = @('email', 'securityQuestion', 'temporaryAccessPass', 'temporaryAccessPassMultiUse', 'appPassword')
+
 $rows = foreach ($user in $enabledUsers) {
     $id = [string](Get-PropertyValue $user 'id')
     $registration = $registrationIndex[$id]
@@ -1334,6 +1442,18 @@ $rows = foreach ($user in $enabledUsers) {
 
     $phoneMethodList = ($matchingMethods -join '; ')
 
+    # The precise Microsoft criterion for the 2027-02-01 blocking prompt: a phone method
+    # registered and nothing else that both survives the retirement and satisfies MFA.
+    # This is a narrower and more actionable population than "not passwordless-capable",
+    # which also sweeps up everyone holding Authenticator push.
+    foreach ($method in $methods) {
+        if ($method -notin $phoneMethods -and $method -notin $survivingMfaMethods -and $method -notin $nonMfaMethods) {
+            [void]$script:UnrecognisedMethods.Add([string]$method)
+        }
+    }
+    $onlyPhoneBasedMfa = Test-OnlyPhoneBasedMfa -MethodsRegistered ([string[]]$methods) `
+        -PhoneMethods $phoneMethods -SurvivingMfaMethods $survivingMfaMethods
+
     $nextStep = Get-RemediationStep -Risk $risk[0] -HasPhoneMethodRegistered $hasPhoneMethod `
         -UserType $userType -PhoneMethodsRegistered $phoneMethodList
 
@@ -1349,6 +1469,7 @@ $rows = foreach ($user in $enabledUsers) {
         InSmsPolicyScope                 = $inSmsScope
         InVoicePolicyScope               = $inVoiceScope
         HasPhoneMethodRegistered         = $hasPhoneMethod
+        OnlyPhoneBasedMfa                = $onlyPhoneBasedMfa
         PhoneMethodsRegistered           = $phoneMethodList
         AllMethodsRegistered             = ($methods -join '; ')
         IsPasswordlessCapable            = $isPasswordlessCapable
@@ -1404,6 +1525,12 @@ $summary = [PSCustomObject][ordered]@{
     Moderate                   = @($affectedRows | Where-Object Risk -eq 'Moderate').Count
     Low                        = @($affectedRows | Where-Object Risk -eq 'Low').Count
     PasswordlessCapableInScope = @($affectedRows | Where-Object { ($_.InSmsPolicyScope -or $_.InVoicePolicyScope) -and $_.IsPasswordlessCapable }).Count
+    # The headline operational number: users who hit the blocking registration prompt on
+    # 2027-02-01 because a phone is the only thing they have that satisfies MFA. Narrower
+    # than the risk bands, and the one to drive to zero before the date.
+    BlockedAtRetirement        = @($affectedRows | Where-Object OnlyPhoneBasedMfa).Count
+    BlockedAdminsAtRetirement  = @($affectedRows | Where-Object { $_.OnlyPhoneBasedMfa -and $_.IsAdmin }).Count
+    UnrecognisedMethods        = (@($script:UnrecognisedMethods | Sort-Object) -join '; ')
     UsersMissingFromReport     = @($rows | Where-Object { -not $_.InRegistrationReport }).Count
     OldestReportRowUtc         = if ($reportTimestamps.Count -gt 0) { ($reportTimestamps | Sort-Object | Select-Object -First 1) } else { $null }
     OutputPath                 = (Resolve-Path -LiteralPath $OutputPath).Path
@@ -1437,6 +1564,18 @@ if ($HtmlReport) {
     $written = New-HtmlReport -Summary $summary -Rows $exportRows -Path $htmlPath -Customer $CustomerName
     $summary | Add-Member -NotePropertyName HtmlReportPath -NotePropertyValue (Resolve-Path -LiteralPath $written).Path
     Write-Host "HTML report: $written" -ForegroundColor Green
+}
+
+if ($summary.BlockedAtRetirement -gt 0) {
+    $adminNote = if ($summary.BlockedAdminsAtRetirement -gt 0) { " $($summary.BlockedAdminsAtRetirement) of them privileged." } else { '' }
+    Write-Host "`n$($summary.BlockedAtRetirement) user(s) hold a phone number as their ONLY method that satisfies MFA.$adminNote" -ForegroundColor Red
+    Write-Host 'These are the accounts stopped at sign-in on 2027-02-01 until they register a passkey. Drive this to zero.' -ForegroundColor Red
+}
+else {
+    Write-Host "`nNo user holds a phone number as their only method that satisfies MFA. Nobody is stopped at sign-in on 2027-02-01 on current data." -ForegroundColor Green
+}
+if ($summary.UnrecognisedMethods) {
+    Write-Host "Unrecognised authentication methods seen: $($summary.UnrecognisedMethods). Treated as NOT surviving the retirement, so affected users are reported as more exposed rather than less." -ForegroundColor Yellow
 }
 
 Write-Host '2026-09-01  Users in SMS/voice scope auto-enabled for passkeys; registration campaign set to Microsoft managed.' -ForegroundColor Yellow

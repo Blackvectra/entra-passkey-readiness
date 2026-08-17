@@ -44,6 +44,7 @@ Add `-ExportTickets` if you want a fourth file shaped for bulk PSA import ([samp
 - [Prerequisites](#prerequisites) — modules, roles, Graph scopes
 - [Usage](#usage) — single tenant, estate sweeps, progress tracking, reports, tickets
 - [Output](#output) — console summary and CSV schema
+- [Who actually gets stopped](#who-actually-gets-stopped) — the lockout population, which is not the same as the risk bands
 - [Risk classifications](#risk-classifications) — the five bands
 - [Coverage](#coverage-who-this-actually-finds) — exactly who this finds, and who it does not
 - [Limitations](#limitations) — read before presenting results to a client
@@ -391,6 +392,9 @@ Accepts and passes through `-IncludeUnaffected`, `-HtmlReport`, `-ExportRemediat
 | `MigrationCandidates` | Users in policy scope **or** with a phone method registered |
 | `Critical` / `High` / `Moderate` / `Low` | Risk-band counts across migration candidates |
 | `PasswordlessCapableInScope` | In-scope users who already have a surviving method |
+| `BlockedAtRetirement` | **Users stopped at sign-in on 2027-02-01.** A phone is their only method that satisfies MFA. The number to drive to zero. |
+| `BlockedAdminsAtRetirement` | How many of those hold a privileged role |
+| `UnrecognisedMethods` | Any registered method name this tool does not classify. Treated as not surviving, so affected users read as more exposed. |
 | `UsersMissingFromReport` | Enabled users with no row in the registration report (see Limitations) |
 | `OldestReportRowUtc` | Age of the oldest registration-report row; the honest confidence marker for the run |
 
@@ -409,6 +413,7 @@ Accepts and passes through `-IncludeUnaffected`, `-HtmlReport`, `-ExportRemediat
 | `InSmsPolicyScope` | bool | Resolved into the SMS method's AMP scope after exclusions. |
 | `InVoicePolicyScope` | bool | Resolved into the voice method's AMP scope after exclusions. |
 | `HasPhoneMethodRegistered` | bool | Has at least one phone-based method registered. |
+| `OnlyPhoneBasedMfa` | bool | **The lockout flag.** A phone method is registered and nothing else the user holds both survives the retirement and satisfies MFA. These are the accounts stopped at sign-in on 2027-02-01. See [Who actually gets stopped](#who-actually-gets-stopped). |
 | `PhoneMethodsRegistered` | string | Semicolon-delimited subset: `mobilePhone`, `alternateMobilePhone`, `officePhone`, `smsSignIn`. |
 | `AllMethodsRegistered` | string | Every method reported for the user. |
 | `IsPasswordlessCapable` | bool | Reports a passwordless method. This is the mitigating control. |
@@ -421,6 +426,30 @@ Accepts and passes through `-IncludeUnaffected`, `-HtmlReport`, `-ExportRemediat
 Rows are sorted highest risk first, then admins ahead of standard users, then display name.
 
 ---
+
+## Who actually gets stopped
+
+If the question is "will any of my users turn up on a Monday and be unable to work", the risk bands are not the answer. `BlockedAtRetirement` is.
+
+Microsoft's blocking prompt on 2027-02-01 applies to users whose **only available MFA method is SMS or voice**. That is narrower than the risk bands, which measure whether a user holds a *passwordless* method. Microsoft Authenticator push is not passwordless and is also not being retired, so somebody holding it is `High` and is not stopped.
+
+The two populations cut across each other. From the sample data:
+
+| User | Band | Registered | Stopped on 2027-02-01 |
+|---|---|---|---|
+| Marcus Whitfield | High | `mobilePhone` | **Yes** |
+| Tobias Lindqvist | High | `softwareOneTimePasscode` | No |
+| Rosalind Achebe | Moderate | `officePhone`, `email` | **Yes** |
+| Emeka Osondu | Low | `mobilePhone`, `windowsHelloForBusiness` | No |
+
+A `Moderate` user can be stopped while a `High` user is not. Sorting your work by risk band alone will leave people locked out, which is why `BlockedAtRetirement` leads the console summary, gets its own band at the top of the HTML report, and sorts first inside each band of the action list.
+
+**Read the bands as "how much migration work", and this number as "who stops working".** Drive it to zero before the date; the bands tell you how much campaign effort stands between here and that.
+
+Two honest caveats:
+
+- `email` and `securityQuestion` satisfy self-service password reset, not MFA, so they do not count as surviving. A temporary access pass expires by design and does not count either.
+- A method this tool does not recognise is treated as **not** surviving, so an unfamiliar name makes a user look more exposed rather than less. Any such names are listed in `UnrecognisedMethods` in the summary. Over-warning costs a review; under-warning costs somebody their morning.
 
 ## Risk classifications
 

@@ -103,10 +103,24 @@ Read `Regressed` first. A user who went backwards means something is actively wr
 
 Do not re-read the full export every cycle. On a 400-row assessment, 380 rows will be identical to last month and reading them all is how a monthly cadence quietly becomes a quarterly one.
 
+### 2b. Check the lockout number first
+
+Before reading anything else, look at `BlockedAtRetirement` in each tenant's summary. That is the count of users whose only MFA method is a phone number, and it is the count of people who cannot work on the morning of 2 February 2027 until they complete a passkey registration they cannot skip.
+
+It is **not** the same as the risk bands, and it does not track them. A `High` user holding Microsoft Authenticator push is not stopped, because Authenticator is not being retired. A `Moderate` user whose only method is an office phone *is* stopped, despite sitting two bands lower.
+
+Work this number down first, then work the bands. If you only ever fixed the users in this count, nobody would be locked out — everything else is about getting the estate to a phishing-resistant posture, which matters but does not have a Monday morning attached to it.
+
+Two populations inside it deserve separate handling:
+
+- **Privileged accounts** (`BlockedAdminsAtRetirement`). If one of these is stopped and its recovery path is also a phone number, the tenant has an availability problem, not just a sign-in problem.
+- **Anyone who cannot register on the spot.** The blocking prompt assumes the user can complete passkey registration at that moment. Somebody on a shared terminal, on an unsupported device, or calling the help desk from an airport cannot. This tool cannot see device capability, so that population has to come from your own asset data.
+
 ### 3. Act on the delta
 
 | What the diff shows | What to do |
 |---|---|
+| `BlockedAtRetirement` above zero | Work it before the bands. These are the people who stop working on the date. |
 | `Regressed`, any privileged account | Investigate today. This is the lockout scenario in progress. |
 | `Regressed`, standard users | Check whether a group membership change pulled a population into scope. |
 | `New` | Usually new starters. Confirm your joiner process registers a passkey at onboarding, or this queue refills forever. |
