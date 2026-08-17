@@ -1105,19 +1105,11 @@ function New-ActionList {
 
     $order = @{ Critical = 0; High = 1; Moderate = 2; Low = 3; Informational = 4 }
 
-    # Named BlockedAtRetirement here rather than carrying the row's OnlyPhoneBasedMfa
-    # column name through. This file is read by whoever picks up the ticket, and the
-    # consequence is more useful to them than the mechanism.
-    $rowsWithFlag = @($Rows | ForEach-Object {
-        $_ | Add-Member -NotePropertyName BlockedAtRetirement `
-            -NotePropertyValue ([bool](Get-PropertyValue $_ 'OnlyPhoneBasedMfa')) -Force -PassThru
-    })
-
     # Same read order as the main CSV: worst first, admins ahead of standard users. This
     # file is worked top-down by whoever opens the ticket, so directory order is useless.
     # Blocked users first inside a band: they are the ones who stop working, and a Moderate
     # user with only a phone is stopped while a High user holding Authenticator is not.
-    return @($rowsWithFlag |
+    return @($Rows |
         Where-Object { $_.Risk -in @('Critical', 'High', 'Moderate') } |
         Sort-Object `
             @{ Expression = { $order[[string]$_.Risk] }; Ascending = $true }, `
@@ -1589,6 +1581,10 @@ $survivingMfaMethods = @(
 # Over-warning costs a review; under-warning costs somebody their Monday morning. The
 # unrecognised names are surfaced in the summary so the list can be maintained.
 $script:UnrecognisedMethods = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+# Stands in for the dropped InRegistrationReport column. Defined once because the summary
+# counts these rows and the CSV displays them, and the two must not drift apart.
+$script:NoReportRowMarker = '(no row in registration report)'
 $nonMfaMethods = @('email', 'securityQuestion', 'temporaryAccessPass', 'temporaryAccessPassMultiUse', 'appPassword')
 
 $rows = foreach ($user in $enabledUsers) {
@@ -1625,27 +1621,31 @@ $rows = foreach ($user in $enabledUsers) {
     $nextStep = Get-RemediationStep -Risk $risk[0] -HasPhoneMethodRegistered $hasPhoneMethod `
         -UserType $userType -PhoneMethodsRegistered $phoneMethodList
 
+    # A user with no row in the registration report is not the same as a user with nothing
+    # registered, and the difference matters: the first is missing data, the second is a
+    # finding. Rather than carry a separate InRegistrationReport column for it, the absence
+    # is stated in the column somebody actually reads.
+    $allMethods = if ($registration) { ($methods -join '; ') } else { $script:NoReportRowMarker }
+
+    # Fourteen columns, chosen so the file is readable in Excel. The registration report
+    # also returns isMfaCapable, isMfaRegistered, systemPreferredAuthenticationMethods and
+    # a per-row timestamp; none of them changed what anybody did with the file, and the
+    # evidence age is still reported once, as OldestReportRowUtc in the summary.
     [PSCustomObject][ordered]@{
-        Risk                             = $risk[0]
-        Reason                           = $risk[1]
-        NextStep                         = $nextStep
-        DisplayName                      = [string](Get-PropertyValue $user 'displayName')
-        UserPrincipalName                = [string](Get-PropertyValue $user 'userPrincipalName')
-        UserId                           = $id
-        UserType                         = $userType
-        IsAdmin                          = $isAdmin
-        InSmsPolicyScope                 = $inSmsScope
-        InVoicePolicyScope               = $inVoiceScope
-        HasPhoneMethodRegistered         = $hasPhoneMethod
-        OnlyPhoneBasedMfa                = $onlyPhoneBasedMfa
-        PhoneMethodsRegistered           = $phoneMethodList
-        AllMethodsRegistered             = ($methods -join '; ')
-        IsPasswordlessCapable            = $isPasswordlessCapable
-        IsMfaCapable                     = if ($registration) { [bool](Get-PropertyValue $registration 'isMfaCapable') } else { $false }
-        IsMfaRegistered                  = if ($registration) { [bool](Get-PropertyValue $registration 'isMfaRegistered') } else { $false }
-        SystemPreferredMethods           = if ($registration) { (@((Get-PropertyValue $registration 'systemPreferredAuthenticationMethods')) -join '; ') } else { '' }
-        InRegistrationReport             = [bool]$registration
-        RegistrationReportLastUpdatedUtc = if ($registration) { Get-PropertyValue $registration 'lastUpdatedDateTime' } else { $null }
+        Risk                  = $risk[0]
+        Reason                = $risk[1]
+        NextStep              = $nextStep
+        BlockedAtRetirement   = $onlyPhoneBasedMfa
+        DisplayName           = [string](Get-PropertyValue $user 'displayName')
+        UserPrincipalName     = [string](Get-PropertyValue $user 'userPrincipalName')
+        UserType              = $userType
+        IsAdmin               = $isAdmin
+        InSmsPolicyScope      = $inSmsScope
+        InVoicePolicyScope    = $inVoiceScope
+        PhoneMethodsRegistered = $phoneMethodList
+        AllMethodsRegistered  = $allMethods
+        IsPasswordlessCapable = $isPasswordlessCapable
+        UserId                = $id
     }
 }
 
@@ -1696,10 +1696,10 @@ $summary = [PSCustomObject][ordered]@{
     # The headline operational number: users who hit the blocking registration prompt on
     # 2027-02-01 because a phone is the only thing they have that satisfies MFA. Narrower
     # than the risk bands, and the one to drive to zero before the date.
-    BlockedAtRetirement        = @($affectedRows | Where-Object OnlyPhoneBasedMfa).Count
-    BlockedAdminsAtRetirement  = @($affectedRows | Where-Object { $_.OnlyPhoneBasedMfa -and $_.IsAdmin }).Count
+    BlockedAtRetirement        = @($affectedRows | Where-Object BlockedAtRetirement).Count
+    BlockedAdminsAtRetirement  = @($affectedRows | Where-Object { $_.BlockedAtRetirement -and $_.IsAdmin }).Count
     UnrecognisedMethods        = (@($script:UnrecognisedMethods | Sort-Object) -join '; ')
-    UsersMissingFromReport     = @($rows | Where-Object { -not $_.InRegistrationReport }).Count
+    UsersMissingFromReport     = @($rows | Where-Object { $_.AllMethodsRegistered -eq $script:NoReportRowMarker }).Count
     OldestReportRowUtc         = if ($reportTimestamps.Count -gt 0) { ($reportTimestamps | Sort-Object | Select-Object -First 1) } else { $null }
     OutputPath                 = (Resolve-Path -LiteralPath $OutputPath).Path
 }

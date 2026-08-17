@@ -29,9 +29,29 @@ Describe 'Example-MigrationImpact.csv' {
         }
     }
 
-    It 'places NextStep next to the risk it belongs to' {
+    It 'leads with the four columns a reader needs before any detail' {
         $columns = $script:Assessment[0].PSObject.Properties.Name
-        $columns[0..2] | Should -Be @('Risk', 'Reason', 'NextStep')
+        $columns[0..3] | Should -Be @('Risk', 'Reason', 'NextStep', 'BlockedAtRetirement')
+    }
+
+    It 'stays narrow enough to read in a spreadsheet' {
+        # The registration report offers more fields than this. They were dropped because
+        # none of them changed what anybody did with the file.
+        $columns = $script:Assessment[0].PSObject.Properties.Name
+        $columns.Count | Should -BeLessOrEqual 14
+        $columns | Should -Not -Contain 'IsMfaCapable'
+        $columns | Should -Not -Contain 'SystemPreferredMethods'
+        $columns | Should -Not -Contain 'RegistrationReportLastUpdatedUtc'
+    }
+
+    It 'still carries every column the diff tool matches on' {
+        # Compare-EntraSmsVoiceAssessment.ps1 reads these. Trimming one silently would
+        # break the diff only on the run after next, when a baseline needs re-reading.
+        $columns = $script:Assessment[0].PSObject.Properties.Name
+        foreach ($required in @('Risk', 'UserId', 'UserPrincipalName', 'DisplayName', 'IsAdmin',
+                'IsPasswordlessCapable', 'InSmsPolicyScope', 'InVoicePolicyScope', 'PhoneMethodsRegistered')) {
+            $columns | Should -Contain $required
+        }
     }
 
     It 'is sorted worst first, admins ahead of standard users' {
@@ -83,7 +103,7 @@ Describe 'Example-ActionList.csv' {
         foreach ($row in $script:Assessment) { $byUpn[$row.UserPrincipalName] = $row }
 
         foreach ($row in $script:ActionList) {
-            $row.BlockedAtRetirement | Should -BeExactly $byUpn[$row.UserPrincipalName].OnlyPhoneBasedMfa
+            $row.BlockedAtRetirement | Should -BeExactly $byUpn[$row.UserPrincipalName].BlockedAtRetirement
         }
     }
 
@@ -194,7 +214,7 @@ Describe 'New-ActionList' {
         $quiet = @(
             [PSCustomObject]@{ Risk = 'Low'; DisplayName = 'A'; UserPrincipalName = 'a@example.com'
                 IsAdmin = $false; PhoneMethodsRegistered = ''; IsPasswordlessCapable = $true
-                OnlyPhoneBasedMfa = $false; NextStep = 'No action required.'; UserId = '1' }
+                BlockedAtRetirement = $false; NextStep = 'No action required.'; UserId = '1' }
         )
         @(New-ActionList -Rows $quiet).Count | Should -Be 0
     }

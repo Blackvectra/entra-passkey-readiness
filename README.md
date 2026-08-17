@@ -440,25 +440,21 @@ Accepts and passes through `-IncludeUnaffected`, `-HtmlReport`, `-ExportTickets`
 | `Risk` | string | Critical, High, Moderate, Low, or Informational. See [docs/Risk-Classification.md](docs/Risk-Classification.md). |
 | `Reason` | string | Plain-language justification for the risk band. |
 | `NextStep` | string | What to do about this user, specific to what they have registered. Same wording as the HTML report and the ticket queue, so the three cannot disagree. Every sequence registers the surviving method before removing the phone method. |
+| `BlockedAtRetirement` | bool | **The lockout flag.** A phone method is registered and nothing else the user holds both survives the retirement and satisfies MFA. These are the accounts stopped at sign-in on 2027-02-01. See [Who actually gets stopped](#who-actually-gets-stopped). |
 | `DisplayName` | string | Directory display name. |
 | `UserPrincipalName` | string | UPN. |
-| `UserId` | guid | Object ID. |
 | `UserType` | string | `Member` or `Guest`. |
 | `IsAdmin` | bool | Reported by the registration report as holding a privileged role. |
 | `InSmsPolicyScope` | bool | Resolved into the SMS method's AMP scope after exclusions. |
 | `InVoicePolicyScope` | bool | Resolved into the voice method's AMP scope after exclusions. |
-| `HasPhoneMethodRegistered` | bool | Has at least one phone-based method registered. |
-| `OnlyPhoneBasedMfa` | bool | **The lockout flag.** A phone method is registered and nothing else the user holds both survives the retirement and satisfies MFA. These are the accounts stopped at sign-in on 2027-02-01. See [Who actually gets stopped](#who-actually-gets-stopped). |
 | `PhoneMethodsRegistered` | string | Semicolon-delimited subset: `mobilePhone`, `alternateMobilePhone`, `officePhone`, `smsSignIn`. |
-| `AllMethodsRegistered` | string | Every method reported for the user. |
+| `AllMethodsRegistered` | string | Every method reported for the user, or `(no row in registration report)` when the report had no data for them. |
 | `IsPasswordlessCapable` | bool | Reports a passwordless method. This is the mitigating control. |
-| `IsMfaCapable` | bool | Reports a method that can satisfy MFA today. |
-| `IsMfaRegistered` | bool | Reports any registered MFA method. |
-| `SystemPreferredMethods` | string | System-preferred MFA methods reported for the user. |
-| `InRegistrationReport` | bool | False means the user had no row in the report; registration fields default to `False`. |
-| `RegistrationReportLastUpdatedUtc` | datetime | When the report row was last refreshed. |
+| `UserId` | guid | Object ID. Kept last because it is a join key, not something you read. |
 
-Rows are sorted highest risk first, then admins ahead of standard users, then display name.
+Fourteen columns, sorted highest risk first, then admins ahead of standard users, then display name.
+
+The registration report also returns `isMfaCapable`, `isMfaRegistered`, `systemPreferredAuthenticationMethods`, and a per-row timestamp. None of them changed what anybody did with the file, so they are not written. Evidence age is still reported once, as `OldestReportRowUtc` in the summary, and a user with no report row is called out in `AllMethodsRegistered` rather than needing a column of its own.
 
 ---
 
