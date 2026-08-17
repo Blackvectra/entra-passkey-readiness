@@ -11,8 +11,10 @@
 BeforeAll {
     . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
     . (Import-ScriptFunction -Path (Get-AssessmentScriptPath) -Name @(
+            'Get-PropertyValue'
             'ConvertTo-SafeHtml'
             'Protect-OutputFile'
+            'Get-RemediationStep'
             'Get-ExecutiveSummary'
             'New-HtmlReport'
         ))
@@ -47,7 +49,10 @@ BeforeAll {
             [string]$Phone = 'mobilePhone', [string]$Type = 'Member'
         )
         return [PSCustomObject]@{
-            Risk = $Risk; Reason = 'Test reason.'; DisplayName = $Name
+            Risk = $Risk; Reason = 'Test reason.'
+            NextStep = (Get-RemediationStep -Risk $Risk -HasPhoneMethodRegistered ([bool]$Phone) `
+                    -UserType $Type -PhoneMethodsRegistered $Phone)
+            DisplayName = $Name
             UserPrincipalName = $Upn; UserId = '11111111-1111-4111-8111-111111111111'
             UserType = $Type; IsAdmin = $Admin
             InSmsPolicyScope = $Sms; InVoicePolicyScope = $Voice

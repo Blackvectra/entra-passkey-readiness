@@ -273,6 +273,7 @@ It is designed as a document rather than a dashboard, because it gets printed:
 
 - **An executive summary in prose**, generated from the same numbers as the cards. A report that shows only counts leaves the reader to do the interpretation, and the interpretation is what they are paying for. It refuses to describe a zero-candidate tenant as finished, because legacy per-user MFA is not readable from here.
 - **Findings split into one table per band.** A technician works Critical to completion before touching High, and the band boundary is where that decision gets made.
+- **A next step under every row.** The diagnosis and the action sit together, so the report can be worked from directly rather than being a list you then have to interpret.
 - **A countdown to both deadlines**, computed when the report is generated.
 - **The resolved policy scope with group names**, so the targeting is auditable rather than a list of GUIDs.
 - **A scope-and-method section** stating what was and was not assessed, so the deliverable stands up in a client conversation without this README open beside it.
@@ -306,7 +307,11 @@ Ticket volume is managed deliberately:
 
 A tenant with `All users` targeting can produce hundreds of High findings. Ticketing each one creates a backlog nobody works, so the overflow becomes a campaign ticket that points at the remediation group CSV.
 
-Each `Description` is self-contained: the user, their registered methods, why the ticket exists, and numbered remediation steps. A tech can work it without opening the report. Every remediation sequence registers the new method before removing the phone method, because doing it in the other order creates the lockout you are trying to prevent.
+Each `Description` is self-contained: the user, their registered methods, why the ticket exists, a **Next step** line, and numbered remediation steps. A tech can work it without opening the report.
+
+That `Next step` line is the same string as the `NextStep` CSV column and the next step shown under the user's row in the HTML report. All three come from one function, so a change to the guidance lands everywhere at once rather than leaving the ticket queue saying something the report does not.
+
+Every remediation sequence registers the new method before removing the phone method, because doing it in the other order creates the lockout you are trying to prevent. That ordering is enforced by a test across every risk band, not just written down.
 
 Due dates target 2026-09-01 while that date is still ahead, then fall back to 2027-02-01.
 
@@ -383,6 +388,7 @@ Accepts and passes through `-IncludeUnaffected`, `-HtmlReport`, `-ExportRemediat
 |---|---|---|
 | `Risk` | string | Critical, High, Moderate, Low, or Informational. See [docs/Risk-Classification.md](docs/Risk-Classification.md). |
 | `Reason` | string | Plain-language justification for the risk band. |
+| `NextStep` | string | What to do about this user, specific to what they have registered. Same wording as the HTML report and the ticket queue, so the three cannot disagree. Every sequence registers the surviving method before removing the phone method. |
 | `DisplayName` | string | Directory display name. |
 | `UserPrincipalName` | string | UPN. |
 | `UserId` | guid | Object ID. |

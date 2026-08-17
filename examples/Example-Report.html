@@ -93,11 +93,13 @@ dl > dt:last-of-type, dl > dd:last-of-type { border-bottom: 0; }
 /* Fixed layout so every band's table lines up with the others. With auto layout each
    table sizes to its own content and the columns visibly jump between bands. */
 table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
-col.c-user { width: 26%; } col.c-type { width: 7%; } col.c-scope { width: 11%; }
-col.c-phone { width: 16%; } col.c-pwless { width: 10%; } col.c-why { width: 30%; }
+col.c-user { width: 20%; } col.c-type { width: 6%; } col.c-scope { width: 10%; }
+col.c-phone { width: 13%; } col.c-pwless { width: 12%; } col.c-why { width: 39%; }
+/* Header labels are single words wider than their columns under fixed layout, which
+   makes them overrun the next header instead of wrapping. */
 th { text-align: left; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.9px;
   color: var(--ink-3); border-bottom: 2px solid var(--rule); padding: 9px 10px; font-weight: 700;
-  background: var(--panel); }
+  background: var(--panel); overflow-wrap: anywhere; }
 td { border-bottom: 1px solid var(--rule); padding: 11px 10px; vertical-align: top; }
 tbody tr:nth-child(even) td { background: #FAFCFE; }
 .name { font-weight: 600; }
@@ -107,6 +109,12 @@ tbody tr:nth-child(even) td { background: #FAFCFE; }
 .upn { font-weight: 400; color: var(--ink-3); font-size: 11.5px; margin-top: 2px; }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; }
 .reason { color: var(--ink-2); font-size: 12px; }
+/* The next step is the operative half of this column, so it is set apart from the
+   diagnosis above it rather than running on as one paragraph. */
+.next { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--rule);
+  color: var(--ink); font-size: 12px; line-height: 1.5; }
+.next-l { display: block; font-size: 9.5px; letter-spacing: 1px; text-transform: uppercase;
+  color: var(--accent); font-weight: 700; margin-bottom: 3px; }
 .yes { color: var(--low); font-weight: 700; } .no { color: var(--crit); font-weight: 700; }
 .admin { background: var(--crit); color: #fff; font-size: 9px; font-weight: 700;
   padding: 2px 5px; border-radius: 2px; letter-spacing: 0.8px; margin-left: 7px;
@@ -164,7 +172,7 @@ footer { margin-top: 46px; padding-top: 18px; border-top: 1px solid var(--rule);
 <div class="sub">
 Migration impact assessment &middot;
 Tenant c0ffee00-1111-4222-8333-444455556666 &middot;
-17 August 2026, 16:08 local &middot;
+17 August 2026, 16:31 local &middot;
 48 enabled users evaluated &middot;
 No tenant settings were changed
 </div>
@@ -229,7 +237,7 @@ No tenant settings were changed
 <table>
 <colgroup><col class="c-user"><col class="c-type"><col class="c-scope"><col class="c-phone"><col class="c-pwless"><col class="c-why"></colgroup>
 <thead><tr>
-<th>User</th><th>Type</th><th>AMP scope</th><th>Phone methods</th><th>Passwordless</th><th>Why</th>
+<th>User</th><th>Type</th><th>AMP scope</th><th>Phone methods</th><th>Passwordless</th><th>Why, and what to do</th>
 </tr></thead>
 <tbody>
 <tr>
@@ -238,7 +246,8 @@ No tenant settings were changed
 <td>SMS + Voice</td>
 <td class="mono">mobilePhone</td>
 <td class="no">No</td>
-<td class="reason">Privileged user is targeted, has a phone method registered, and is not passwordless-capable.</td>
+<td class="reason">Privileged user is targeted, has a phone method registered, and is not passwordless-capable.
+<div class="next"><span class="next-l">Next step</span>Contact the user and schedule a session; do not leave a privileged account to a self-service nudge. Register a FIDO2 security key or platform passkey, confirm with a real test sign-in, then remove mobilePhone. Check that the account recovery path does not also depend on a phone number, and if this is an emergency-access account, confirm at least one break-glass account uses a method outside the retirement scope.</div></td>
 </tr>
 <tr>
 <td class="name">Priya Raghunathan<span class="admin">ADMIN</span><div class="upn">priya.raghunathan@fabrikam-example.com</div></td>
@@ -246,7 +255,8 @@ No tenant settings were changed
 <td>SMS</td>
 <td class="mono">mobilePhone; officePhone</td>
 <td class="no">No</td>
-<td class="reason">Privileged user is targeted, has a phone method registered, and is not passwordless-capable.</td>
+<td class="reason">Privileged user is targeted, has a phone method registered, and is not passwordless-capable.
+<div class="next"><span class="next-l">Next step</span>Contact the user and schedule a session; do not leave a privileged account to a self-service nudge. Register a FIDO2 security key or platform passkey, confirm with a real test sign-in, then remove mobilePhone; officePhone. Check that the account recovery path does not also depend on a phone number, and if this is an emergency-access account, confirm at least one break-glass account uses a method outside the retirement scope.</div></td>
 </tr>
 </tbody>
 </table>
@@ -257,7 +267,7 @@ No tenant settings were changed
 <table>
 <colgroup><col class="c-user"><col class="c-type"><col class="c-scope"><col class="c-phone"><col class="c-pwless"><col class="c-why"></colgroup>
 <thead><tr>
-<th>User</th><th>Type</th><th>AMP scope</th><th>Phone methods</th><th>Passwordless</th><th>Why</th>
+<th>User</th><th>Type</th><th>AMP scope</th><th>Phone methods</th><th>Passwordless</th><th>Why, and what to do</th>
 </tr></thead>
 <tbody>
 <tr>
@@ -266,7 +276,8 @@ No tenant settings were changed
 <td>SMS + Voice</td>
 <td class="mono">mobilePhone</td>
 <td class="no">No</td>
-<td class="reason">User is targeted, has a phone method registered, and is not passwordless-capable.</td>
+<td class="reason">User is targeted, has a phone method registered, and is not passwordless-capable.
+<div class="next"><span class="next-l">Next step</span>Include in the passkey registration campaign. Direct the user to register a passkey or Microsoft Authenticator for their device type, confirm the registration landed, then remove mobilePhone.</div></td>
 </tr>
 <tr>
 <td class="name">Ingrid Solberg<div class="upn">ingrid.solberg_northwind-example.com#EXT#@fabrikam-example.onmicrosoft.com</div></td>
@@ -274,7 +285,8 @@ No tenant settings were changed
 <td>SMS</td>
 <td class="mono">mobilePhone</td>
 <td class="no">No</td>
-<td class="reason">Guest is targeted, has a phone method registered, and lacks a reported passwordless method; validate B2B passkey readiness.</td>
+<td class="reason">Guest is targeted, has a phone method registered, and lacks a reported passwordless method; validate B2B passkey readiness.
+<div class="next"><span class="next-l">Next step</span>Include in the passkey registration campaign, but confirm this guest can register before committing to a date: B2B and internal guest passkey support follows a separate Microsoft timeline. Leave mobilePhone in place until a surviving method is confirmed working.</div></td>
 </tr>
 <tr>
 <td class="name">Tobias Lindqvist<div class="upn">tobias.lindqvist@fabrikam-example.com</div></td>
@@ -282,7 +294,8 @@ No tenant settings were changed
 <td>SMS + Voice</td>
 <td class="mono">none reported</td>
 <td class="no">No</td>
-<td class="reason">User is targeted by SMS/voice policy and is not passwordless-capable.</td>
+<td class="reason">User is targeted by SMS/voice policy and is not passwordless-capable.
+<div class="next"><span class="next-l">Next step</span>Include in the passkey registration campaign. The user is targeted by policy with no method that survives the retirement, so they will be auto-enabled and nudged on 2026-09-01 whether or not you act first.</div></td>
 </tr>
 </tbody>
 </table>
@@ -293,7 +306,7 @@ No tenant settings were changed
 <table>
 <colgroup><col class="c-user"><col class="c-type"><col class="c-scope"><col class="c-phone"><col class="c-pwless"><col class="c-why"></colgroup>
 <thead><tr>
-<th>User</th><th>Type</th><th>AMP scope</th><th>Phone methods</th><th>Passwordless</th><th>Why</th>
+<th>User</th><th>Type</th><th>AMP scope</th><th>Phone methods</th><th>Passwordless</th><th>Why, and what to do</th>
 </tr></thead>
 <tbody>
 <tr>
@@ -302,7 +315,8 @@ No tenant settings were changed
 <td>not in AMP scope</td>
 <td class="mono">officePhone</td>
 <td class="no">No</td>
-<td class="reason">Phone method is registered outside resolved modern policy scope; validate legacy per-user MFA exposure.</td>
+<td class="reason">Phone method is registered outside resolved modern policy scope; validate legacy per-user MFA exposure.
+<div class="next"><span class="next-l">Next step</span>Check this user in the legacy per-user MFA service settings. If they are enabled for SMS or voice there, convert them to the modern authentication methods policy so the exposure becomes measurable, then remediate as High. If the registration is simply stale, remove officePhone once a phishing-resistant method is confirmed.</div></td>
 </tr>
 <tr>
 <td class="name">Service Account - Scanner<div class="upn">svc-scanner@fabrikam-example.com</div></td>
@@ -310,7 +324,8 @@ No tenant settings were changed
 <td>not in AMP scope</td>
 <td class="mono">alternateMobilePhone</td>
 <td class="no">No</td>
-<td class="reason">Phone method is registered outside resolved modern policy scope; validate legacy per-user MFA exposure.</td>
+<td class="reason">Phone method is registered outside resolved modern policy scope; validate legacy per-user MFA exposure.
+<div class="next"><span class="next-l">Next step</span>Check this user in the legacy per-user MFA service settings. If they are enabled for SMS or voice there, convert them to the modern authentication methods policy so the exposure becomes measurable, then remediate as High. If the registration is simply stale, remove alternateMobilePhone once a phishing-resistant method is confirmed.</div></td>
 </tr>
 </tbody>
 </table>

@@ -429,6 +429,59 @@ function Get-RiskAssessment {
     return @('Informational', 'No resolved SMS/voice migration exposure.')
 }
 
+function Get-RemediationStep {
+    # The single source of the per-user next step. It reaches the CSV as the NextStep
+    # column, the HTML report under each row's reason, and the opening line of every
+    # ticket description, so the three deliverables cannot drift into recommending
+    # different things for the same person.
+    #
+    # One sentence or two, imperative, specific to what this user actually has. A row
+    # that says "High" and stops makes the reader work out the action themselves, which
+    # is the part they are paying for and the part most likely to be got wrong.
+    #
+    # Policy scope, passwordless capability, and privilege are deliberately not parameters:
+    # the risk band is already derived from all three, so taking them again would let a
+    # caller pass a combination the band contradicts.
+    param(
+        [Parameter(Mandatory)][string]$Risk,
+        [bool]$HasPhoneMethodRegistered,
+        [string]$UserType,
+        [string]$PhoneMethodsRegistered
+    )
+
+    # Named so the instruction says which registration to remove, not "the phone method".
+    $methods = if ([string]::IsNullOrWhiteSpace($PhoneMethodsRegistered)) { 'the phone method' } else { $PhoneMethodsRegistered }
+
+    # Every sequence below registers the surviving method before removing the phone
+    # method. The other order creates the lockout the whole exercise exists to prevent.
+    switch ($Risk) {
+        'Critical' {
+            return "Contact the user and schedule a session; do not leave a privileged account to a self-service nudge. Register a FIDO2 security key or platform passkey, confirm with a real test sign-in, then remove $methods. Check that the account recovery path does not also depend on a phone number, and if this is an emergency-access account, confirm at least one break-glass account uses a method outside the retirement scope."
+        }
+        'High' {
+            if ($UserType -eq 'Guest') {
+                return "Include in the passkey registration campaign, but confirm this guest can register before committing to a date: B2B and internal guest passkey support follows a separate Microsoft timeline. Leave $methods in place until a surviving method is confirmed working."
+            }
+            if ($HasPhoneMethodRegistered) {
+                return "Include in the passkey registration campaign. Direct the user to register a passkey or Microsoft Authenticator for their device type, confirm the registration landed, then remove $methods."
+            }
+            return 'Include in the passkey registration campaign. The user is targeted by policy with no method that survives the retirement, so they will be auto-enabled and nudged on 2026-09-01 whether or not you act first.'
+        }
+        'Moderate' {
+            return "Check this user in the legacy per-user MFA service settings. If they are enabled for SMS or voice there, convert them to the modern authentication methods policy so the exposure becomes measurable, then remediate as High. If the registration is simply stale, remove $methods once a phishing-resistant method is confirmed."
+        }
+        'Low' {
+            if ($HasPhoneMethodRegistered) {
+                return "No action required before the retirement; the user already holds a surviving method. Optionally remove $methods to reduce account-recovery attack surface, which is worth doing independently of this change."
+            }
+            return 'No action required. The user is in policy scope but already holds a method that survives the retirement. Expect a registration nudge on 2026-09-01.'
+        }
+        default {
+            return 'No action required. No resolved exposure to the SMS and voice retirement.'
+        }
+    }
+}
+
 function ConvertTo-SafeHtml {
     # Directory display names are attacker-influenceable in some tenants (self-service
     # profile edits, B2B invite metadata). An unencoded display name containing markup
@@ -593,6 +646,16 @@ function New-HtmlReport {
             $pwlessClass = if ($row.IsPasswordlessCapable) { 'yes' } else { 'no' }
             $pwlessText = if ($row.IsPasswordlessCapable) { 'Yes' } else { 'No' }
 
+            # Prefer the NextStep already on the row. Recomputing keeps the report working
+            # when it is handed rows from an older export that predates the column.
+            $nextStep = Get-PropertyValue $row 'NextStep'
+            if ([string]::IsNullOrWhiteSpace($nextStep)) {
+                $nextStep = Get-RemediationStep -Risk ([string]$row.Risk) `
+                    -HasPhoneMethodRegistered ([bool]$row.PhoneMethodsRegistered) `
+                    -UserType ([string]$row.UserType) `
+                    -PhoneMethodsRegistered ([string]$row.PhoneMethodsRegistered)
+            }
+
             @"
 <tr>
 <td class="name">$(ConvertTo-SafeHtml $row.DisplayName)$adminMark<div class="upn">$(ConvertTo-SafeHtml $row.UserPrincipalName)</div></td>
@@ -600,7 +663,8 @@ function New-HtmlReport {
 <td>$(ConvertTo-SafeHtml $scopeText)</td>
 <td class="mono">$(ConvertTo-SafeHtml $phone)</td>
 <td class="$pwlessClass">$pwlessText</td>
-<td class="reason">$(ConvertTo-SafeHtml $row.Reason)</td>
+<td class="reason">$(ConvertTo-SafeHtml $row.Reason)
+<div class="next"><span class="next-l">Next step</span>$(ConvertTo-SafeHtml $nextStep)</div></td>
 </tr>
 "@
         }
@@ -612,7 +676,7 @@ function New-HtmlReport {
 <table>
 <colgroup><col class="c-user"><col class="c-type"><col class="c-scope"><col class="c-phone"><col class="c-pwless"><col class="c-why"></colgroup>
 <thead><tr>
-<th>User</th><th>Type</th><th>AMP scope</th><th>Phone methods</th><th>Passwordless</th><th>Why</th>
+<th>User</th><th>Type</th><th>AMP scope</th><th>Phone methods</th><th>Passwordless</th><th>Why, and what to do</th>
 </tr></thead>
 <tbody>
 $($rowsHtml -join "`n")
@@ -725,11 +789,13 @@ dl > dt:last-of-type, dl > dd:last-of-type { border-bottom: 0; }
 /* Fixed layout so every band's table lines up with the others. With auto layout each
    table sizes to its own content and the columns visibly jump between bands. */
 table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
-col.c-user { width: 26%; } col.c-type { width: 7%; } col.c-scope { width: 11%; }
-col.c-phone { width: 16%; } col.c-pwless { width: 10%; } col.c-why { width: 30%; }
+col.c-user { width: 20%; } col.c-type { width: 6%; } col.c-scope { width: 10%; }
+col.c-phone { width: 13%; } col.c-pwless { width: 12%; } col.c-why { width: 39%; }
+/* Header labels are single words wider than their columns under fixed layout, which
+   makes them overrun the next header instead of wrapping. */
 th { text-align: left; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.9px;
   color: var(--ink-3); border-bottom: 2px solid var(--rule); padding: 9px 10px; font-weight: 700;
-  background: var(--panel); }
+  background: var(--panel); overflow-wrap: anywhere; }
 td { border-bottom: 1px solid var(--rule); padding: 11px 10px; vertical-align: top; }
 tbody tr:nth-child(even) td { background: #FAFCFE; }
 .name { font-weight: 600; }
@@ -739,6 +805,12 @@ tbody tr:nth-child(even) td { background: #FAFCFE; }
 .upn { font-weight: 400; color: var(--ink-3); font-size: 11.5px; margin-top: 2px; }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; }
 .reason { color: var(--ink-2); font-size: 12px; }
+/* The next step is the operative half of this column, so it is set apart from the
+   diagnosis above it rather than running on as one paragraph. */
+.next { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--rule);
+  color: var(--ink); font-size: 12px; line-height: 1.5; }
+.next-l { display: block; font-size: 9.5px; letter-spacing: 1px; text-transform: uppercase;
+  color: var(--accent); font-weight: 700; margin-bottom: 3px; }
 .yes { color: var(--low); font-weight: 700; } .no { color: var(--crit); font-weight: 700; }
 .admin { background: var(--crit); color: #fff; font-size: 9px; font-weight: 700;
   padding: 2px 5px; border-radius: 2px; letter-spacing: 0.8px; margin-left: 7px;
@@ -902,6 +974,21 @@ Timeline dates are per Microsoft Learn: passkeys by default and retirement of Mi
     return $Path
 }
 
+function Get-TicketNextStep {
+    # The row already carries NextStep. Recomputing is the fallback for rows handed in
+    # from an export that predates the column, so the ticket queue never silently loses
+    # its opening instruction.
+    param([Parameter(Mandatory)]$Row)
+
+    $existing = Get-PropertyValue $Row 'NextStep'
+    if (-not [string]::IsNullOrWhiteSpace($existing)) { return [string]$existing }
+
+    return Get-RemediationStep -Risk ([string]$Row.Risk) `
+        -HasPhoneMethodRegistered ([bool]$Row.PhoneMethodsRegistered) `
+        -UserType ([string]$Row.UserType) `
+        -PhoneMethodsRegistered ([string]$Row.PhoneMethodsRegistered)
+}
+
 function New-TicketExport {
     # Generic PSA-shaped columns. ConnectWise, Autotask, Halo, and Freshservice all import
     # from a flat CSV; the column names differ per platform, so map them at import time
@@ -964,6 +1051,9 @@ methods policy, and has no phishing-resistant method registered. When Microsoft-
 SMS and voice delivery is retired on 2027-02-01 this account cannot satisfy MFA and will
 be blocked at sign-in with no opt-out.
 
+Next step
+$(Get-TicketNextStep -Row $row)
+
 Actions
 1. Contact the user and schedule a short session; do not rely on a self-service nudge for
    a privileged account.
@@ -1004,6 +1094,9 @@ Passwordless capable: No
 
 Why this ticket exists
 $($row.Reason)
+
+Next step
+$(Get-TicketNextStep -Row $row)
 
 Actions
 1. Direct the user to register a passkey or Microsoft Authenticator, with guidance for their
@@ -1214,9 +1307,15 @@ $rows = foreach ($user in $enabledUsers) {
     $risk = Get-RiskAssessment -InPolicyScope $inPolicyScope -HasPhoneMethodRegistered $hasPhoneMethod `
         -IsPasswordlessCapable $isPasswordlessCapable -IsAdmin $isAdmin -UserType $userType
 
+    $phoneMethodList = ($matchingMethods -join '; ')
+
+    $nextStep = Get-RemediationStep -Risk $risk[0] -HasPhoneMethodRegistered $hasPhoneMethod `
+        -UserType $userType -PhoneMethodsRegistered $phoneMethodList
+
     [PSCustomObject][ordered]@{
         Risk                             = $risk[0]
         Reason                           = $risk[1]
+        NextStep                         = $nextStep
         DisplayName                      = [string](Get-PropertyValue $user 'displayName')
         UserPrincipalName                = [string](Get-PropertyValue $user 'userPrincipalName')
         UserId                           = $id
@@ -1225,7 +1324,7 @@ $rows = foreach ($user in $enabledUsers) {
         InSmsPolicyScope                 = $inSmsScope
         InVoicePolicyScope               = $inVoiceScope
         HasPhoneMethodRegistered         = $hasPhoneMethod
-        PhoneMethodsRegistered           = ($matchingMethods -join '; ')
+        PhoneMethodsRegistered           = $phoneMethodList
         AllMethodsRegistered             = ($methods -join '; ')
         IsPasswordlessCapable            = $isPasswordlessCapable
         IsMfaCapable                     = if ($registration) { [bool](Get-PropertyValue $registration 'isMfaCapable') } else { $false }
