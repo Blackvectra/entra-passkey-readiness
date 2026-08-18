@@ -2,14 +2,14 @@
 
 [![CI](https://github.com/Blackvectra/entra-passkey-readiness/actions/workflows/ci.yml/badge.svg)](https://github.com/Blackvectra/entra-passkey-readiness/actions/workflows/ci.yml)
 [![PowerShell 7+](https://img.shields.io/badge/PowerShell-7.0%2B-5391FE)](https://learn.microsoft.com/powershell/scripting/install/installing-powershell)
-[![Read-only](https://img.shields.io/badge/Graph%20calls-GET%20only-0F9D6E)](#security)
+[![Read-only](https://img.shields.io/badge/Assessment-GET%20only-0F9D6E)](#security)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Read-only PowerShell assessment that identifies which Microsoft Entra ID users are exposed to the retirement of Microsoft-provided SMS and voice authentication, and which are ready for passkeys.
 
 It answers a question the Entra portal does not answer directly: **which specific users are both targeted by the SMS/voice Authentication Methods Policy and unable to satisfy MFA without it after the retirement date.**
 
-Every Microsoft Graph call is a GET. It does not modify users, groups, policies, authentication methods, or registration campaigns, which is what makes it safe to run against a customer tenant during business hours without a change window.
+Every Microsoft Graph call the assessment makes is a GET. It does not modify users, groups, policies, authentication methods, or registration campaigns, which is what makes it safe to run against a customer tenant during business hours without a change window. The repository also ships exactly one write tool, `Set-EntraPasskeyOptOut.ps1`, for deferring the September 2026 auto-enablement. No assessment invokes it, it needs a permission the assessment does not request, and it does nothing unless you run it yourself.
 
 ## Quick start
 
@@ -39,19 +39,22 @@ That is the only switch most runs need. Use `-OutputPath` if you want them somew
 
 Two optional extras: `-HtmlReport` adds a self-contained HTML report to hand a client directly ([sample](examples/Example-Report.html)), and `-ExportTickets` adds a CSV shaped for bulk PSA import ([sample](examples/Example-Tickets.csv)). Neither is needed for the normal run, and nothing is created in any external system by any of it — every output is a file on disk.
 
-## The three scripts
+## The four scripts
 
 | Script | Use it to |
 |---|---|
 | `Get-EntraSmsVoiceMigrationImpact.ps1` | Assess one tenant. This is the core of the project. |
 | `Invoke-EntraSmsVoiceSweep.ps1` | Assess many tenants, with optional concurrency and resume. |
 | `Compare-EntraSmsVoiceAssessment.ps1` | Diff two assessments to see whether the campaign is moving anybody. Reads files only; no Graph, no permissions. |
+| `Set-EntraPasskeyOptOut.ps1` | **The only write tool here.** Defer the 2026-09-01 passkey auto-enablement on tenants that need more runway, or clear that deferral. Needs its own permission, prompts by default, supports `-WhatIf`. See [Deferring the September auto-enablement](#deferring-the-september-auto-enablement). |
+
+The first three are read-only. The fourth is a separate, deliberate action that no assessment path can reach.
 
 ## Contents
 
 - [Why this exists](#why-this-exists) — the timeline, and the two populations people conflate
 - [Prerequisites](#prerequisites) — modules, roles, Graph scopes
-- [Usage](#usage) — single tenant, estate sweeps, progress tracking, reports, tickets
+- [Usage](#usage) — single tenant, estate sweeps, progress tracking, reports, tickets, the September opt-out
 - [Output](#output) — console summary and CSV schema
 - [Who actually gets stopped](#who-actually-gets-stopped) — the lockout population, which is not the same as the risk bands
 - [Risk classifications](#risk-classifications) — the five bands
@@ -136,6 +139,14 @@ All four scopes are read-only. The script requests them at connect time and will
 
 If your tenant requires admin consent for delegated Graph scopes, have a Global Administrator or Privileged Role Administrator consent to these four before first run.
 
+`Policy.Read.All` also covers the one beta call the assessment makes. It reads `optOutSettings.passkeyDynamicMigration` from `beta/policies/authenticationMethodsPolicy`, because that field is not on the v1.0 surface and there is no v1.0 request that answers "has this tenant been deferred past 2026-09-01". It is still a GET, and it fails soft: an unavailable beta endpoint gives `PasskeyOptedOut = read-failed` rather than stopping the run.
+
+### The write permission, and what does not need it
+
+`Set-EntraPasskeyOptOut.ps1` requires **`Policy.ReadWrite.AuthenticationMethod` as an application permission**, plus certificate-based app-only authentication. It is the only thing in this repository that needs it.
+
+**Do not add it to the assessment's app registration.** None of the four read scopes above grant it, none of the three read-only scripts use it, and consenting to it estate-wide would mean a routine sweep carries a permission that can rewrite an authentication policy. Register it separately, or consent to it only in the tenants you have actually decided to defer.
+
 ---
 
 ## Installation
@@ -184,9 +195,25 @@ $rows | Where-Object Risk -eq 'Critical' | Format-Table DisplayName, UserPrincip
 
 The tenant list is a CSV with a `TenantId` column and an optional `CustomerName` column used to name the output folder. See [examples/tenants.sample.csv](examples/tenants.sample.csv).
 
-Results sort failures first, then by Critical count descending, so the estate triage order is the read order.
+Results sort failures first, then tenants whose results are a lower bound and show nothing, then by Critical count descending, so the estate triage order is the read order. That second key exists because a `LowerBound` tenant reporting zeroes has not been measured — leaving it at the bottom of the file is how it gets skipped now and reappears as a February lockout ticket.
 
 **Point `-ReportRoot` at your protected client documentation store, never at a git working directory.**
+
+#### The sweep summary columns
+
+`SweepSummary_*.csv` is one row per tenant, and every row is projected onto the same fixed column list before export. That matters with `-Resume`: `Export-Csv` takes its header from the first object it receives, so a single carried-forward row from an older build sorting to the top used to drop the newer columns from the whole file — and because that truncated file then became the newest summary, the next resume read the short schema and truncated again. A column with no value for a tenant now exports empty, which reads correctly as "this tenant was never assessed on that field".
+
+Alongside `Customer`, `TenantId`, `Status`, the risk-band counts, and `ReportPath`, the summary carries:
+
+| Column | What to do with it |
+|---|---|
+| `AssessmentConfidence` | `Complete` or `LowerBound`. **Read this before any count in the row.** `LowerBound` means legacy per-user MFA is still authoritative in that tenant, so everything to its right understates exposure — a `LowerBound` tenant with zero findings has not been shown to be clean, it has been shown to be unmeasurable from here. Sorted toward the top for exactly that reason. |
+| `MigrationState` | The `policyMigrationState` behind that verdict: `preMigration`, `migrationInProgress`, `migrationComplete`, or `unknown`. This is the column that tells you which tenants need the manual legacy-MFA check. |
+| `PasskeyOptedOut` | `true`, `false`, `read-failed`, `unknown`, or `not-assessed`. Your estate-wide record of which tenants are deferred past 2026-09-01. `read-failed` means the read did not succeed and `not-assessed` means the tenant was never reached — **neither is `false`**. The console calls them out separately, because a deferral you made is exactly the thing a collapsed boolean would quietly lose. |
+| `BlockedAtRetirement` | Users in that tenant whose only MFA method is a phone, and who are therefore stopped at sign-in on 2027-02-01. The number to drive to zero, and the last sort key. |
+| `BlockedAdminsAtRetirement` | How many of those hold a privileged role. A non-zero value here on any tenant is the first thing to work. |
+
+A tenant that failed or was never reached reads `not-assessed` in `MigrationState` and `PasskeyOptedOut`, and `NotAssessed` in `AssessmentConfidence`, rather than defaulting into a verdict it did not earn. Rows carried forward by `-Resume` keep the values from the run that produced them.
 
 #### Running tenants concurrently
 
@@ -305,7 +332,7 @@ The action list is written on every run. It contains just the Critical, High, an
 
 See [examples/Example-ActionList.csv](examples/Example-ActionList.csv).
 
-Producing the list is read-only. Creating and populating the group stays a deliberate manual action, because that is a write and this tool does not write.
+Producing the list is read-only. Creating and populating the group stays a deliberate manual action, because that is a write and the assessment does not write.
 
 **If you raise tickets yourself, this is the file you want, and you can skip `-ExportTickets` entirely.** Nothing is created in any external system by either switch — every output is a file on disk.
 
@@ -366,6 +393,36 @@ The sweep does this for you: history lives in the per-tenant folder rather than 
 
 `-IgnoreTicketHistory` raises tickets for everyone regardless, for rebuilding a queue that was lost. `TicketsSuppressedAsAlreadyRaised` in the summary tells you how many were held back, so a near-empty queue reads as "already ticketed" rather than "assessment found nothing".
 
+### Deferring the September auto-enablement
+
+**This is the only part of the project that writes to a tenant.** Everything above reads.
+
+On 2026-09-01 Microsoft auto-enables passkeys and sets the registration campaign to Microsoft managed on in-scope tenants. `Set-EntraPasskeyOptOut.ps1` defers that by PATCHing `optOutSettings.passkeyDynamicMigration` on the beta Authentication Methods Policy.
+
+```powershell
+# Preview across the estate. Connects and reads, writes nothing.
+.\Set-EntraPasskeyOptOut.ps1 -TenantListPath .\defer-these.csv `
+    -ClientId 11111111-1111-1111-1111-111111111111 `
+    -CertificateThumbprint A1B2C3D4E5F60718293A4B5C6D7E8F9012345678 `
+    -Direction OptOut -WhatIf
+
+# Apply, with a durable record of which tenants you deferred.
+.\Set-EntraPasskeyOptOut.ps1 -TenantListPath .\defer-these.csv `
+    -ClientId 11111111-1111-1111-1111-111111111111 `
+    -CertificateThumbprint A1B2C3D4E5F60718293A4B5C6D7E8F9012345678 `
+    -Direction OptOut -ResultPath D:\ClientEvidence\deferred.csv
+```
+
+**What it buys you, and what it does not.** Opting out defers the 1 September auto-enablement and campaign change on that tenant. It does **not** move 2027-02-01. The retirement and the blocking registration prompt on that date are not opt-outable, so opting out shortens the window you have left to do the actual migration work — it does not lengthen it. Read [the 14-day decision](docs/Operations-Playbook.md#the-14-day-decision-who-to-defer) before running it across an estate.
+
+Three things it deliberately makes awkward to get wrong:
+
+- **`-Direction` is mandatory and is not a switch.** A switch whose absence means "write the opposite value" turns a saved command line that lost its switch into a bulk re-arm of exactly the tenants you deliberately deferred. Supplying neither value is an error.
+- **It prompts by default.** `ConfirmImpact` is `High`. `-Confirm:$false` is available for unattended runs, and is a decision you make explicitly.
+- **It aborts on a tenant mismatch.** A GUID must match the connected context exactly; a domain must appear in that tenant's own verified domain list. Writing to the wrong tenant is the one failure this script cannot walk back.
+
+Run `Get-EntraSmsVoiceMigrationImpact.ps1` before and after. `PasskeyOptedOut` in the summary is how you confirm the write landed.
+
 ### Parameters
 
 #### `Get-EntraSmsVoiceMigrationImpact.ps1`
@@ -411,6 +468,21 @@ Accepts and passes through `-IncludeUnaffected`, `-HtmlReport`, `-ExportTickets`
 | `-SkipAclHardening` | switch | off | Skip restricting output file permissions. |
 | `-PassThru` | switch | off | Emit per-user change objects to the pipeline. |
 
+#### `Set-EntraPasskeyOptOut.ps1`
+
+The only script here that writes. Requires `Policy.ReadWrite.AuthenticationMethod` as an application permission.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-Direction` | string | **required** | `OptOut` defers the 2026-09-01 auto-enablement. `ClearOptOut` re-arms it on tenants currently deferred. Mandatory and not a switch, on purpose. |
+| `-TenantId` | string[] | none | One or more tenant GUIDs or verified domains. Accepts pipeline input. Mutually exclusive with `-TenantListPath`. |
+| `-TenantListPath` | string | none | CSV with a `TenantId` column and optional `CustomerName`. |
+| `-ClientId` | guid | **required** | App registration ID. App-only authentication only; there is no interactive path. |
+| `-CertificateThumbprint` | string | **required** | Certificate thumbprint. Client secrets are unsupported. |
+| `-ResultPath` | string | none | CSV recording before, after, and failure per tenant. Without it the only record of which tenants you deferred is console scrollback. |
+| `-WhatIf` | switch | off | Connects and reads so the before-state is real, then writes nothing. |
+| `-Confirm` | switch | on | `ConfirmImpact` is `High`, so it prompts by default. `-Confirm:$false` for unattended runs. |
+
 ---
 
 ## Output
@@ -420,7 +492,10 @@ Accepts and passes through `-IncludeUnaffected`, `-HtmlReport`, `-ExportTickets`
 | Field | Meaning |
 |---|---|
 | `TenantId` | Tenant the assessment actually ran against |
+| `AssessmentConfidence` | `Complete` or `LowerBound`. See [what LowerBound means](#assessmentconfidence-and-the-numbers-below-it) — on a `LowerBound` tenant the counts under it are floors, not totals. |
 | `RegistrationCampaignState` | `enabled`, `disabled`, or `default (Microsoft managed)` |
+| `MigrationState` | `policyMigrationState` from the Authentication Methods Policy: `preMigration`, `migrationInProgress`, `migrationComplete`, or `unknown`. Anything other than `migrationComplete` makes the run a lower bound. |
+| `PasskeyOptedOut` | `true`, `false`, `read-failed`, or `unknown`. Whether this tenant is deferred past the 2026-09-01 auto-enablement. `read-failed` is not `false`. |
 | `SmsPolicyState` / `VoicePolicyState` | AMP state of each method |
 | `SmsPolicyInclude` / `SmsPolicyExclude` | Resolved include and exclude targets, with transitive member counts |
 | `InSmsPolicyScope` / `InVoicePolicyScope` | Enabled users resolved into each method's scope |
@@ -432,6 +507,26 @@ Accepts and passes through `-IncludeUnaffected`, `-HtmlReport`, `-ExportTickets`
 | `UnrecognisedMethods` | Any registered method name this tool does not classify. Treated as not surviving, so affected users read as more exposed. |
 | `UsersMissingFromReport` | Enabled users with no row in the registration report (see Limitations) |
 | `OldestReportRowUtc` | Age of the oldest registration-report row; the honest confidence marker for the run |
+
+#### `AssessmentConfidence`, and the numbers below it
+
+`AssessmentConfidence` qualifies every count in the summary, so read it before you read any of them.
+
+- **`Complete`** — `policyMigrationState` is `migrationComplete`. The Authentication Methods Policy is authoritative for this tenant, so the modern policy scope this tool reads is the whole picture.
+- **`LowerBound`** — `policyMigrationState` is anything else: `preMigration`, `migrationInProgress`, or `unknown`. **Legacy per-user MFA service settings are still authoritative in this tenant.** Users enabled for SMS or voice there are in scope for the retirement, are auto-enabled for passkeys on 2026-09-01, and are not visible through the Graph surface this assessment reads. Every count below — `MigrationCandidates`, the risk bands, `BlockedAtRetirement` — **understates** the real exposure.
+
+The consequence worth spelling out to a client: **a `LowerBound` tenant reporting zero findings is not a clean tenant.** It is a tenant whose exposure lives somewhere this tool cannot see. Go and check the legacy per-user MFA service settings by hand before calling it finished.
+
+#### `PasskeyOptedOut` is tri-state, not a boolean
+
+It is a string with four possible values, and collapsing it to true/false loses the distinction that matters.
+
+| Value | Meaning |
+|---|---|
+| `true` | Deferred. This tenant will not be auto-enabled for passkeys on 2026-09-01. |
+| `false` | Not deferred. The 1 September auto-enablement and campaign change apply. |
+| `read-failed` | The beta read did not succeed, so **nobody knows**. Not the same as `false`: a tenant you deliberately deferred last month reads this way if the endpoint is unavailable today, and treating it as `false` is how a deferral quietly stops being tracked. Re-run before acting on it. |
+| `unknown` | No value was resolved at all. Treat as `read-failed`. |
 
 ### CSV fields
 
@@ -511,7 +606,7 @@ The claim is "every user in the tenant who is exposed." Here is exactly what tha
 | Population | Why | What to do |
 |---|---|---|
 | Disabled users | `userRegistrationDetails` does not return them | Re-run after any bulk re-enablement |
-| Users enabled for SMS/voice only via legacy per-user MFA | Requires beta endpoints and broader scopes; would break the least-privilege model | The `Moderate` band surfaces the symptom. Validate that population in the legacy MFA settings portal. |
+| Users enabled for SMS/voice only via legacy per-user MFA | Requires broader scopes than the four read-only ones; would break the least-privilege model | `AssessmentConfidence = LowerBound` says this tenant is affected, and the `Moderate` band surfaces the symptom. Validate that population in the legacy MFA settings portal. |
 | Effective Conditional Access outcome | Not read | Policy scope is not the same as being challenged at sign-in |
 | Non-human accounts | Shared mailboxes, sync accounts, and service accounts appear as ordinary users | Filter by your naming convention or exclude them from the remediation group after review |
 
@@ -524,7 +619,8 @@ These are properties of the data sources, not defects. Read them before presenti
 - **Disabled users are excluded.** `userRegistrationDetails` does not return disabled users. The script reads `accountEnabled` separately and assesses enabled users only. Disabled accounts that get re-enabled after the assessment are not represented.
 - **Reporting latency.** The registration report is not real-time. `OldestReportRowUtc` in the summary is the age of the oldest row behind the assessment, so the confidence in a run is visible. Do not treat a run as a live directory query.
 - **SMS and voice are not separately registered.** Entra stores a phone number with a type, not an "SMS registration" and a "voice registration." `mobilePhone` can satisfy both; `officePhone` is voice-only. There is no clean per-user SMS-versus-voice split available, so the script reports phone-method capability and leaves policy scope to distinguish intent.
-- **Legacy per-user MFA is not read.** Users enabled for SMS or voice through legacy per-user MFA service settings are also in scope for the retirement, but that state is not exposed through the read-only Graph v1.0 surface this script uses. Reading it requires beta endpoints and broader scopes, which would break the least-privilege model. `Moderate` findings are the signal that this exposure likely exists; validate them manually in the legacy MFA service settings portal.
+- **Legacy per-user MFA is not read.** Users enabled for SMS or voice through legacy per-user MFA service settings are also in scope for the retirement, but that state is not exposed at the permission level this script runs at. Reading it requires scopes beyond the four read-only ones, which would break the least-privilege model. The assessment now names the tenants where this matters instead of leaving you to infer it: `AssessmentConfidence = LowerBound` means legacy per-user MFA is still authoritative there and every count in the run understates the real exposure. Validate that population manually in the legacy MFA service settings portal, and do not report a `LowerBound` tenant as clean on the strength of a zero.
+- **One beta endpoint is read, and it is still a GET.** The assessment makes exactly one call against `beta/policies/authenticationMethodsPolicy`, to read `optOutSettings.passkeyDynamicMigration` — whether the tenant has been deferred past the 2026-09-01 auto-enablement. That field is not on the v1.0 surface, so no v1.0 request answers the question. It requires no scope beyond `Policy.Read.All`, it writes nothing, and Microsoft does not guarantee beta API stability: if it becomes unavailable the run continues and reports `PasskeyOptedOut = read-failed` rather than a value it did not read.
 - **Conditional Access is not evaluated.** A user may be in AMP scope but never actually challenged, or may be blocked by a Conditional Access grant this script does not read. Policy scope is not the same as effective sign-in behaviour.
 - **Guest and B2B readiness.** Guests are assessed, but passkey support for B2B and internal guest users is on a separate Microsoft timeline. Treat guest findings as requiring independent validation.
 - **Nested groups are resolved transitively; dynamic groups are point-in-time.** A dynamic group's membership can change between the assessment and September 1.
