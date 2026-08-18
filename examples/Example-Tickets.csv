@@ -101,6 +101,27 @@ Actions
 2. Confirm registration completed. The registration report lags, so verify in the portal or
    re-run the assessment rather than assuming.
 3. Leave the existing phone method in place until the new method is confirmed working."
+"P2 - High","Passkey migration: Marguerite Delacroix","Fabrikam Manufacturing","Marguerite Delacroix","marguerite.delacroix@fabrikam-example.com","11111111-aaaa-4bbb-8ccc-000000000009","High","Identity / MFA migration","2026-09-01","New","Entra SMS/Voice migration assessment","USER AT RISK OF SIGN-IN LOCKOUT
+
+User: Marguerite Delacroix <marguerite.delacroix@fabrikam-example.com>
+Object ID: 11111111-aaaa-4bbb-8ccc-000000000009
+User type: Member
+Registered phone methods: none reported
+All registered methods: softwareOneTimePasscode
+Passwordless capable: No
+
+Why this ticket exists
+User is in scope via SMS/voice policy and is not passwordless-capable.
+
+Next step
+Include in the passkey registration campaign. The user is in scope with no method that survives the retirement, so they will be auto-enabled and nudged on 2026-09-01 whether or not you act first.
+
+Actions
+1. Direct the user to register a passkey or Microsoft Authenticator, with guidance for their
+   device type.
+2. Confirm registration completed. The registration report lags, so verify in the portal or
+   re-run the assessment rather than assuming.
+3. Leave the existing phone method in place until the new method is confirmed working."
 "P2 - High","Passkey migration: Rosalind Achebe","Fabrikam Manufacturing","Rosalind Achebe","rosalind.achebe@fabrikam-example.com","11111111-aaaa-4bbb-8ccc-000000000003","High","Identity / MFA migration","2026-09-01","New","Entra SMS/Voice migration assessment","USER AT RISK OF SIGN-IN LOCKOUT
 
 User: Rosalind Achebe <rosalind.achebe@fabrikam-example.com>

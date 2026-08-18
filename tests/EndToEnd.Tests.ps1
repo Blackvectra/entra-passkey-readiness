@@ -287,7 +287,14 @@ Describe 'A default run against a stubbed tenant' {
 
     It 'puts the staleness signal in the action list a technician opens' {
         $actionList = @(Import-Csv -LiteralPath (Join-Path $script:OutDir 'assessment_ActionList.csv'))
-        $actionList[0].PSObject.Properties.Name | Should -Contain 'DaysSinceLastSignIn'
+        $actionList[0].PSObject.Properties.Name | Should -Contain 'LastSignIn'
+    }
+
+    It 'writes plain-language columns with no object IDs' {
+        $actionList = @(Import-Csv -LiteralPath (Join-Path $script:OutDir 'assessment_ActionList.csv'))
+        $actionList[0].PSObject.Properties.Name | Should -Be @(
+            'Priority', 'User', 'SignIn', 'LastSignIn', 'Has', 'Problem', 'DoThis'
+        )
     }
 
     It 'reads legacy per-user MFA without being asked, because that is now the default' {
@@ -462,6 +469,70 @@ Describe 'A default run against a stubbed tenant' {
     }
 }
 
+Describe 'A run with no -OutputPath' {
+
+    # The default used to be a timestamped filename beside the script. It is now a folder
+    # per tenant with a date-named file inside, so it lands under the repo's own reports\
+    # -- which .gitignore excludes wholesale -- rather than wherever -OutputPath is told to
+    # write. This is the one scenario in the suite that writes there, and it cleans up
+    # after itself so a test run does not leave stray evidence in the working tree.
+
+    BeforeAll {
+        $pwshPath = if ($IsWindows) { Join-Path $PSHOME 'pwsh.exe' } else { Join-Path $PSHOME 'pwsh' }
+        if (-not (Test-Path -LiteralPath $pwshPath)) { $pwshPath = 'pwsh' }
+
+        $script:RepoRoot = Split-Path -Parent (Get-AssessmentScriptPath)
+        $script:DefaultLabel = 'EndToEndDefaultPathTest'
+        $script:DefaultReportsDir = Join-Path $script:RepoRoot (Join-Path 'reports' $script:DefaultLabel)
+        Remove-Item -LiteralPath $script:DefaultReportsDir -Recurse -Force -ErrorAction SilentlyContinue
+
+        $defaultStdOut = Join-Path $script:Root 'default-stdout.txt'
+        $defaultStdErr = Join-Path $script:Root 'default-stderr.txt'
+        $defaultSummaryPath = Join-Path $script:Root 'default-summary.json'
+
+        $defaultCommand = @"
+`$env:PSModulePath = '$(Join-Path $script:Root 'Modules')' + [IO.Path]::PathSeparator + `$env:PSModulePath
+`$summary = & '$(Get-AssessmentScriptPath)' -TenantId 'fabrikam-example.com' -CustomerName '$script:DefaultLabel' -SkipAclHardening
+`$summary | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath '$defaultSummaryPath'
+"@
+
+        $defaultProcess = Start-Process -FilePath $pwshPath -PassThru -Wait -NoNewWindow `
+            -RedirectStandardOutput $defaultStdOut -RedirectStandardError $defaultStdErr `
+            -ArgumentList @('-NoProfile', '-NonInteractive', '-Command', $defaultCommand)
+
+        $script:DefaultExit = $defaultProcess.ExitCode
+        $script:DefaultStdErr = if (Test-Path $defaultStdErr) { Get-Content -LiteralPath $defaultStdErr -Raw } else { '' }
+        $script:DefaultStdOut = if (Test-Path $defaultStdOut) { Get-Content -LiteralPath $defaultStdOut -Raw } else { '' }
+        $script:DefaultSummary = if (Test-Path $defaultSummaryPath) {
+            Get-Content -LiteralPath $defaultSummaryPath -Raw | ConvertFrom-Json
+        } else { $null }
+    }
+
+    AfterAll {
+        Remove-Item -LiteralPath $script:DefaultReportsDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'completes and names the file from the customer, not a timestamp' {
+        $script:DefaultExit | Should -Be 0 -Because "the run failed: $script:DefaultStdErr"
+        $script:DefaultSummary.OutputPath | Should -Match ([regex]::Escape("${script:DefaultLabel}_"))
+        $script:DefaultSummary.OutputPath | Should -Not -Match '\d{8}_\d{6}' -Because 'the old timestamp format must be gone'
+    }
+
+    It 'writes under reports\<tenant>\, which .gitignore excludes wholesale' {
+        $expected = Join-Path $script:DefaultReportsDir ('{0}_{1:yyyy-MM-dd}.csv' -f $script:DefaultLabel, (Get-Date))
+        $expected | Should -Exist
+        $script:DefaultSummary.OutputPath | Should -Be (Resolve-Path -LiteralPath $expected).Path
+    }
+
+    It 'tells the operator where it is writing before the Graph calls start' {
+        $script:DefaultStdOut | Should -Match 'Writing to:'
+    }
+
+    It 'still writes the action list beside it' {
+        (Join-Path $script:DefaultReportsDir ('{0}_{1:yyyy-MM-dd}_ActionList.csv' -f $script:DefaultLabel, (Get-Date))) | Should -Exist
+    }
+}
+
 
 Describe 'A run with -ExcludeUpnPattern' {
 
@@ -538,7 +609,7 @@ Describe 'A run with -ExcludeUpnPattern' {
 
     It 'keeps the excluded account out of the action list' {
         $actionList = @(Import-Csv -LiteralPath (Join-Path $script:OutDir 'excluded_ActionList.csv'))
-        $actionList.UserPrincipalName | Should -Not -Contain 'svc-scanner@fabrikam-example.com'
+        $actionList.SignIn | Should -Not -Contain 'svc-scanner@fabrikam-example.com'
         $actionList.Count | Should -BeGreaterThan 0 -Because 'real users are still listed'
     }
 

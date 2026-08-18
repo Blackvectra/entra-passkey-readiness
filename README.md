@@ -19,23 +19,27 @@ Install-Module Microsoft.Graph.Authentication -Scope CurrentUser
 .\Get-EntraSmsVoiceMigrationImpact.ps1
 ```
 
-That is the whole thing. A browser opens, you sign in as Global Reader or Security Reader, and you get two spreadsheets beside each other:
+That is the whole thing. A browser opens, you sign in as Global Reader or Security Reader, and you get two spreadsheets in a folder named for the tenant:
+
+```
+reports\Contoso\Contoso_2026-08-18.csv
+reports\Contoso\Contoso_2026-08-18_ActionList.csv
+```
 
 | File | What it is |
 |---|---|
-| `...Impact.csv` | The full assessment: one risk-ranked row per exposed user, highest risk first |
-| `..._ActionList.csv` | The work list: affected users only, what they have, what to do. Attach it to a ticket ([sample](examples/Example-ActionList.csv)) |
+| `<tenant>_<date>.csv` | The full assessment: one risk-ranked row per exposed user, highest risk first |
+| `..._ActionList.csv` | The work list: affected users only, what they have, what to do, in plain language — no IDs. Attach it to a ticket ([sample](examples/Example-ActionList.csv)) |
 
 Both open straight into Excel. Values that would otherwise be read as formulas are neutralised on the way out, so a display name beginning `=` cannot execute when somebody opens the file.
 
-Add `-CustomerName "Contoso Manufacturing"` to put the client's name into every filename, which is what you want when you are running several clients and then attaching one set to that client's ticket:
+The folder name comes from `-CustomerName` when you pass it, otherwise from the domain of the account you signed in with, otherwise from the tenant's GUID as a last resort — so running five clients back to back produces five folders you can tell apart at a glance, not five files distinguishable only by a timestamp. A re-run the same day overwrites that day's files; different days sit side by side. Pass `-CustomerName "Contoso Manufacturing"` when the sign-in domain does not read as the client's name:
 
-```
-EntraSmsVoiceMigrationImpact_Contoso-Manufacturing_20260817_170000.csv
-EntraSmsVoiceMigrationImpact_Contoso-Manufacturing_20260817_170000_ActionList.csv
+```powershell
+.\Get-EntraSmsVoiceMigrationImpact.ps1 -CustomerName "Contoso Manufacturing"
 ```
 
-That is the only switch most runs need. Use `-OutputPath` if you want them somewhere specific; everything else is named from it.
+Use `-OutputPath` if you want the files somewhere else entirely; everything else is named from it.
 
 Two optional extras: `-HtmlReport` adds a self-contained HTML report to hand a client directly ([sample](examples/Example-Report.html)), and `-ExportTickets` adds a CSV shaped for bulk PSA import ([sample](examples/Example-Tickets.csv)). Neither is needed for the normal run, and nothing is created in any external system by any of it — every output is a file on disk.
 
@@ -335,8 +339,8 @@ See [examples/Example-Report.html](examples/Example-Report.html) for a rendered 
 
 The action list is written on every run. It contains just the Critical, High, and Moderate users, and does two jobs:
 
-- **The file you attach to a ticket you raised yourself.** Eight columns, sorted worst-first with admins ahead of standard users, so it is worked top-down: `Risk`, `DisplayName`, `UserPrincipalName`, `IsAdmin`, `PhoneMethodsRegistered`, `IsPasswordlessCapable`, `NextStep`, `UserId`. Everything a technician needs and none of the diagnostic columns that make the full export wide.
-- **The membership list** for the migration security group Microsoft's guidance tells you to create as step one, ready for bulk import on `UserPrincipalName`.
+- **The file you attach to a ticket you raised yourself.** Seven columns, in plain language rather than Graph's enum spellings, and no object IDs: `Priority`, `User`, `SignIn`, `LastSignIn`, `Has`, `Problem`, `DoThis`. `Has` reads `Phone + Authenticator` instead of `mobilePhone; microsoftAuthenticatorPush`. `Priority` sorts the queue: `1 - Lockout` (stops working 2027-02-01) ahead of `2 - Admin`, `3 - Migrate`, and `4 - Likely leaver` (stale or never signed in — check before chasing). Everything a technician needs to work the queue top-down, and none of the diagnostic columns that make the full export wide.
+- **The membership list** for the migration security group Microsoft's guidance tells you to create as step one, ready for bulk import on `SignIn` (the user's sign-in name/UPN).
 
 See [examples/Example-ActionList.csv](examples/Example-ActionList.csv).
 
