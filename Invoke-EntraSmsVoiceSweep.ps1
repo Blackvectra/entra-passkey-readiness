@@ -225,8 +225,20 @@ end {
             TenantId                   = if ($Summary) { & $get 'TenantId' } else { $TenantId }
             Status                     = $Status
             RegistrationCampaignState  = if ($Summary) { & $get 'RegistrationCampaignState' } else { '' }
-            MigrationState             = if ($Summary) { & $get 'MigrationState' } else { '' }
-            PasskeyOptedOut            = if ($Summary) { & $get 'PasskeyOptedOut' } else { '' }
+            MigrationState             = if ($Summary) { & $get 'MigrationState' } else { 'not-assessed' }
+            # Four visibly different strings, never a bare boolean: 'true' (deliberately
+            # deferred), 'false' (still on the Sep 1 timeline), 'read-failed' (the beta call
+            # errored), 'not-assessed' (this tenant was never reached). Collapsing the last
+            # two into 'false' is how a deferral list quietly rots.
+            PasskeyOptedOut            = if ($Summary) { & $get 'PasskeyOptedOut' } else { 'not-assessed' }
+            # Derived by the assessment. Blank summary means the tenant failed or was never
+            # reached, which is neither Complete nor LowerBound -- it is unknown.
+            AssessmentConfidence       = if ($Summary) {
+                                             $confidence = [string](& $get 'AssessmentConfidence')
+                                             if ($confidence) { $confidence }
+                                             elseif (([string](& $get 'MigrationState')) -eq 'migrationComplete') { 'Complete' }
+                                             else { 'LowerBound' }
+                                         } else { 'NotAssessed' }
             SmsPolicyState             = if ($Summary) { & $get 'SmsPolicyState' } else { '' }
             VoicePolicyState           = if ($Summary) { & $get 'VoicePolicyState' } else { '' }
             EnabledUsersAssessed       = & $get 'EnabledUsersAssessed'
@@ -235,6 +247,12 @@ end {
             High                       = & $get 'High'
             Moderate                   = & $get 'Moderate'
             Low                        = & $get 'Low'
+            # The number that decides WHICH tenants are worth opting out in the next 14 days:
+            # users holding a phone as their only method that satisfies MFA. The assessment has
+            # computed it all along; it was never carried into the estate view, so the sweep
+            # could not rank tenants by how many people the change actually strands.
+            BlockedAtRetirement        = & $get 'BlockedAtRetirement'
+            BlockedAdminsAtRetirement  = & $get 'BlockedAdminsAtRetirement'
             PasswordlessCapableInScope = & $get 'PasswordlessCapableInScope'
             OldestReportRowUtc         = & $get 'OldestReportRowUtc'
             ReportPath                 = if ($Summary) { & $get 'OutputPath' } else { '' }
@@ -452,22 +470,60 @@ end {
         return -1
     }
 
-    # Triage order for the estate: the tenants with the most locked-out privileged
-    # accounts get worked first, failures surface at the top so they are not lost.
+    # Reading a row's own property is not enough: rows carried forward by -Resume come from
+    # Import-Csv against a summary written by an older build, so they carry whatever columns
+    # that build emitted and nothing else.
+    $readColumn = {
+        param($row, [string]$name)
+        $property = $row.PSObject.Properties[$name]
+        if ($property) { return $property.Value }
+        return ''
+    }
+
+    # Triage order for the estate. Three keys, in this order:
+    #   1. Failures first -- a tenant that did not report is not a tenant with no findings.
+    #   2. Then tenants whose results are a LOWER BOUND and show nothing. This is the whole
+    #      point of reading policyMigrationState: a preMigration tenant has SMS live via legacy
+    #      per-user MFA, which this assessment cannot see, so its zeroes mean "not measured",
+    #      not "not exposed". Left at the bottom it gets skipped by the documented workflow of
+    #      opening only non-zero tenants, and resurfaces as a February lockout ticket.
+    #      LowerBound tenants that DO have findings are already ranked by those findings below.
+    #   3. Then the usual Critical/High ordering.
     $sorted = $results | Sort-Object `
-        @{ Expression = { if ($_.Status -eq 'Failed') { 0 } else { 1 } }; Ascending = $true }, `
-        @{ Expression = { & $asCount $_.Critical }; Descending = $true }, `
-        @{ Expression = { & $asCount $_.High }; Descending = $true }
+        @{ Expression = { if ((& $readColumn $_ 'Status') -eq 'Failed') { 0 } else { 1 } }; Ascending = $true }, `
+        @{ Expression = {
+                $confidence = [string](& $readColumn $_ 'AssessmentConfidence')
+                $findings = (& $asCount (& $readColumn $_ 'Critical')) + (& $asCount (& $readColumn $_ 'High'))
+                if ($confidence -ne 'Complete' -and $findings -le 0) { 0 } else { 1 }
+            }; Ascending = $true }, `
+        @{ Expression = { & $asCount (& $readColumn $_ 'Critical') }; Descending = $true }, `
+        @{ Expression = { & $asCount (& $readColumn $_ 'High') }; Descending = $true }, `
+        @{ Expression = { & $asCount (& $readColumn $_ 'BlockedAtRetirement') }; Descending = $true }
 
     $summaryPath = Join-Path $ReportRoot "SweepSummary_$runStamp.csv"
+
+    # Every row is projected onto ONE canonical column list before export. Export-Csv takes its
+    # header from the FIRST object it receives, so without this a single carried-forward row
+    # from an older build sorting to the top silently drops the newer columns from all 90 rows
+    # -- and because that truncated file becomes the newest SweepSummary_*.csv, the next
+    # -Resume reads the short schema and truncates again. Absent values export as empty, which
+    # reads correctly as "this tenant was never assessed on that field".
+    $columns = @(
+        'Customer', 'TenantId', 'Status', 'AssessmentConfidence', 'RegistrationCampaignState',
+        'MigrationState', 'PasskeyOptedOut', 'SmsPolicyState', 'VoicePolicyState',
+        'EnabledUsersAssessed', 'MigrationCandidates', 'Critical', 'High', 'Moderate', 'Low',
+        'BlockedAtRetirement', 'BlockedAdminsAtRetirement', 'PasswordlessCapableInScope',
+        'OldestReportRowUtc', 'ReportPath', 'Error'
+    )
+
     # Same injection guard as the per-tenant exports: customer labels reach this file too.
     $guarded = foreach ($row in $sorted) {
         $clone = [ordered]@{}
-        foreach ($property in $row.PSObject.Properties) {
-            $value = $property.Value
+        foreach ($name in $columns) {
+            $value = & $readColumn $row $name
             if ($value -is [string] -and $value.Length -gt 0 -and
                 $value[0] -in @('=', '+', '-', '@', [char]9, [char]13)) { $value = "'" + $value }
-            $clone[$property.Name] = $value
+            $clone[$name] = $value
         }
         [PSCustomObject]$clone
     }
@@ -491,13 +547,23 @@ end {
     }
 
     Write-Host "`n===== CROSS-TENANT SWEEP SUMMARY =====" -ForegroundColor Magenta
-    $sorted | Format-Table Customer, Status, MigrationState, PasskeyOptedOut,
-        SmsPolicyState, VoicePolicyState, MigrationCandidates, Critical, High, Moderate -AutoSize | Out-Host
+    $sorted | Format-Table Customer, Status, AssessmentConfidence, MigrationState, PasskeyOptedOut,
+        MigrationCandidates, Critical, High, BlockedAtRetirement -AutoSize | Out-Host
 
-    $failed = @($results | Where-Object Status -eq 'Failed').Count
-    $succeeded = @($results | Where-Object Status -eq 'Success')
-    $totalCritical = ($succeeded | ForEach-Object { & $asCount $_.Critical } | Measure-Object -Sum).Sum
-    $totalCandidates = ($succeeded | ForEach-Object { & $asCount $_.MigrationCandidates } | Measure-Object -Sum).Sum
+    $failed = @($results | Where-Object { (& $readColumn $_ 'Status') -eq 'Failed' }).Count
+    $succeeded = @($results | Where-Object { (& $readColumn $_ 'Status') -eq 'Success' })
+    $totalCritical = ($succeeded | ForEach-Object { & $asCount (& $readColumn $_ 'Critical') } | Measure-Object -Sum).Sum
+    $totalCandidates = ($succeeded | ForEach-Object { & $asCount (& $readColumn $_ 'MigrationCandidates') } | Measure-Object -Sum).Sum
+    $totalBlocked = ($succeeded | ForEach-Object { & $asCount (& $readColumn $_ 'BlockedAtRetirement') } | Measure-Object -Sum).Sum
+
+    # Tenants whose results understate exposure, and the subset of those showing nothing at
+    # all. The second number is the one that matters: those tenants look finished and are not.
+    $lowerBound = @($succeeded | Where-Object { (& $readColumn $_ 'AssessmentConfidence') -eq 'LowerBound' })
+    $lowerBoundSilent = @($lowerBound | Where-Object {
+        ((& $asCount (& $readColumn $_ 'Critical')) + (& $asCount (& $readColumn $_ 'High'))) -le 0
+    })
+    $deferred = @($results | Where-Object { (& $readColumn $_ 'PasskeyOptedOut') -eq 'true' })
+    $optOutUnknown = @($succeeded | Where-Object { (& $readColumn $_ 'PasskeyOptedOut') -eq 'read-failed' })
 
     Write-Host "Tenants assessed: $($results.Count - $failed) of $($results.Count)" -ForegroundColor Cyan
     if ($carriedForward.Count -gt 0) {
@@ -506,9 +572,34 @@ end {
     if ($failed -gt 0) { Write-Host "Tenants failed:   $failed (see Error column)" -ForegroundColor Red }
     Write-Host "Migration candidates across estate: $totalCandidates" -ForegroundColor Yellow
     Write-Host "Critical findings across estate:    $totalCritical" -ForegroundColor $(if ($totalCritical -gt 0) { 'Red' } else { 'Green' })
-    Write-Host "Summary written to: $summaryPath" -ForegroundColor Green
-    Write-Host '2026-09-01 is the auto-enablement date. Move users out of SMS/voice AMP scope before then to prevent it.' -ForegroundColor Yellow
-    Write-Host 'No tenant settings were changed.' -ForegroundColor Green
+    Write-Host "Blocked at retirement (phone is their only MFA): $totalBlocked" -ForegroundColor $(if ($totalBlocked -gt 0) { 'Red' } else { 'Green' })
+
+    if ($lowerBound.Count -gt 0) {
+        Write-Host "`nTenants whose results are a LOWER BOUND (policyMigrationState is not migrationComplete," -ForegroundColor Yellow
+        Write-Host "so legacy per-user MFA is still authoritative and is not readable here): $($lowerBound.Count)" -ForegroundColor Yellow
+        if ($lowerBoundSilent.Count -gt 0) {
+            Write-Host "  of which report NO Critical or High findings: $($lowerBoundSilent.Count) <-- these look clean and are not." -ForegroundColor Red
+            Write-Host '  Check the legacy per-user MFA service settings for these tenants by hand before treating them as done.' -ForegroundColor Red
+            foreach ($row in $lowerBoundSilent) {
+                Write-Host "    - $(& $readColumn $row 'Customer') [$(& $readColumn $row 'MigrationState')]" -ForegroundColor Red
+            }
+        }
+    }
+
+    if ($deferred.Count -gt 0) {
+        Write-Host "`nTenants deliberately opted out of the 2026-09-01 auto-enablement: $($deferred.Count)" -ForegroundColor Cyan
+        Write-Host '  The opt-out defers Sep 1 only. 2027-02-01 enforcement still applies, with less nudge runway.' -ForegroundColor Cyan
+    }
+    if ($optOutUnknown.Count -gt 0) {
+        Write-Host "Tenants whose opt-out state could NOT be read: $($optOutUnknown.Count) (PasskeyOptedOut = read-failed)" -ForegroundColor Yellow
+        Write-Host '  Not the same as "not opted out". Re-check these before trusting the deferral list.' -ForegroundColor Yellow
+    }
+
+    Write-Host "`nSummary written to: $summaryPath" -ForegroundColor Green
+    Write-Host '2026-09-01 auto-enablement. For migrationComplete tenants, move users out of SMS/voice AMP scope before then;' -ForegroundColor Yellow
+    Write-Host 'for preMigration tenants that means the LEGACY per-user MFA settings, which this sweep cannot read.' -ForegroundColor Yellow
+    Write-Host 'To defer a tenant past Sep 1, use Set-EntraPasskeyOptOut.ps1 (separate script, write operation).' -ForegroundColor Yellow
+    Write-Host 'No tenant settings were changed by this sweep.' -ForegroundColor Green
 
     $sorted
 }
