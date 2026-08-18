@@ -135,7 +135,7 @@ Why this ticket exists
 User is in scope via SMS/voice policy and is not passwordless-capable.
 
 Next step
-Include in the passkey registration campaign. The user is in scope with no method that survives the retirement, so they will be auto-enabled and nudged on 2026-09-01 whether or not you act first.
+Include in the passkey registration campaign. The user is in scope with no passwordless method, so they will be auto-enabled and nudged on 2026-09-01 whether or not you act first.
 
 Actions
 1. Direct the user to register a passkey or Microsoft Authenticator, with guidance for their

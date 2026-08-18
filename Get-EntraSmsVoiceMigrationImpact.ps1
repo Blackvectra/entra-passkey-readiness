@@ -1036,7 +1036,7 @@ function Get-RemediationStep {
             if ($HasPhoneMethodRegistered) {
                 return $legacyPrefix + "Include in the passkey registration campaign. Direct the user to register a passkey or Microsoft Authenticator for their device type, confirm the registration landed, then remove $methods."
             }
-            return $legacyPrefix + 'Include in the passkey registration campaign. The user is in scope with no method that survives the retirement, so they will be auto-enabled and nudged on 2026-09-01 whether or not you act first.'
+            return $legacyPrefix + 'Include in the passkey registration campaign. The user is in scope with no passwordless method, so they will be auto-enabled and nudged on 2026-09-01 whether or not you act first.'
         }
         'Moderate' {
             # Two different instructions, because the run may already have answered the
@@ -1244,7 +1244,7 @@ function New-HtmlReport {
 
         $bandBlurb = switch ($band) {
             'Critical' { 'Privileged accounts, targeted by policy, with a phone method and no phishing-resistant alternative. Individual work, scheduled, verified with a real test sign-in.' }
-            'High'     { 'Targeted by policy with no method that survives the retirement. Remediate as a scoped registration campaign rather than one ticket at a time.' }
+            'High'     { 'Targeted by policy with no passwordless method. Remediate as a scoped registration campaign rather than one ticket at a time.' }
             default    { 'A phone method is registered but the user is outside the resolved modern policy scope. Usually legacy per-user MFA. Validate this population manually before concluding it is unaffected.' }
         }
 
