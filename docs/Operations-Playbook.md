@@ -40,6 +40,8 @@ https://login.microsoftonline.com/{tenant}/adminconsent?client_id={your-app-id}
 
 Use a certificate, not a client secret. The tool refuses secrets deliberately: a credential that can read identity posture across an entire customer estate should not be a string in a parameter.
 
+**Do not add the write permission to this app.** `Set-EntraPasskeyOptOut.ps1` needs `Policy.ReadWrite.AuthenticationMethod` as an application permission, and that is the only thing in this project that does. Consenting to it alongside the four read scopes would mean every routine sweep across the estate runs holding a credential that can rewrite an authentication policy. Register it separately, and consent to it only in the tenants you have actually decided to defer. See [The 14-day decision](#the-14-day-decision-who-to-defer).
+
 Track consent state in your tenant list so you know which customers are ready:
 
 ```csv
@@ -148,6 +150,59 @@ The 1 September date is a rollout, not a switch. Microsoft describes it as phase
 
 ---
 
+## The 14-day decision: who to defer
+
+Two weeks out from 1 September there is one decision to make per tenant, and it is not "should we opt out". It is **which few tenants get deferred and which get nudged**, because on most of them the nudge does work you would otherwise do by hand.
+
+### 1. Sweep, then read two columns
+
+```powershell
+.\Invoke-EntraSmsVoiceSweep.ps1 -TenantListPath .\tenants.csv `
+    -ReportRoot "D:\ClientEvidence\EntraMigration\pre-september" `
+    -ClientId <app-id> -CertificateThumbprint <thumbprint> -ThrottleLimit 6
+```
+
+Read `AssessmentConfidence` **first**, before any count in the row.
+
+- **`LowerBound`** — the numbers beside it are floors. Legacy per-user MFA is still authoritative in that tenant and this tool cannot see it, so a low `BlockedAtRetirement` there is not evidence of low exposure. Do the manual legacy-MFA check before deciding anything about that tenant. Deferring, or not deferring, on the strength of a `LowerBound` zero is the exact mistake this column exists to prevent.
+- **`Complete`** — `BlockedAtRetirement` is a real number and you can act on it.
+
+Then read `BlockedAtRetirement` and `BlockedAdminsAtRetirement`. Those are the people stopped at sign-in on 2 February 2027, and they are what the September nudge is trying to fix for you at no cost.
+
+### 2. Defer the few, nudge the rest
+
+Three shapes are worth deferring:
+
+| Shape | Why |
+|---|---|
+| Frontline and shared-device populations | The nudge assumes the user can complete passkey registration at that moment. Somebody on a shared terminal, a kiosk, or an unsupported handset cannot, so the prompt produces a help-desk call rather than a registration. This tool cannot see device capability; that population comes from your own asset data. |
+| Tenants mid-project | A tenant move, an Intune rollout, an MFA project already in flight. A second unscheduled change landing on the same users in the same fortnight is how both slip. |
+| Panic-prone clients | You know which ones. A client who escalates on an unannounced prompt costs more in one afternoon than the deferral costs over five months. Defer, communicate, then re-arm on your own schedule. |
+
+Everything else gets nudged. A tenant with a manageable `BlockedAtRetirement`, nothing in flight, and users on their own managed devices is a tenant where 1 September works in your favour.
+
+```powershell
+.\Set-EntraPasskeyOptOut.ps1 -TenantListPath .\defer-these.csv `
+    -ClientId <app-id> -CertificateThumbprint <thumbprint> `
+    -Direction OptOut -ResultPath D:\ClientEvidence\deferred.csv -WhatIf
+```
+
+`-WhatIf` first: it still connects and reads, so the Before column is real. Then re-run without it. Always pass `-ResultPath` — without it the only record of which tenants you deferred is console scrollback, and in January that list is the thing you need.
+
+### 3. What deferring actually costs
+
+Opting out buys runway on one date and nothing else.
+
+- **It does not move 2027-02-01.** The retirement and the blocking prompt are not opt-outable. Deferring does not lengthen the migration window, it **compresses** it: the work still has to finish by February, and you have taken five months off the front of it.
+- **It removes the free adoption pressure.** The 1 September nudge is the largest driver of unprompted passkey registration you will get, and it costs you nothing. Turn it off and every registration after that is one your comms and your help desk have to produce.
+- **It is a write into a customer tenant.** It belongs in the change record like any other, and it needs `Policy.ReadWrite.AuthenticationMethod` as an application permission, which the assessment app deliberately does not hold.
+
+The honest version: defer where an unannounced prompt would cause a real operational problem, and accept that you have bought a quieter September in exchange for a busier January. If you defer a tenant, put the re-arm and the campaign start in the calendar the same day, or the deferral quietly becomes the plan.
+
+Re-run the assessment afterwards to confirm the state. `PasskeyOptedOut` is the column, and `read-failed` is not `false` — a tenant you deferred in August that reads `read-failed` in December has not been confirmed as still deferred, it has failed to be read.
+
+---
+
 ## Things that will slow you down
 
 ### Service accounts and shared mailboxes
@@ -184,11 +239,15 @@ The file holds object IDs and risk bands only, so it carries no identifying data
 
 ### Legacy per-user MFA
 
-Users enabled for SMS or voice through legacy per-user MFA service settings are in scope for the retirement and are **not readable** through the Graph surface this tool uses. Reading them needs beta endpoints and broader permissions, which would break the least-privilege model that makes the tool safe to run unattended across an estate.
+Users enabled for SMS or voice through legacy per-user MFA service settings are in scope for the retirement and are **not readable** at the permission level this tool runs at. Reading them needs permissions beyond the four read-only ones, which would break the least-privilege model that makes the tool safe to run unattended across an estate.
 
-A large `Moderate` count is the signal. Budget a manual check per tenant in the legacy MFA portal, once, early. A tenant with a high Moderate count and SMS disabled in the modern policy is the classic legacy-MFA shape.
+You no longer have to infer which tenants this applies to. `AssessmentConfidence` in the sweep summary says it outright: `LowerBound` means `policyMigrationState` is not `migrationComplete`, the legacy service is still authoritative there, and every count in that row **understates** the exposure. Those rows sort near the top of the summary when they show no findings, because a `LowerBound` zero is the most misleading number in the file.
 
-Do not report a zero-candidate tenant as finished until this check is done.
+A large `Moderate` count is the corroborating signal. Budget a manual check per tenant in the legacy MFA portal, once, early. A tenant with a high Moderate count and SMS disabled in the modern policy is the classic legacy-MFA shape.
+
+Do not report a zero-candidate tenant as finished until this check is done. On a `LowerBound` tenant, "zero candidates" means "not measured".
+
+**One beta call, and it is a read.** For completeness: the assessment does make a single GET against `beta/policies/authenticationMethodsPolicy`, because `optOutSettings.passkeyDynamicMigration` — the September opt-out flag — is not on the v1.0 surface. It needs no extra permission, changes nothing, and degrades to `PasskeyOptedOut = read-failed` if the endpoint is unavailable. Legacy per-user MFA remains unread; that is a scope decision, not an endpoint one.
 
 ### Reporting latency
 
@@ -207,7 +266,7 @@ One prompt per tenant, and it cannot be scheduled, parallelised, or left unatten
 1. **The sweep.** Scheduled task or pipeline, app-only auth, `-ThrottleLimit`, output to a dated folder. This is the easy win.
 2. **The diff.** Chain `Compare-EntraSmsVoiceAssessment.ps1` onto the sweep so the change report is waiting for you rather than something you remember to run.
 3. **The alert.** Have the automation surface only two numbers: count of `Regressed`, and count of Critical across the estate. Both should be zero or falling. Anything else is a dashboard nobody opens.
-4. **Nothing else, yet.** Group creation and campaign configuration are writes into customer tenants. Automating those is a different risk conversation from automating a read, and it should be a deliberate decision rather than a natural next step.
+4. **Nothing else, yet.** Group creation and campaign configuration are writes into customer tenants. Automating those is a different risk conversation from automating a read, and it should be a deliberate decision rather than a natural next step. `Set-EntraPasskeyOptOut.ps1` is a write too, and it stays on this list: it is a script you run at a keyboard against a list you chose, not a step you chain onto the sweep.
 
 ---
 
@@ -219,7 +278,7 @@ Gaps worth knowing about, roughly in order of how much time each would save an e
 |---|---|
 | `-ExcludeUpnPattern` parameter | Every operator writes the same `Where-Object` filter for service accounts. Making it a parameter puts it in the ticket and action-list paths too, not just the pipeline. |
 | Estate-wide HTML report | Reports are per-tenant today. A single roll-up ranking customers by Critical count is what an account manager actually wants. |
-| Legacy per-user MFA read behind an explicit opt-in switch | Would close the largest coverage gap, at the cost of beta endpoints and broader scopes. Opt-in keeps the least-privilege default intact. |
+| Legacy per-user MFA read behind an explicit opt-in switch | Would close the largest coverage gap — the one `AssessmentConfidence = LowerBound` currently only flags — at the cost of broader scopes. Opt-in keeps the least-privilege default intact. |
 | Trend series rather than pairwise diff | The diff compares two runs. Ten runs plotted would show whether a campaign is decelerating, which is the thing you want to catch early. |
 
 ---
