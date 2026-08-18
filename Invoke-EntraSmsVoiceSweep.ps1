@@ -225,6 +225,8 @@ end {
             TenantId                   = if ($Summary) { & $get 'TenantId' } else { $TenantId }
             Status                     = $Status
             RegistrationCampaignState  = if ($Summary) { & $get 'RegistrationCampaignState' } else { '' }
+            MigrationState             = if ($Summary) { & $get 'MigrationState' } else { '' }
+            PasskeyOptedOut            = if ($Summary) { & $get 'PasskeyOptedOut' } else { '' }
             SmsPolicyState             = if ($Summary) { & $get 'SmsPolicyState' } else { '' }
             VoicePolicyState           = if ($Summary) { & $get 'VoicePolicyState' } else { '' }
             EnabledUsersAssessed       = & $get 'EnabledUsersAssessed'
@@ -489,8 +491,8 @@ end {
     }
 
     Write-Host "`n===== CROSS-TENANT SWEEP SUMMARY =====" -ForegroundColor Magenta
-    $sorted | Format-Table Customer, Status, SmsPolicyState, VoicePolicyState,
-        MigrationCandidates, Critical, High, Moderate -AutoSize | Out-Host
+    $sorted | Format-Table Customer, Status, MigrationState, PasskeyOptedOut,
+        SmsPolicyState, VoicePolicyState, MigrationCandidates, Critical, High, Moderate -AutoSize | Out-Host
 
     $failed = @($results | Where-Object Status -eq 'Failed').Count
     $succeeded = @($results | Where-Object Status -eq 'Success')
