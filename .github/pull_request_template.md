@@ -23,7 +23,7 @@ it from the fictional samples in examples/.
 
 ## Checklist
 
-- [ ] **Still read-only.** Every Graph call added or changed is a GET. If this PR introduces a write of any kind, say so explicitly here and explain why it belongs in a tool whose contract is that it changes nothing.
+- [ ] **The assessment is still read-only.** Every Graph call added or changed outside `Set-EntraPasskeyOptOut.ps1` is a GET. If this PR introduces a write anywhere else, say so explicitly here and explain why it does not belong in a separate script — the assessment's contract is that it changes nothing.
 - [ ] **No live tenant data** in the diff, the tests, the examples, or the PR description.
 - [ ] Documentation updated if behaviour, parameters, or risk bands changed — including `docs/Risk-Classification.md` if the classification logic moved.
 - [ ] `CHANGELOG.md` updated under `[Unreleased]`.
