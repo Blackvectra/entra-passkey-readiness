@@ -123,6 +123,9 @@ Describe 'Scripts parse' {
         @{ Name = 'Get-EntraSmsVoiceMigrationImpact.ps1' }
         @{ Name = 'Invoke-EntraSmsVoiceSweep.ps1' }
         @{ Name = 'Compare-EntraSmsVoiceAssessment.ps1' }
+        # The only script in the repo that writes to production identity policy was also the
+        # only top-level script CI never syntax-checked.
+        @{ Name = 'Set-EntraPasskeyOptOut.ps1' }
     ) {
         $path = Join-Path $script:RepoRoot $Name
         $path | Should -Exist
@@ -178,5 +181,104 @@ Describe 'Evidence hygiene' {
         }
 
         $uncovered | Should -BeNullOrEmpty -Because "the evidence check does not cover:`n$($uncovered -join "`n")"
+    }
+}
+
+Describe 'The read-only claim is enforced, not just asserted' {
+
+    # SECURITY.md tells a reader to grep for write verbs and expect exactly one filename.
+    # That claim is the audit -- it is why anyone is willing to point this tool at 90
+    # production tenants -- and until now it was prose that nothing checked. It had already
+    # gone stale once: adding the opt-out script falsified the original "returns nothing"
+    # wording, and the wording sat there wrong until someone happened to read it. A prose
+    # invariant with no test has a shelf life, so these tests are the real guarantee and
+    # SECURITY.md is its documentation.
+
+    BeforeAll {
+        $script:WriteScript = 'Set-EntraPasskeyOptOut.ps1'
+
+        # Assembled from fragments rather than written out. Spelled literally, this pattern
+        # would appear in this file, and the recursive scan below would match the test that
+        # exists to police the scan -- which is both a false positive and a very confusing
+        # one to debug.
+        $mg = 'Mg'
+        $script:WriteVerbPattern = (
+            "New-$mg|Set-$mg|Remove-$mg|Update-$mg|" +
+            "Invoke-${mg}GraphRequest\s+-Method\s+(?!GET)")
+
+        # Same trick for the filename, so the invocation check does not find itself.
+        $script:WriteScriptPattern = 'Set-EntraPasskey' + 'OptOut'
+    }
+
+    It 'finds no write verb in <Name>' -TestCases @(
+        @{ Name = 'Get-EntraSmsVoiceMigrationImpact.ps1' }
+        @{ Name = 'Invoke-EntraSmsVoiceSweep.ps1' }
+        @{ Name = 'Compare-EntraSmsVoiceAssessment.ps1' }
+    ) {
+        $path = Join-Path $script:RepoRoot $Name
+        $path | Should -Exist
+
+        $hits = @(Select-String -LiteralPath $path -Pattern $script:WriteVerbPattern -AllMatches)
+        $hits | Should -BeNullOrEmpty -Because (
+            "$Name is read-only by contract. Write verbs found at line(s): " +
+            ($hits.LineNumber -join ', '))
+    }
+
+    It 'confirms no assessment script can invoke the write tool' {
+        # Naming the script in a comment, or in a console hint telling the operator which
+        # tool defers a tenant, is fine and useful -- the sweep does exactly that. What must
+        # not exist is a code path that CALLS it. So this walks the AST and inspects only the
+        # position that decides what actually runs: the first element of a command, which is
+        # the thing being invoked. A mention inside an argument string is left alone.
+        #
+        # Start-Process and Invoke-Expression are checked across all their arguments as well,
+        # since for those the invoked target arrives as an argument rather than in the
+        # command position, and they are the realistic way a call would slip back in.
+        $indirect = @('Start-Process', 'Invoke-Expression', 'iex')
+
+        $callers = foreach ($name in @('Get-EntraSmsVoiceMigrationImpact.ps1',
+                                       'Invoke-EntraSmsVoiceSweep.ps1',
+                                       'Compare-EntraSmsVoiceAssessment.ps1')) {
+            $path = Join-Path $script:RepoRoot $name
+            if (-not (Test-Path -LiteralPath $path)) { continue }
+
+            $errors = $null
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$null, [ref]$errors)
+
+            $commands = $ast.FindAll({
+                    param($node)
+                    $node -is [System.Management.Automation.Language.CommandAst]
+                }, $true)
+
+            $invokes = foreach ($command in $commands) {
+                $elements = @($command.CommandElements)
+                if ($elements.Count -eq 0) { continue }
+
+                # The command position: what this line actually runs.
+                if ($elements[0].Extent.Text -match $script:WriteScriptPattern) { $command; continue }
+
+                $commandName = $command.GetCommandName()
+                if ($commandName -and $commandName -in $indirect) {
+                    if ($elements | Where-Object { $_.Extent.Text -match $script:WriteScriptPattern }) { $command }
+                }
+            }
+
+            if (@($invokes).Count -gt 0) { $name }
+        }
+
+        $callers | Should -BeNullOrEmpty -Because (
+            "no assessment code path may reach $script:WriteScript, but one exists in: $($callers -join ', ')")
+    }
+
+    It 'confirms the write tool is the only file the documented audit command returns' {
+        # The exact command SECURITY.md prints, run over the whole repo. If this drifts, the
+        # documentation is lying to whoever is deciding whether to trust this tool.
+        $hits = @(Get-ChildItem -LiteralPath $script:RepoRoot -Recurse -Filter *.ps1 |
+            Select-String -Pattern $script:WriteVerbPattern |
+            Select-Object -ExpandProperty Filename -Unique)
+
+        $hits | Should -Be @($script:WriteScript) -Because (
+            'SECURITY.md tells the reader to expect exactly one filename from this grep; ' +
+            "it returned: $($hits -join ', ')")
     }
 }
