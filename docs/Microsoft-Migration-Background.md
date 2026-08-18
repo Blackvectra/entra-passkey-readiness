@@ -58,7 +58,11 @@ There is no per-user attribute that says "this user uses SMS." Any tool claiming
 
 Users enabled for SMS or voice through **legacy per-user MFA service settings** are in scope for the retirement even if the modern Authentication Methods Policy has both methods disabled.
 
-This script deliberately does not read that state. Doing so requires beta Graph endpoints and broader delegated scopes, which would break the least-privilege model the tool is built around. Instead, the `Moderate` risk band exists to surface the symptom: a phone method registered on a user who does not resolve into modern AMP scope. A significant Moderate population is a prompt to check legacy per-user MFA settings manually.
+This script deliberately does not read that state. Doing so requires delegated scopes beyond the four read-only ones the tool runs on, which would break the least-privilege model it is built around. Instead, the `Moderate` risk band exists to surface the symptom: a phone method registered on a user who does not resolve into modern AMP scope. A significant Moderate population is a prompt to check legacy per-user MFA settings manually.
+
+The script does read `policyMigrationState` from the Authentication Methods Policy, which tells you whether that manual check is needed at all. Anything other than `migrationComplete` means the legacy service is still authoritative in the tenant, and the run reports `AssessmentConfidence = LowerBound`: its counts are floors rather than totals. A `LowerBound` tenant showing zero findings has not been shown to be clean.
+
+Separately — and this is the only place the tool leaves the v1.0 surface — it makes one GET against `beta/policies/authenticationMethodsPolicy` to read `optOutSettings.passkeyDynamicMigration`, which is whether the tenant has been deferred past the 1 September auto-enablement. That field is not published on v1.0, so no v1.0 request answers the question. It is still a read, it needs no scope beyond `Policy.Read.All`, and it fails soft: an unavailable beta endpoint yields `PasskeyOptedOut = read-failed` rather than a value nobody actually read.
 
 Converting from legacy per-user MFA to the Authentication Methods Policy is worth doing on its own merits before this deadline, because it makes the exposure measurable.
 
