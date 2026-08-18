@@ -187,6 +187,61 @@ cd entra-passkey-readiness
 Get-ChildItem *.ps1 | Unblock-File
 ```
 
+### "cannot be loaded … is not digitally signed"
+
+If the very first run stops with:
+
+```
+File ...\Get-EntraSmsVoiceMigrationImpact.ps1 is not digitally signed.
+You cannot run this script on the current system.
+```
+
+nothing is wrong with the script or your account. You downloaded the repository as a **zip**, so Windows tagged every extracted file with the Mark of the Web, and your PowerShell execution policy refuses to run downloaded scripts that are not signed. Fix it step by step:
+
+1. **Open PowerShell 7** (`pwsh`), not Windows PowerShell 5.1 — the scripts require 7.0+ and will refuse 5.1 anyway. If `pwsh` is not installed: `winget install Microsoft.PowerShell`, then open a new terminal.
+
+2. **Go to the folder you extracted.** Note that extracting the zip usually creates a doubled folder — the scripts are in the *inner* one:
+
+   ```powershell
+   cd C:\Users\<you>\entra-passkey-readiness-main\entra-passkey-readiness-main
+   ```
+
+3. **Confirm the diagnosis** — this shows the download tag on each file:
+
+   ```powershell
+   Get-ChildItem *.ps1 | Get-Item -Stream Zone.Identifier -ErrorAction SilentlyContinue
+   ```
+
+   Output listing `Zone.Identifier` streams means the files are marked as downloaded.
+
+4. **Remove the tag from everything in the folder** (recursive, so the tests and examples are covered too):
+
+   ```powershell
+   Get-ChildItem -Recurse | Unblock-File
+   ```
+
+5. **Check your execution policy:**
+
+   ```powershell
+   Get-ExecutionPolicy -List
+   ```
+
+   `RemoteSigned` is the policy this project expects: local and unblocked scripts run, unsigned downloads do not. If every scope reads `Undefined` or `Restricted`, set it for your user only — no admin rights needed:
+
+   ```powershell
+   Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+   ```
+
+6. **Run the script again:**
+
+   ```powershell
+   .\Get-EntraSmsVoiceMigrationImpact.ps1
+   ```
+
+If step 5 shows a policy set at `MachinePolicy` or `UserPolicy` scope (Group Policy), `Set-ExecutionPolicy` cannot override it — that is your organisation's endpoint policy doing its job. Options, in order of preference: clone with `git clone` instead of downloading a zip (cloned files carry no Mark of the Web, so `RemoteSigned` machines run them as local scripts); ask your endpoint team to allow the script; or run it from a machine not under that policy.
+
+**Do not use `-ExecutionPolicy Bypass` as a habit.** It works, but it teaches you to disable a control instead of satisfying it, and this is a tool you may run on customer-facing machines.
+
 ---
 
 ## Usage
@@ -651,6 +706,7 @@ These are properties of the data sources, not defects. Read them before presenti
 
 | Symptom | Cause and fix |
 |---|---|
+| `...is not digitally signed. You cannot run this script on the current system.` | The repo was downloaded as a zip, so the files carry the Mark of the Web and the execution policy refuses them. Step-by-step fix in [Installation](#cannot-be-loaded--is-not-digitally-signed): `Get-ChildItem -Recurse \| Unblock-File`, then confirm the policy is `RemoteSigned`. |
 | `Microsoft.Graph.Authentication is required but is not installed.` | Run `Install-Module Microsoft.Graph.Authentication -Scope CurrentUser`. |
 | Sign-in succeeds but results are for the wrong tenant | A cached Graph session was reused. Run `Disconnect-MgGraph`, then re-run with an explicit `-TenantId`. |
 | `Insufficient privileges to complete the operation` on the reports endpoint | `AuditLog.Read.All` was not consented. Have an admin consent to all four delegated scopes. |
