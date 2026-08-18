@@ -425,10 +425,12 @@ Accepts and passes through `-IncludeUnaffected`, `-IncludeLegacyPerUserMfa`, `-E
 | Field | Meaning |
 |---|---|
 | `TenantId` | Tenant the assessment actually ran against |
+| `DirectoryUsersReturned` / `EnabledUsersAssessed` / `UsersSkippedNotEnabled` | The assessment's own arithmetic. The last two must sum to the first — that is what makes a silently dropped user visible instead of invisible. |
 | `RegistrationCampaignState` | `enabled`, `disabled`, or `default (Microsoft managed)` |
 | `SmsPolicyState` / `VoicePolicyState` | AMP state of each method |
 | `SmsPolicyInclude` / `SmsPolicyExclude` | Resolved include and exclude targets, with transitive member counts |
 | `InSmsPolicyScope` / `InVoicePolicyScope` | Enabled users resolved into each method's scope |
+| `UnresolvedPolicyTargets` | **Above zero means the two counts above are a floor, not a total.** The policy targets somebody this run could not resolve to users, so the tenant is at least as exposed as reported. Empty on a clean run. |
 | `LegacyPerUserMfaChecked` | Whether `-IncludeLegacyPerUserMfa` was set. False means that exposure is unassessed, whatever else the report says. |
 | `LegacyPerUserMfaInForce` | Users `enabled` or `enforced` in legacy per-user MFA. In scope for the retirement whatever the modern policy says. |
 | `LegacyPerUserMfaUnreadable` | Users whose state Graph would not return. Marked `(unreadable)`, never assumed clean. |

@@ -233,6 +233,22 @@ Describe 'A default run against a stubbed tenant' {
         $rows.UserPrincipalName | Should -Not -Contain 'off@fabrikam-example.com'
     }
 
+    It 'reconciles its own totals, so a silently dropped user cannot hide' {
+        # The assessment filters the directory down to enabled users. Without the skipped
+        # count there is no way to tell a correct total from one that quietly lost people
+        # -- a user whose enabled state does not come back readable disappears entirely,
+        # uncounted, and the report looks complete.
+        $script:Summary.EnabledUsersAssessed + $script:Summary.UsersSkippedNotEnabled |
+            Should -Be $script:Summary.DirectoryUsersReturned
+
+        $script:Summary.UsersSkippedNotEnabled | Should -Be 1 -Because 'the fixture has exactly one disabled user'
+    }
+
+    It 'reports no unresolved policy targets for a tenant whose scope fully resolves' {
+        # The field only means something if it is empty on a clean run.
+        $script:Summary.UnresolvedPolicyTargets | Should -BeNullOrEmpty
+    }
+
     It 'reports the evidence age from the registration report' {
         # The regression that prompted this file: the summary read a per-row timestamp
         # column that trimming had removed, so building the summary threw.

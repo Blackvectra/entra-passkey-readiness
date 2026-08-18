@@ -582,6 +582,9 @@ function Get-MethodPolicyScope {
         UserIds      = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
         IncludeNotes = [System.Collections.Generic.List[string]]::new()
         ExcludeNotes = [System.Collections.Generic.List[string]]::new()
+        # Targets this script could not resolve to users. Returned rather than tracked in a
+        # global so the caller cannot forget to look, and so this is testable in isolation.
+        UnresolvedTargets = [System.Collections.Generic.List[string]]::new()
     }
 
     # A disabled method has no effective scope, but registered methods are still assessed later.
@@ -612,6 +615,20 @@ function Get-MethodPolicyScope {
             }
             $result.IncludeNotes.Add("Group: $(Get-GroupDisplayName -GroupId $id) [$id] ($($members.Count) transitive user members)")
         }
+        else {
+            # The dangerous direction. A target type this script does not handle -- a value
+            # Microsoft adds later, 'unknownFutureValue', or any shape not seen here -- used
+            # to be dropped without a word, so every user it covered read as out of scope
+            # and the tenant reported as safer than it is. Nothing in the CSV, the summary,
+            # or the console said the scope was incomplete.
+            #
+            # It still cannot be resolved to users: guessing who a target covers would be
+            # worse than admitting the gap. So it is recorded, counted, and warned about,
+            # and the in-scope figure is stated as a floor rather than a total.
+            $note = "UNRESOLVED include target: targetType '$type' id '$id'"
+            $result.IncludeNotes.Add($note)
+            $result.UnresolvedTargets.Add("$Method include: targetType '$type' id '$id'")
+        }
     }
 
     foreach ($target in $excludeTargets) {
@@ -629,6 +646,15 @@ function Get-MethodPolicyScope {
                 [void]$result.UserIds.Remove([string](Get-PropertyValue $member 'id'))
             }
             $result.ExcludeNotes.Add("Group: $(Get-GroupDisplayName -GroupId $id) [$id] ($($members.Count) transitive user members)")
+        }
+        else {
+            # An unresolved exclude fails the other way: those users stay in scope and are
+            # over-reported, which costs a review rather than a lockout. Recorded anyway,
+            # because an operator chasing a user who should not be on the list deserves to
+            # know the exclusion was not applied.
+            $note = "UNRESOLVED exclude target: targetType '$type' id '$id'"
+            $result.ExcludeNotes.Add($note)
+            $result.UnresolvedTargets.Add("$Method exclude: targetType '$type' id '$id'")
         }
     }
 
@@ -1790,6 +1816,16 @@ $users = Get-GraphCollection -Uri "$script:GraphBase/users?`$select=id,displayNa
 $enabledUsers = @($users | Where-Object { (Get-PropertyValue $_ 'accountEnabled') -eq $true })
 if ($enabledUsers.Count -eq 0) { throw 'No enabled users were returned. Verify the signed-in account has User.Read.All.' }
 
+# Everyone the filter removed, so the assessment's own arithmetic reconciles: directory
+# total = assessed + skipped. Without it, a user dropped for any reason -- genuinely
+# disabled, or accountEnabled not coming back readable -- leaves no trace, and there is no
+# way to tell a correct total from one that quietly lost people.
+#
+# Not a warning, because disabled accounts are the ordinary case and documented. It is a
+# number to sanity-check: if it does not roughly match the disabled accounts you expect,
+# something is wrong with the read rather than with the tenant.
+$usersSkippedNotEnabled = $users.Count - $enabledUsers.Count
+
 $enabledUserIndex = @{}
 foreach ($user in $enabledUsers) { $enabledUserIndex[[string](Get-PropertyValue $user 'id')] = $user }
 
@@ -2015,10 +2051,15 @@ $reportTimestamps = @($registrations |
     ForEach-Object { Get-PropertyValue $_ 'lastUpdatedDateTime' } |
     Where-Object { $_ })
 
+# Include and exclude targets neither scope resolution could turn into users.
+$unresolvedTargets = @($smsScope.UnresolvedTargets) + @($voiceScope.UnresolvedTargets)
+
 $summary = [PSCustomObject][ordered]@{
     TenantId                   = $graphContext.TenantId
     AssessmentTimeUtc          = (Get-Date).ToUniversalTime().ToString('o')
+    DirectoryUsersReturned     = $users.Count
     EnabledUsersAssessed       = $enabledUsers.Count
+    UsersSkippedNotEnabled     = $usersSkippedNotEnabled
     RegistrationCampaignState  = $campaignState
     SmsPolicyState             = $smsScope.State
     VoicePolicyState           = $voiceScope.State
@@ -2028,6 +2069,10 @@ $summary = [PSCustomObject][ordered]@{
     VoicePolicyExclude         = ($voiceScope.ExcludeNotes -join ' | ')
     InSmsPolicyScope           = @($rows | Where-Object InSmsPolicyScope).Count
     InVoicePolicyScope         = @($rows | Where-Object InVoicePolicyScope).Count
+    # Sits next to the two counts above because it qualifies them. Above zero means those
+    # counts are a floor, not a total: the policy targets somebody this run could not
+    # resolve to users, so the tenant is at least as exposed as reported, possibly more.
+    UnresolvedPolicyTargets    = (@($unresolvedTargets) -join ' | ')
     # The state of the blind spot, stated on every run rather than only when it is closed.
     # A summary that simply omits legacy MFA on a default run reads as a clean tenant.
     LegacyPerUserMfaChecked    = [bool]$IncludeLegacyPerUserMfa
@@ -2116,6 +2161,13 @@ if ($summary.UsersExcludedByPattern -gt 0) {
 }
 if ($summary.UnrecognisedMethods) {
     Write-Host "Unrecognised authentication methods seen: $($summary.UnrecognisedMethods). Treated as NOT surviving the retirement, so affected users are reported as more exposed rather than less." -ForegroundColor Yellow
+}
+
+# The one warning that invalidates the headline numbers rather than qualifying them.
+if ($unresolvedTargets.Count -gt 0) {
+    Write-Host "`nSCOPE INCOMPLETE. $($unresolvedTargets.Count) policy target(s) could not be resolved to users:" -ForegroundColor Red
+    foreach ($target in $unresolvedTargets) { Write-Host "  $target" -ForegroundColor Red }
+    Write-Host 'The in-scope counts above are a FLOOR, not a total. Users covered by these targets are missing from this assessment. Resolve them by hand before reporting this tenant as assessed.' -ForegroundColor Red
 }
 
 # Legacy per-user MFA is the one exposure this tool can miss entirely, so its state is

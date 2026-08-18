@@ -245,3 +245,96 @@ Describe 'Get-MethodPolicyScope' {
         }
     }
 }
+
+Describe 'A policy target this script cannot resolve' {
+
+    # The falsely-safe failure, and the reason this block exists.
+    #
+    # The include branch used to be if/elseif/elseif with no else, so a target type the
+    # script did not handle was dropped without a word. Every user it covered then read as
+    # out of scope, and the tenant reported as safer than it is -- with nothing in the CSV,
+    # the summary, or the console saying the scope was incomplete. An operator reading
+    # "policy enabled, nobody in scope" takes that as good news.
+    #
+    # It still cannot be resolved to users: inventing a membership would be worse than
+    # admitting the gap. What it must do is refuse to be silent.
+
+    BeforeEach {
+        $script:MockGroups = @{ 'g-real' = @('u1', 'u2') }
+    }
+
+    It 'records an include target whose type it does not handle' {
+        $script:MockConfig = @{ sms = [PSCustomObject]@{
+                state          = 'enabled'
+                includeTargets = @([PSCustomObject]@{ id = 'role-ga'; targetType = 'role' })
+                excludeTargets = @()
+            }
+        }
+        $scope = Get-MethodPolicyScope -Method sms -EnabledUserIndex @{ 'u1' = 1; 'u2' = 1 }
+
+        $scope.UnresolvedTargets.Count | Should -Be 1
+        $scope.UnresolvedTargets[0] | Should -Match "sms include"
+        $scope.UnresolvedTargets[0] | Should -Match "role"
+        # And it has to be visible in the note that reaches the summary column, not only
+        # in a field somebody has to know to look at.
+        ($scope.IncludeNotes -join ' ') | Should -Match 'UNRESOLVED'
+    }
+
+    It 'records a target with no type at all rather than skipping it' {
+        # A shape difference, a casing change, or a property Graph stops sending.
+        $script:MockConfig = @{ sms = [PSCustomObject]@{
+                state          = 'enabled'
+                includeTargets = @([PSCustomObject]@{ id = 'something' })
+                excludeTargets = @()
+            }
+        }
+        $scope = Get-MethodPolicyScope -Method sms -EnabledUserIndex @{ 'u1' = 1 }
+
+        $scope.UnresolvedTargets.Count | Should -Be 1
+    }
+
+    It 'records an unresolved exclude target too' {
+        # This one over-reports rather than under-reports, so it costs a review not a
+        # lockout -- but an operator chasing a user who should have been excluded still
+        # needs to know the exclusion never applied.
+        $script:MockConfig = @{ sms = [PSCustomObject]@{
+                state          = 'enabled'
+                includeTargets = @([PSCustomObject]@{ id = 'all_users' })
+                excludeTargets = @([PSCustomObject]@{ id = 'role-ga'; targetType = 'role' })
+            }
+        }
+        $scope = Get-MethodPolicyScope -Method sms -EnabledUserIndex @{ 'u1' = 1; 'u2' = 1 }
+
+        $scope.UserIds.Count | Should -Be 2 -Because 'the exclusion could not be applied, so nobody was removed'
+        $scope.UnresolvedTargets.Count | Should -Be 1
+        ($scope.ExcludeNotes -join ' ') | Should -Match 'UNRESOLVED'
+    }
+
+    It 'stays silent when every target resolves, so the warning means something' {
+        $script:MockConfig = @{ sms = [PSCustomObject]@{
+                state          = 'enabled'
+                includeTargets = @([PSCustomObject]@{ id = 'g-real'; targetType = 'group' })
+                excludeTargets = @([PSCustomObject]@{ id = 'u2'; targetType = 'user' })
+            }
+        }
+        $scope = Get-MethodPolicyScope -Method sms -EnabledUserIndex @{ 'u1' = 1; 'u2' = 1 }
+
+        $scope.UnresolvedTargets.Count | Should -Be 0
+        $scope.UserIds.Count | Should -Be 1
+        ($scope.IncludeNotes -join ' ') | Should -Not -Match 'UNRESOLVED'
+    }
+
+    It 'does not claim users it could not resolve' {
+        # The other way to get this wrong: treat an unknown include as "everybody" to be
+        # safe. That makes every report unusable and trains people to ignore the warning.
+        $script:MockConfig = @{ sms = [PSCustomObject]@{
+                state          = 'enabled'
+                includeTargets = @([PSCustomObject]@{ id = 'role-ga'; targetType = 'role' })
+                excludeTargets = @()
+            }
+        }
+        $scope = Get-MethodPolicyScope -Method sms -EnabledUserIndex @{ 'u1' = 1; 'u2' = 1 }
+
+        $scope.UserIds.Count | Should -Be 0
+    }
+}
