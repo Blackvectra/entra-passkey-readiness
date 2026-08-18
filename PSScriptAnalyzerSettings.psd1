@@ -19,8 +19,14 @@
         # These are private helpers inside a script that is already gated by explicit
         # opt-in switches (-HtmlReport, -ExportTickets); the caller has already stated
         # intent. Adding -WhatIf/-Confirm to internal helpers would imply the script
-        # mutates tenant state, which is the opposite of what it does. Every Graph call
-        # in this project is a GET.
+        # mutates tenant state, which is the opposite of what it does. Every Graph call in
+        # the assessment, the sweep, and the compare script is a GET.
+        #
+        # The exclusion is repo-wide, so it is worth saying what it does not hide. The one
+        # script that does mutate tenant state, Set-EntraPasskeyOptOut.ps1, declares
+        # SupportsShouldProcess with ConfirmImpact = 'High' and gates its PATCH behind
+        # ShouldProcess anyway, so it satisfies the rule on its own rather than by
+        # exemption. If that ever stops being true, this comment is the lie to fix first.
         'PSUseShouldProcessForStateChangingFunctions'
     )
 }
