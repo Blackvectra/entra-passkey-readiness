@@ -665,3 +665,54 @@ Describe 'The legacy per-user MFA read, which every run now does' {
         $script:LegacyStdErr | Should -Not -Match 'expected POST'
     }
 }
+
+Describe 'A run where nobody needs action' {
+
+    # The good outcome, and the one that crashed on a real tenant: every user clean or
+    # excluded, so the action list is empty. New-ActionList's empty collection unrolled to
+    # $null on assignment and Export-AssessmentCsv refused it -- after every Graph call had
+    # already been paid for, and before the summary or the action list file were written.
+    #
+    # Excluding everybody by pattern is the cheapest way to force the empty action list
+    # through the full script: rows survive into the export marked Excluded, and no row
+    # lands in an actionable band.
+
+    BeforeAll {
+        $pwshPath = if ($IsWindows) { Join-Path $PSHOME 'pwsh.exe' } else { Join-Path $PSHOME 'pwsh' }
+        if (-not (Test-Path -LiteralPath $pwshPath)) { $pwshPath = 'pwsh' }
+
+        $script:CleanCsv = Join-Path $script:OutDir 'clean.csv'
+        $cleanStdErr = Join-Path $script:Root 'clean-stderr.txt'
+        $cleanStdOut = Join-Path $script:Root 'clean-stdout.txt'
+
+        $cleanCommand = @"
+`$env:PSModulePath = '$(Join-Path $script:Root 'Modules')' + [IO.Path]::PathSeparator + `$env:PSModulePath
+`$null = & '$(Get-AssessmentScriptPath)' -TenantId 'fabrikam-example.com' ``
+    -OutputPath '$script:CleanCsv' -ExcludeUpnPattern '.' -SkipAclHardening
+"@
+
+        $cleanProcess = Start-Process -FilePath $pwshPath -PassThru -Wait -NoNewWindow `
+            -RedirectStandardOutput $cleanStdOut -RedirectStandardError $cleanStdErr `
+            -ArgumentList @('-NoProfile', '-NonInteractive', '-Command', $cleanCommand)
+
+        $script:CleanExit = $cleanProcess.ExitCode
+        $script:CleanStdErr = if (Test-Path $cleanStdErr) { Get-Content -LiteralPath $cleanStdErr -Raw } else { '' }
+        $script:CleanStdOut = if (Test-Path $cleanStdOut) { Get-Content -LiteralPath $cleanStdOut -Raw } else { '' }
+    }
+
+    It 'completes instead of dying on the empty action list' {
+        $script:CleanExit | Should -Be 0 -Because "the run failed: $script:CleanStdErr"
+        $script:CleanStdErr | Should -Not -Match "Cannot bind argument to parameter 'Data'"
+    }
+
+    It 'still writes the action list file, empty, so the evidence trail is complete' {
+        (Join-Path $script:OutDir 'clean_ActionList.csv') | Should -Exist
+        $script:CleanStdOut | Should -Match 'Action list \(0 users'
+    }
+
+    It 'keeps the excluded rows in the assessment CSV' {
+        # Empty action list must not mean empty assessment: the excluded rows are the
+        # record of what the pattern removed.
+        @(Import-Csv -LiteralPath $script:CleanCsv).Count | Should -BeGreaterThan 0
+    }
+}

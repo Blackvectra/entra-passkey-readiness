@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+- **A tenant where nobody needs action crashed the run instead of celebrating.** With no user in an actionable band, `New-ActionList` returns an empty collection, PowerShell unrolls it to `$null` on assignment, and `Export-AssessmentCsv` refuses a null `-Data` — killing the run after every Graph call had been paid for and before the summary printed. Found by the first genuinely clean tenant this ran against. The assignment is now array-wrapped, an empty action list file is still written for the evidence trail, and an end-to-end test drives the whole script through the nobody-actionable path.
+- **The Conditional Access console line mixed enabled and inert policies.** It announced "4 enabled policies require MFA:" and then listed every MFA policy including the disabled and report-only ones, which reads as ten working policies to anyone skimming. The green line now names only the enabled ones; disabled and report-only policies get their own line that says they enforce nothing. The summary's `CaPoliciesRequiringMfa` field keeps the full inventory with states, unchanged.
+
 ### Added
 - **Tenant-wide checks covering every area SMS and voice can live in**, printed as their own console section and carried in the summary. The per-user rows covered registrations and policy scope; these cover the policies themselves:
   - **Policy migration state** (`PolicyMigrationState`). Anything short of `migrationComplete` means the legacy per-user MFA service settings page and the legacy SSPR methods page still govern the tenant — both can hand out SMS and voice, neither has an API, and the retirement explicitly covers SSPR. The console names both portal paths for a manual check; at `migrationComplete` Entra ignores the pages and the manual check disappears. This is the one area no tool can read, now stated on every run instead of silently skipped.

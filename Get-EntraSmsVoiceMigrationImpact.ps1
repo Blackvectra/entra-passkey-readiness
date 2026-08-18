@@ -2612,7 +2612,12 @@ $summary = [PSCustomObject][ordered]@{
 # Emitting the list is read-only. Creating and populating the migration security group
 # stays a deliberate manual step, because that is a write and this tool does not write.
 $actionListPath = [System.IO.Path]::ChangeExtension($OutputPath, $null).TrimEnd('.') + '_ActionList.csv'
-$actionListRows = New-ActionList -Rows $rows
+# @() is load-bearing: a tenant where nobody lands in an actionable band -- the good
+# outcome this whole tool works toward -- makes New-ActionList return an empty collection,
+# which PowerShell unrolls to $null on assignment, and $null fails Export-AssessmentCsv's
+# parameter binding. The first genuinely clean tenant this ran against crashed here after
+# every Graph call had already been paid for.
+$actionListRows = @(New-ActionList -Rows $rows)
 
 Export-AssessmentCsv -Data $actionListRows -Path $actionListPath -SkipAclHardening:$SkipAclHardening
 $summary | Add-Member -NotePropertyName ActionListPath -NotePropertyValue (Resolve-Path -LiteralPath $actionListPath).Path
@@ -2764,7 +2769,18 @@ else {
         Write-Host "  Conditional Access: these policies grant through an SMS/voice-permitting strength: $($summary.CaPoliciesOnSmsVoiceStrength)." -ForegroundColor Yellow
     }
     if ($summary.CaMfaPoliciesEnabled -gt 0) {
-        Write-Host "  Conditional Access: $($summary.CaMfaPoliciesEnabled) enabled polic(ies) require MFA: $($summary.CaPoliciesRequiringMfa)." -ForegroundColor Green
+        # Enabled policies only on the green line. A run against a real tenant printed
+        # "4 enabled policies require MFA:" followed by all ten including the disabled
+        # ones, which reads as ten working policies to anyone skimming.
+        $caEnabledNames = (@($caMfaPolicies | Where-Object State -eq 'enabled' | ForEach-Object { $_.DisplayName }) -join ' | ')
+        $caPolicyWord = if ($summary.CaMfaPoliciesEnabled -eq 1) { 'policy requires' } else { 'policies require' }
+        Write-Host "  Conditional Access: $($summary.CaMfaPoliciesEnabled) enabled $caPolicyWord MFA: $caEnabledNames." -ForegroundColor Green
+
+        $caInert = @($caMfaPolicies | Where-Object State -ne 'enabled')
+        if ($caInert.Count -gt 0) {
+            $caInertNames = (@($caInert | ForEach-Object { "$($_.DisplayName) [$($_.State)]" }) -join ' | ')
+            Write-Host "    $($caInert.Count) more MFA polic$(if ($caInert.Count -eq 1) { 'y is' } else { 'ies are' }) disabled or report-only and enforce nothing: $caInertNames." -ForegroundColor Cyan
+        }
         Write-Host '    Names and states only. Whether their assignments cover every user is not assessed here; review scoping in the portal.' -ForegroundColor Cyan
     }
     else {
