@@ -133,14 +133,18 @@ Being clear about the boundary, because a green report on one thing is easy to r
 
 **It checks:**
 
-- Which users are in scope of the SMS and voice authentication method policies, with nested groups and exclusions resolved.
+- Which users are in scope of the SMS and voice authentication method policies, with nested groups and exclusions resolved — including whether any SMS target is enabled for first-factor sign-in, not just MFA.
 - What each user actually has registered, and whether any of it survives the retirement.
 - `BlockedAtRetirement` — whose only MFA method is a phone number, which is the population that stops working on 2027-02-01.
-- Legacy per-user MFA state per user, on every run. This is item 6 above, and it is the only item on the list this tool answers directly.
+- Legacy per-user MFA state per user, on every run. This is item 6 above.
+- The authentication methods policy migration state. Anything short of `migrationComplete` means the legacy per-user MFA service settings page and the legacy SSPR methods page still govern the tenant, and the console names both for a manual check — they are the one place SMS and voice can live that no API can read.
+- Authentication strengths whose allowed combinations include SMS or voice, and the worse case: a strength with *nothing else left*, which becomes unsatisfiable outright at the retirement.
+- A Conditional Access MFA inventory — every policy that requires MFA (built-in control or authentication strength), by name and state, including whether any grants through an SMS/voice-permitting strength. This is a partial answer to item 1: it tells you whether an enforcing policy *exists* and whether report-only mode is all you have.
 
 **It does not check:**
 
-- Conditional Access policies. It does not read them, evaluate them, or report on them. Items 1, 2, 3, 7, 8, and 9 above are all manual.
+- Conditional Access assignments, conditions, or exclusions. The inventory above says a policy exists and is on; whether its scoping actually covers every user (items 2, 3, 7, 8, and 9 above) is still manual.
+- The legacy MFA service settings page and the legacy SSPR methods page themselves — no API exists for either. The tool tells you *whether* they still apply (the migration state); what they contain is a portal check.
 - Whether legacy authentication is blocked, at either layer.
 - Service principals and workload identities.
 - Security Defaults state.

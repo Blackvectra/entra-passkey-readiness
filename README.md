@@ -104,6 +104,22 @@ Two distinct populations matter, and conflating them is the most common planning
 
 This tool reports both, per user, in one pass, and classifies the intersection.
 
+### Every place SMS and voice can live
+
+The per-user rows are most of the picture, but not all of it. A run also checks every other area of the tenant where SMS or voice can be configured, and says explicitly which one it cannot reach:
+
+| Area | Covered |
+|---|---|
+| SMS / voice authentication method policies (nested groups, exclusions) | ✅ Per-user scope resolution |
+| SMS enabled as a **first-factor sign-in** method | ✅ Flagged per target — the portal enables this by default when SMS is switched on |
+| What each user has actually registered | ✅ Per-user, including guests |
+| Legacy per-user MFA (enabled/enforced) | ✅ Per-user, on every run |
+| Legacy MFA **service settings** page and legacy **SSPR methods** page | ⚠️ No API exists. The run reads the policy migration state instead: anything short of `migrationComplete` means both pages still apply, and the console prints the exact portal paths to check |
+| Authentication strengths permitting SMS/voice combinations | ✅ Named in the summary, with strengths that have *nothing else left* flagged as unsatisfiable |
+| Conditional Access MFA enforcement | ✅ Inventory by name and state — whether any enabled policy requires MFA at all, and whether one grants through a retiring strength. Assignments/exclusions are not evaluated |
+
+Out of scope by Microsoft's own definition: Azure AD B2C tenants (excluded from the retirement), Microsoft Entra External ID (separate retirement, announced later), and third-party MFA providers (unaffected unless the user is also enabled for Entra SMS/voice — which the per-user rows already catch).
+
 ### Relationship to Microsoft's analyzer
 
 Microsoft publishes [entra-sms-voice-usage-analyzer](https://github.com/microsoft/entra-sms-voice-usage-analyzer). The two tools answer different questions and are complementary.
@@ -148,7 +164,7 @@ All four scopes are read-only. The script requests them at connect time and will
 
 | Scope | Used for |
 |---|---|
-| `Policy.Read.All` | Authentication Methods Policy, SMS and voice method configuration, registration campaign state |
+| `Policy.Read.All` | Authentication Methods Policy (method configuration, campaign and migration state), legacy per-user MFA state, authentication strengths, Conditional Access policies |
 | `AuditLog.Read.All` | `reports/authenticationMethods/userRegistrationDetails` |
 | `User.Read.All` | User objects, `accountEnabled`, `userType` |
 | `GroupMember.Read.All` | Transitive group membership for AMP include/exclude targets |

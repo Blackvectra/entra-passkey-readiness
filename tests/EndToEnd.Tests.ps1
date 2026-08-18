@@ -108,7 +108,7 @@ function Invoke-MgGraphRequest {
         # candidate filter short-circuits on the first term, and anything wrong in the
         # later terms is never evaluated. Real tenants have users outside scope.
         return [PSCustomObject]@{ state='enabled'
-            includeTargets=@([PSCustomObject]@{ id='g-sms-users'; targetType='group' })
+            includeTargets=@([PSCustomObject]@{ id='g-sms-users'; targetType='group'; isUsableForSignIn=$true })
             excludeTargets=@() }
     }
     if ($Uri -match '/groups/g-sms-users/transitiveMembers') {
@@ -125,9 +125,40 @@ function Invoke-MgGraphRequest {
         return [PSCustomObject]@{ state='disabled'; includeTargets=@(); excludeTargets=@() }
     }
     if ($Uri -match '/policies/authenticationMethodsPolicy$') {
-        return [PSCustomObject]@{ registrationEnforcement =
+        # premigration: the legacy MFA and SSPR portal pages still apply, which is the
+        # state that has to produce the manual-check warning.
+        return [PSCustomObject]@{
+            policyMigrationState = 'premigration'
+            registrationEnforcement =
             [PSCustomObject]@{ authenticationMethodsRegistrationCampaign =
                 [PSCustomObject]@{ state = 'default' } } }
+    }
+    if ($Uri -match '/policies/authenticationStrengthPolicies') {
+        return [PSCustomObject]@{ value = @(
+            # Built-in MFA strength permits phone combos among many others: reportable, not fatal.
+            [PSCustomObject]@{ id='s-builtin-mfa'; displayName='Multifactor authentication'; policyType='builtIn'
+                allowedCombinations=@('password,sms','password,voice','password,microsoftAuthenticatorPush','fido2') }
+            # A custom strength with nothing left after the retirement: the fatal shape.
+            [PSCustomObject]@{ id='s-phone-only'; displayName='Phone transfer approvals'; policyType='custom'
+                allowedCombinations=@('password,sms','password,voice') }
+            [PSCustomObject]@{ id='s-clean'; displayName='Phishing-resistant MFA'; policyType='builtIn'
+                allowedCombinations=@('fido2','windowsHelloForBusiness','x509CertificateMultiFactor') }
+        )}
+    }
+    if ($Uri -match '/identity/conditionalAccess/policies') {
+        return [PSCustomObject]@{ value = @(
+            [PSCustomObject]@{ displayName='Require MFA for all users'; state='enabled'
+                grantControls=[PSCustomObject]@{ builtInControls=@('mfa'); authenticationStrength=$null } }
+            [PSCustomObject]@{ displayName='Phone approvals for finance'; state='enabled'
+                grantControls=[PSCustomObject]@{ builtInControls=@()
+                    authenticationStrength=[PSCustomObject]@{ id='s-phone-only'; displayName='Phone transfer approvals' } } }
+            # Report-only enforces nothing and must not count as enforcement.
+            [PSCustomObject]@{ displayName='Old MFA pilot'; state='enabledForReportingButNotEnforced'
+                grantControls=[PSCustomObject]@{ builtInControls=@('mfa') } }
+            # Not an MFA grant at all; must not appear anywhere.
+            [PSCustomObject]@{ displayName='Block legacy auth'; state='enabled'
+                grantControls=[PSCustomObject]@{ builtInControls=@('block') } }
+        )}
     }
     if ($Uri -match 'userRegistrationDetails') {
         return [PSCustomObject]@{ value = @(
@@ -388,6 +419,46 @@ Describe 'A default run against a stubbed tenant' {
 
     It 'reports no unrecognised authentication methods for known input' {
         $script:Summary.UnrecognisedMethods | Should -BeNullOrEmpty
+    }
+
+    It 'names the legacy portal pages when the policy migration is not complete' {
+        # premigration means the legacy per-user MFA service settings and the legacy SSPR
+        # methods page still govern the tenant, and neither has an API. A run that ends
+        # without saying so has silently skipped two of the places SMS and voice live.
+        $script:Summary.PolicyMigrationState | Should -Be 'premigration'
+        $script:StdOut | Should -Match 'Per-user MFA > service settings'
+        $script:StdOut | Should -Match 'Password reset > Authentication methods'
+        $script:StdOut | Should -Match 'SSPR'
+    }
+
+    It 'surfaces SMS enabled as a first factor, which is worse than SMS as MFA' {
+        # The portal ticks "Use for sign-in" by default when SMS is enabled, so a tenant
+        # can be signing users in over SMS without anybody having chosen that.
+        $script:Summary.SmsSignInEnabledFor | Should -Match 'SMS Users'
+        $script:StdOut | Should -Match 'FIRST FACTOR'
+    }
+
+    It 'separates a strength that permits phone combos from one with nothing else left' {
+        # The built-in MFA strength allows sms/voice among many combinations: users with a
+        # surviving method still pass, so it is reportable. The custom phone-only strength
+        # becomes unsatisfiable outright, which is a lockout for every policy built on it.
+        $script:Summary.AuthStrengthsOnlySmsVoice | Should -Be 'Phone transfer approvals'
+        $script:Summary.AuthStrengthsAllowingSmsVoice | Should -Match 'Multifactor authentication'
+        $script:Summary.AuthStrengthsAllowingSmsVoice | Should -Not -Match 'Phishing-resistant'
+        $script:StdOut | Should -Match 'UNSATISFIABLE'
+    }
+
+    It 'counts only enforcing CA policies as MFA enforcement' {
+        # Report-only enforces nothing, and a block grant is not MFA. Two remain.
+        $script:Summary.CaMfaPoliciesEnabled | Should -Be 2
+        $script:Summary.CaPoliciesRequiringMfa | Should -Match 'Require MFA for all users \[enabled\]'
+        $script:Summary.CaPoliciesRequiringMfa | Should -Match 'Old MFA pilot \[enabledForReportingButNotEnforced\]'
+        $script:Summary.CaPoliciesRequiringMfa | Should -Not -Match 'Block legacy auth'
+    }
+
+    It 'connects a CA policy to the retiring strength it grants through' {
+        $script:Summary.CaPoliciesOnSmsVoiceStrength |
+            Should -Be "Phone approvals for finance via strength 'Phone transfer approvals'"
     }
 }
 

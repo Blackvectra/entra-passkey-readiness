@@ -171,6 +171,11 @@ $summary = [PSCustomObject][ordered]@{
     AssessmentTimeUtc          = '2026-08-17T09:14:22.0000000Z'
     EnabledUsersAssessed       = $rows.Count
     RegistrationCampaignState  = 'default'
+    # Deliberately not migrationComplete: the sample tenant mirrors the common real one,
+    # still part-way through converging onto the modern policy, so the report shows the
+    # manual-check wording a reader is most likely to encounter.
+    PolicyMigrationState       = 'migrationInProgress'
+    CaPoliciesRequiringMfa     = 'Require MFA for all users [enabled]'
     SmsPolicyState             = 'enabled'
     VoicePolicyState           = 'enabled'
     SmsPolicyInclude           = 'group: All Staff (Sydney)'

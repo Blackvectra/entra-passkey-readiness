@@ -689,18 +689,94 @@ function Get-TargetType {
     return [string]$type
 }
 
-function Get-RegistrationCampaignState {
-    # Microsoft flips this to "Microsoft managed" for in-scope tenants on 2026-09-01,
-    # which is what triggers the end-user passkey nudge. Reported, never modified.
+function Get-AuthenticationMethodsPolicyInfo {
+    # One GET, two tenant-wide facts.
+    #
+    # The campaign state is what Microsoft flips to "Microsoft managed" for in-scope
+    # tenants on 2026-09-01, triggering the end-user passkey nudge. Reported, never modified.
+    #
+    # The migration state decides whether two portal pages this tool cannot read still
+    # govern the tenant. Anything short of 'migrationComplete' means Entra is still
+    # honouring the legacy per-user MFA service settings page and the legacy SSPR
+    # authentication-methods page -- both of which can hand out SMS and voice, neither of
+    # which has any API -- so the console tells the operator to open them by hand. At
+    # 'migrationComplete' Entra ignores both pages and that manual check disappears.
     $policy = Invoke-GraphGet -Uri "$script:GraphBase/policies/authenticationMethodsPolicy"
     $enforcement = Get-PropertyValue $policy 'registrationEnforcement'
     $campaign = Get-PropertyValue $enforcement 'authenticationMethodsRegistrationCampaign'
     $state = [string](Get-PropertyValue $campaign 'state')
 
-    if ([string]::IsNullOrWhiteSpace($state)) { return 'unknown' }
+    if ([string]::IsNullOrWhiteSpace($state)) { $state = 'unknown' }
     # Graph reports the Microsoft-managed default as 'default'; surface the portal wording.
-    if ($state -eq 'default') { return 'default (Microsoft managed)' }
-    return $state
+    elseif ($state -eq 'default') { $state = 'default (Microsoft managed)' }
+
+    $migration = [string](Get-PropertyValue $policy 'policyMigrationState')
+    if ([string]::IsNullOrWhiteSpace($migration)) { $migration = 'unknown' }
+
+    return [PSCustomObject]@{
+        RegistrationCampaignState = $state
+        PolicyMigrationState      = $migration
+    }
+}
+
+function Get-AuthenticationStrengthReport {
+    # Conditional Access authentication strengths that would accept SMS or voice today.
+    # Strengths are lists of allowed method combinations ('password,sms', 'fido2', ...);
+    # any combination naming sms or voice stops being satisfiable through Microsoft's
+    # telephony on 2027-02-01 unless the tenant configures its own provider.
+    #
+    # The distinction that matters is whether a strength has anything else left. A strength
+    # that merely includes phone combinations degrades gracefully -- users with surviving
+    # methods still pass. A strength whose every combination involves SMS or voice becomes
+    # unsatisfiable outright, and every CA policy built on it locks its users out.
+    $policies = Get-GraphCollection -Uri "$script:GraphBase/policies/authenticationStrengthPolicies"
+
+    $findings = foreach ($policy in @($policies)) {
+        $combinations = @(Get-PropertyValue $policy 'allowedCombinations')
+        $retiring = @($combinations | Where-Object {
+                @($_ -split ',' | ForEach-Object { $_.Trim() }) | Where-Object { $_ -in @('sms', 'voice') }
+            })
+        if ($retiring.Count -eq 0) { continue }
+
+        [PSCustomObject]@{
+            DisplayName          = [string](Get-PropertyValue $policy 'displayName')
+            Id                   = [string](Get-PropertyValue $policy 'id')
+            PolicyType           = [string](Get-PropertyValue $policy 'policyType')
+            RetiringCombinations = ($retiring -join '; ')
+            # True when nothing survives: every allowed combination names sms or voice.
+            OnlyRetiringCombinations = ($retiring.Count -eq $combinations.Count)
+        }
+    }
+    return @($findings)
+}
+
+function Get-ConditionalAccessMfaReport {
+    # Every Conditional Access policy that requires MFA, either through the built-in
+    # control or through an authentication strength. Two questions hang on this list:
+    # whether the tenant has any MFA enforcement at all for users outside legacy per-user
+    # MFA, and whether any enforcement runs through a strength that retires.
+    #
+    # This is a policy inventory, not a per-user applicability calculation -- resolving CA
+    # assignments, conditions and exclusions is a different tool's job. The names and
+    # states are enough to answer "does an enabled policy require MFA" without guessing.
+    $policies = Get-GraphCollection -Uri "$script:GraphBase/identity/conditionalAccess/policies"
+
+    $findings = foreach ($policy in @($policies)) {
+        $grant = Get-PropertyValue $policy 'grantControls'
+        if (-not $grant) { continue }
+
+        $builtIn = @(Get-PropertyValue $grant 'builtInControls')
+        $strength = Get-PropertyValue $grant 'authenticationStrength'
+        if (($builtIn -notcontains 'mfa') -and (-not $strength)) { continue }
+
+        [PSCustomObject]@{
+            DisplayName          = [string](Get-PropertyValue $policy 'displayName')
+            State                = [string](Get-PropertyValue $policy 'state')
+            AuthStrengthId       = [string](Get-PropertyValue $strength 'id')
+            AuthStrengthName     = [string](Get-PropertyValue $strength 'displayName')
+        }
+    }
+    return @($findings)
 }
 
 function Get-MethodPolicyScope {
@@ -723,6 +799,10 @@ function Get-MethodPolicyScope {
         # Targets this script could not resolve to users. Returned rather than tracked in a
         # global so the caller cannot forget to look, and so this is testable in isolation.
         UnresolvedTargets = [System.Collections.Generic.List[string]]::new()
+        # SMS targets flagged isUsableForSignIn: those users do not merely verify with SMS,
+        # they sign in with it as the first factor, and the portal enables the flag by
+        # default when SMS is switched on. Voice targets never carry the property.
+        SignInEnabledTargets = [System.Collections.Generic.List[string]]::new()
     }
 
     # A disabled method has no effective scope, but registered methods are still assessed later.
@@ -735,6 +815,13 @@ function Get-MethodPolicyScope {
         $type = Get-TargetType $target
         $id = Get-TargetId $target
         if (-not $id) { continue }
+
+        if ([bool](Get-PropertyValue $target 'isUsableForSignIn')) {
+            $label = if ($id -eq 'all_users') { 'All enabled users' }
+                     elseif ($type -eq 'group') { "Group: $(Get-GroupDisplayName -GroupId $id) [$id]" }
+                     else { "${type}: $id" }
+            $result.SignInEnabledTargets.Add($label)
+        }
 
         if ($id -eq 'all_users') {
             foreach ($userId in $EnabledUserIndex.Keys) { [void]$result.UserIds.Add($userId) }
@@ -1456,6 +1543,8 @@ $(if ($blockedAtRetirement -gt 0) {
 <h2>Tenant configuration</h2>
 <dl>
 <dt>Registration campaign</dt><dd>$(ConvertTo-SafeHtml $Summary.RegistrationCampaignState)</dd>
+<dt>Policy migration</dt><dd>$(ConvertTo-SafeHtml $Summary.PolicyMigrationState)$(if ($Summary.PolicyMigrationState -ne 'migrationComplete') { ' &mdash; the legacy per-user MFA and SSPR portal pages still apply and must be reviewed by hand' })</dd>
+<dt>CA policies requiring MFA</dt><dd>$(ConvertTo-SafeHtml $(if ($Summary.CaPoliciesRequiringMfa) { $Summary.CaPoliciesRequiringMfa } else { 'none found' }))</dd>
 <dt>SMS method state</dt><dd>$(ConvertTo-SafeHtml $Summary.SmsPolicyState)</dd>
 <dt>SMS include targets</dt><dd>$(ConvertTo-SafeHtml $(if ($Summary.SmsPolicyInclude) { $Summary.SmsPolicyInclude } else { 'none' }))</dd>
 <dt>SMS exclude targets</dt><dd>$(ConvertTo-SafeHtml $(if ($Summary.SmsPolicyExclude) { $Summary.SmsPolicyExclude } else { 'none' }))</dd>
@@ -2147,12 +2236,45 @@ $usersSkippedNotEnabled = $users.Count - $enabledUsers.Count
 $enabledUserIndex = @{}
 foreach ($user in $enabledUsers) { $enabledUserIndex[[string](Get-PropertyValue $user 'id')] = $user }
 
-Write-Host 'Reading registration campaign state...' -ForegroundColor Cyan
-$campaignState = Get-RegistrationCampaignState
+Write-Host 'Reading authentication methods policy (campaign and migration state)...' -ForegroundColor Cyan
+$policyInfo = Get-AuthenticationMethodsPolicyInfo
 
 Write-Host 'Resolving SMS and voice policy scope (nested groups and exclusions)...' -ForegroundColor Cyan
 $smsScope = Get-MethodPolicyScope -Method sms -EnabledUserIndex $enabledUserIndex
 $voiceScope = Get-MethodPolicyScope -Method voice -EnabledUserIndex $enabledUserIndex
+
+# The two tenant-wide reads that close the remaining API-readable blind spots: a custom
+# authentication strength quietly permitting SMS or voice, and the question of whether any
+# enabled Conditional Access policy requires MFA at all. Both use Policy.Read.All, which
+# this run already holds. Each failure is survived and marked (unreadable) rather than
+# thrown -- the per-user assessment is still worth having -- and marked is the word:
+# an unreadable check must never render as a passed one.
+Write-Host 'Reading authentication strengths and Conditional Access MFA policies...' -ForegroundColor Cyan
+$authStrengthsReadable = $true
+$authStrengthFindings = @()
+try {
+    $authStrengthFindings = Get-AuthenticationStrengthReport
+}
+catch {
+    $authStrengthsReadable = $false
+    Write-Warning "Authentication strengths could not be read, so that area is unassessed: $($_.Exception.Message)"
+}
+
+$caReadable = $true
+$caMfaPolicies = @()
+try {
+    $caMfaPolicies = Get-ConditionalAccessMfaReport
+}
+catch {
+    $caReadable = $false
+    Write-Warning "Conditional Access policies could not be read, so MFA enforcement is unassessed: $($_.Exception.Message)"
+    Write-Warning 'Reading CA needs Policy.Read.All plus a role that can see Conditional Access (Global Reader or Security Reader).'
+}
+
+# CA policies whose grant runs through a strength that permits SMS or voice. If that
+# strength retires unsatisfied, these are the policies that start failing users.
+$retiringStrengthIds = @($authStrengthFindings | ForEach-Object { $_.Id })
+$caOnRetiringStrength = @($caMfaPolicies | Where-Object { $_.AuthStrengthId -and $_.AuthStrengthId -in $retiringStrengthIds })
 
 Write-Host 'Reading authentication-method registration report...' -ForegroundColor Cyan
 # $top is held at 500 for the reports endpoint; it rejects larger page sizes on some tenants.
@@ -2404,7 +2526,11 @@ $summary = [PSCustomObject][ordered]@{
     DirectoryUsersReturned     = $users.Count
     EnabledUsersAssessed       = $enabledUsers.Count
     UsersSkippedNotEnabled     = $usersSkippedNotEnabled
-    RegistrationCampaignState  = $campaignState
+    RegistrationCampaignState  = $policyInfo.RegistrationCampaignState
+    # Anything short of migrationComplete means the legacy per-user MFA service settings
+    # page and the legacy SSPR authentication-methods page still govern this tenant, and
+    # neither has an API. The console spells out the manual checks when that is the case.
+    PolicyMigrationState       = $policyInfo.PolicyMigrationState
     SmsPolicyState             = $smsScope.State
     VoicePolicyState           = $voiceScope.State
     SmsPolicyInclude           = ($smsScope.IncludeNotes -join ' | ')
@@ -2417,6 +2543,28 @@ $summary = [PSCustomObject][ordered]@{
     # counts are a floor, not a total: the policy targets somebody this run could not
     # resolve to users, so the tenant is at least as exposed as reported, possibly more.
     UnresolvedPolicyTargets    = (@($unresolvedTargets) -join ' | ')
+    # SMS as the first factor, not just as MFA: targets on the SMS policy flagged usable
+    # for sign-in. Those users' sign-in itself runs on the retiring method.
+    SmsSignInEnabledFor        = (@($smsScope.SignInEnabledTargets) -join ' | ')
+    # Authentication strengths whose allowed combinations include SMS or voice, and the
+    # subset with nothing else left. Unreadable is stated, never blanked into looking clean.
+    AuthStrengthsAllowingSmsVoice = if (-not $authStrengthsReadable) { '(unreadable)' } else {
+        (@($authStrengthFindings | ForEach-Object { "$($_.DisplayName) [$($_.PolicyType)] combos: $($_.RetiringCombinations)" }) -join ' | ')
+    }
+    AuthStrengthsOnlySmsVoice  = if (-not $authStrengthsReadable) { '(unreadable)' } else {
+        (@($authStrengthFindings | Where-Object OnlyRetiringCombinations | ForEach-Object { $_.DisplayName }) -join ' | ')
+    }
+    # Whether anything enforces MFA for the users legacy per-user MFA does not cover.
+    # A policy inventory by name and state -- not a per-user applicability calculation.
+    CaPoliciesRequiringMfa     = if (-not $caReadable) { '(unreadable)' } else {
+        (@($caMfaPolicies | ForEach-Object { "$($_.DisplayName) [$($_.State)]" }) -join ' | ')
+    }
+    CaMfaPoliciesEnabled       = if (-not $caReadable) { $null } else {
+        @($caMfaPolicies | Where-Object State -eq 'enabled').Count
+    }
+    CaPoliciesOnSmsVoiceStrength = if (-not $caReadable) { '(unreadable)' } else {
+        (@($caOnRetiringStrength | ForEach-Object { "$($_.DisplayName) via strength '$($_.AuthStrengthName)'" }) -join ' | ')
+    }
     # The state of the blind spot, stated on every run rather than only when it is closed.
     # A summary that simply omits legacy MFA on a default run reads as a clean tenant.
     LegacyPerUserMfaChecked    = -not [bool]$SkipLegacyPerUserMfa
@@ -2566,6 +2714,67 @@ else {
 }
 if ($summary.LegacyPerUserMfaUnreadable -gt 0) {
     Write-Host "$($summary.LegacyPerUserMfaUnreadable) user(s) returned no readable per-user MFA state. They are marked (unreadable), not clean; re-run before treating this tenant as assessed." -ForegroundColor Yellow
+}
+
+# Tenant-wide checks: every other place SMS or voice can live in Entra. The per-user rows
+# above cover registrations and policy scope; these cover the policies themselves, so a run
+# that ends green here has genuinely checked every area an API can reach -- and has named
+# the one area none can.
+Write-Host "`nTenant-wide checks:" -ForegroundColor Cyan
+
+if ($summary.PolicyMigrationState -eq 'migrationComplete') {
+    Write-Host '  Policy migration: complete. Entra ignores the legacy MFA and SSPR portal pages; no manual check needed there.' -ForegroundColor Green
+}
+elseif ($summary.PolicyMigrationState -eq 'unknown') {
+    Write-Host '  Policy migration: state could not be read. Treat the legacy portal pages as live and check them by hand (below).' -ForegroundColor Yellow
+}
+else {
+    Write-Host "  Policy migration: $($summary.PolicyMigrationState). The legacy portal pages still govern this tenant and have NO API. Check both by hand:" -ForegroundColor Red
+    Write-Host '    1. Entra ID > Users > Per-user MFA > service settings: call/text verification options, app passwords, trusted IPs.' -ForegroundColor Yellow
+    Write-Host '    2. Entra ID > Protection > Password reset > Authentication methods: Mobile phone / Office phone for SSPR.' -ForegroundColor Yellow
+    Write-Host '    The retirement covers SSPR too: a user whose only reset method is a phone loses self-service reset on 2027-02-01.' -ForegroundColor Yellow
+    Write-Host '    Finish the migration (Authentication methods > Policies > Manage migration) and both pages stop applying.' -ForegroundColor Yellow
+}
+
+if ($summary.SmsSignInEnabledFor) {
+    Write-Host "  SMS sign-in: enabled as a FIRST FACTOR for: $($summary.SmsSignInEnabledFor). These users sign in with the retiring method itself, not just verify with it." -ForegroundColor Red
+}
+elseif ($smsScope.State -eq 'enabled') {
+    Write-Host '  SMS sign-in: SMS is MFA/SSPR only; no target is enabled for first-factor sign-in.' -ForegroundColor Green
+}
+
+if (-not $authStrengthsReadable) {
+    Write-Host '  Authentication strengths: could not be read. Check Entra ID > Protection > Authentication strengths by hand for SMS/voice combinations.' -ForegroundColor Yellow
+}
+elseif ($summary.AuthStrengthsOnlySmsVoice) {
+    Write-Host "  Authentication strengths: UNSATISFIABLE after retirement (every allowed combination uses SMS/voice): $($summary.AuthStrengthsOnlySmsVoice). Any CA policy using these locks its users out on 2027-02-01." -ForegroundColor Red
+}
+elseif ($summary.AuthStrengthsAllowingSmsVoice) {
+    Write-Host "  Authentication strengths: these permit SMS/voice among other methods: $($summary.AuthStrengthsAllowingSmsVoice). Users satisfying them by phone must move to a surviving method." -ForegroundColor Yellow
+}
+else {
+    Write-Host '  Authentication strengths: none permit SMS or voice.' -ForegroundColor Green
+}
+
+if (-not $caReadable) {
+    Write-Host '  Conditional Access: could not be read, so MFA enforcement is UNVERIFIED. Confirm by hand that an enabled CA policy requires MFA.' -ForegroundColor Yellow
+}
+else {
+    if ($caOnRetiringStrength.Count -gt 0) {
+        Write-Host "  Conditional Access: these policies grant through an SMS/voice-permitting strength: $($summary.CaPoliciesOnSmsVoiceStrength)." -ForegroundColor Yellow
+    }
+    if ($summary.CaMfaPoliciesEnabled -gt 0) {
+        Write-Host "  Conditional Access: $($summary.CaMfaPoliciesEnabled) enabled polic(ies) require MFA: $($summary.CaPoliciesRequiringMfa)." -ForegroundColor Green
+        Write-Host '    Names and states only. Whether their assignments cover every user is not assessed here; review scoping in the portal.' -ForegroundColor Cyan
+    }
+    else {
+        $reportOnly = @($caMfaPolicies | Where-Object State -eq 'enabledForReportingButNotEnforced').Count
+        $reportOnlyNote = if ($reportOnly -gt 0) { " ($reportOnly in report-only mode, which enforces nothing)" } else { '' }
+        Write-Host "  Conditional Access: NO enabled policy requires MFA$reportOnlyNote." -ForegroundColor Red
+        if ($summary.LegacyPerUserMfaInForce -lt $summary.EnabledUsersAssessed) {
+            Write-Host "    Only $($summary.LegacyPerUserMfaInForce) of $($summary.EnabledUsersAssessed) enabled users are covered by legacy per-user MFA. The remainder may have NO MFA enforcement at all -- a wider problem than the retirement." -ForegroundColor Red
+        }
+    }
 }
 
 Write-Host "`n2026-09-01  Passkey auto-enablement and registration nudge begins." -ForegroundColor Yellow
