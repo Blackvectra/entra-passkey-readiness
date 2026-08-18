@@ -132,6 +132,34 @@ Describe 'Get-MethodPolicyScope' {
             $result.UserIds | Should -Not -Contain 'disabled-user'
         }
 
+        It 'records a target enabled for first-factor SMS sign-in' {
+            # The portal ticks "Use for sign-in" by default when SMS is enabled, so this is
+            # the flag a tenant carries without anybody having chosen it. Left unsurfaced,
+            # users signing in over SMS -- not merely verifying with it -- read the same as
+            # users who only hold it as MFA.
+            $signIn = [PSCustomObject]@{ id = 'g1'; targetType = 'group'; isUsableForSignIn = $true }
+            $mfaOnly = [PSCustomObject]@{ id = 'g2'; targetType = 'group'; isUsableForSignIn = $false }
+            $script:MockConfig['sms'] = New-MethodConfig -Include @($signIn, $mfaOnly)
+            $script:MockGroups['g1'] = @('u1')
+            $script:MockGroups['g2'] = @('u2')
+
+            $result = Get-MethodPolicyScope -Method sms -EnabledUserIndex (New-EnabledUserIndex @('u1', 'u2'))
+
+            @($result.SignInEnabledTargets).Count | Should -Be 1
+            $result.SignInEnabledTargets[0] | Should -Match 'g1'
+        }
+
+        It 'reports no sign-in targets when the flag is absent, as on voice targets' {
+            # Voice targets never carry isUsableForSignIn; a missing property must read as
+            # false rather than throwing under StrictMode or, worse, counting as true.
+            $script:MockConfig['voice'] = New-MethodConfig -Include @(New-Target -Id 'g1')
+            $script:MockGroups['g1'] = @('u1')
+
+            $result = Get-MethodPolicyScope -Method voice -EnabledUserIndex (New-EnabledUserIndex @('u1'))
+
+            @($result.SignInEnabledTargets).Count | Should -Be 0
+        }
+
         It 'resolves an individual user target' {
             $script:MockConfig['sms'] = New-MethodConfig -Include @(New-Target -Id 'u2' -TargetType 'user')
             $result = Get-MethodPolicyScope -Method sms -EnabledUserIndex (New-EnabledUserIndex @('u1', 'u2'))

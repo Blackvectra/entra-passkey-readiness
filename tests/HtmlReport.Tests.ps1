@@ -29,6 +29,8 @@ BeforeAll {
         $base = [ordered]@{
             TenantId = 'c0ffee00-1111-4222-8333-444455556666'; EnabledUsersAssessed = 48
             RegistrationCampaignState = 'default (Microsoft managed)'
+            PolicyMigrationState = 'migrationComplete'
+            CaPoliciesRequiringMfa = 'Require MFA for all users [enabled]'
             SmsPolicyState = 'enabled'; VoicePolicyState = 'enabled'
             SmsPolicyInclude = 'All enabled users (members and guests)'; SmsPolicyExclude = ''
             VoicePolicyInclude = ''; VoicePolicyExclude = ''
