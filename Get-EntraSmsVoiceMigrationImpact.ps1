@@ -366,18 +366,48 @@ function Get-TargetType {
     return [string]$type
 }
 
-function Get-RegistrationCampaignState {
-    # Microsoft flips this to "Microsoft managed" for in-scope tenants on 2026-09-01,
-    # which is what triggers the end-user passkey nudge. Reported, never modified.
+function Get-AuthMethodsPolicyState {
+    # Returns registration campaign state, legacy-to-modern migration state, and the
+    # September 2026 opt-out flag in one call.
+    #
+    # policyMigrationState matters for scoping accuracy: tenants in preMigration or
+    # migrationInProgress still have the legacy per-user MFA service as authoritative,
+    # so the modern AMP scope is not the full picture of who is exposed to the retirement.
+    # The assessment flags this rather than silently treating the tenant as clean.
+    #
+    # optOutSettings.passkeyDynamicMigration is a beta-only field; the v1.0 call is made
+    # first and the beta call supplements it so a 404 on the beta endpoint is non-fatal.
+
     $policy = Invoke-GraphGet -Uri "$script:GraphBase/policies/authenticationMethodsPolicy"
+
+    # Campaign state.
     $enforcement = Get-PropertyValue $policy 'registrationEnforcement'
     $campaign = Get-PropertyValue $enforcement 'authenticationMethodsRegistrationCampaign'
-    $state = [string](Get-PropertyValue $campaign 'state')
+    $rawState = [string](Get-PropertyValue $campaign 'state')
+    $campaignState = if ([string]::IsNullOrWhiteSpace($rawState)) { 'unknown' }
+                     elseif ($rawState -eq 'default') { 'default (Microsoft managed)' }
+                     else { $rawState }
 
-    if ([string]::IsNullOrWhiteSpace($state)) { return 'unknown' }
-    # Graph reports the Microsoft-managed default as 'default'; surface the portal wording.
-    if ($state -eq 'default') { return 'default (Microsoft managed)' }
-    return $state
+    # Legacy migration state: preMigration / migrationInProgress / migrationComplete.
+    $migrationState = [string](Get-PropertyValue $policy 'policyMigrationState')
+    if ([string]::IsNullOrWhiteSpace($migrationState)) { $migrationState = 'unknown' }
+
+    # Opt-out flag (beta only; non-fatal if the endpoint is unavailable).
+    $passkeyOptedOut = $false
+    try {
+        $betaPolicy = Invoke-GraphGet -Uri 'https://graph.microsoft.com/beta/policies/authenticationmethodspolicy'
+        $optOut = Get-PropertyValue $betaPolicy 'optOutSettings'
+        $passkeyOptedOut = [bool](Get-PropertyValue $optOut 'passkeyDynamicMigration')
+    }
+    catch {
+        Write-Verbose "Could not read optOutSettings from beta endpoint: $($_.Exception.Message)"
+    }
+
+    return [PSCustomObject]@{
+        CampaignState   = $campaignState
+        MigrationState  = $migrationState
+        PasskeyOptedOut = $passkeyOptedOut
+    }
 }
 
 function Get-MethodPolicyScope {
@@ -1538,7 +1568,14 @@ $enabledUserIndex = @{}
 foreach ($user in $enabledUsers) { $enabledUserIndex[[string](Get-PropertyValue $user 'id')] = $user }
 
 Write-Host 'Reading registration campaign state...' -ForegroundColor Cyan
-$campaignState = Get-RegistrationCampaignState
+$policyState = Get-AuthMethodsPolicyState
+$campaignState = $policyState.CampaignState
+
+# Tenants not yet at migrationComplete have the legacy per-user MFA service as authoritative.
+# The modern AMP scope does not reflect their full exposure; warn rather than silently pass.
+if ($policyState.MigrationState -ne 'migrationComplete' -and $policyState.MigrationState -ne 'unknown') {
+    Write-Warning "policyMigrationState is '$($policyState.MigrationState)'. Legacy per-user MFA settings are still authoritative for this tenant. Users enabled for SMS/voice there are in scope for the retirement and are not visible through the modern AMP scope this assessment reads. Treat the results as a lower bound, not a complete picture."
+}
 
 Write-Host 'Resolving SMS and voice policy scope (nested groups and exclusions)...' -ForegroundColor Cyan
 $smsScope = Get-MethodPolicyScope -Method sms -EnabledUserIndex $enabledUserIndex
@@ -1694,6 +1731,8 @@ $summary = [PSCustomObject][ordered]@{
     AssessmentTimeUtc          = (Get-Date).ToUniversalTime().ToString('o')
     EnabledUsersAssessed       = $enabledUsers.Count
     RegistrationCampaignState  = $campaignState
+    MigrationState             = $policyState.MigrationState
+    PasskeyOptedOut            = $policyState.PasskeyOptedOut
     SmsPolicyState             = $smsScope.State
     VoicePolicyState           = $voiceScope.State
     SmsPolicyInclude           = ($smsScope.IncludeNotes -join ' | ')
