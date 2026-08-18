@@ -16,14 +16,25 @@ Everything in `examples/` is fictional and was built by hand. Keep it that way.
 
 ## The second rule
 
-**This tool does not write.** Every Microsoft Graph call is a GET, and that is the
-product, not an implementation detail — it is what makes the tool safe to run against a
-customer tenant during business hours without a change window.
+**The assessment does not write.** Every Microsoft Graph call in
+`Get-EntraSmsVoiceMigrationImpact.ps1`, `Invoke-EntraSmsVoiceSweep.ps1`, and
+`Compare-EntraSmsVoiceAssessment.ps1` is a GET, and that is the product, not an
+implementation detail — it is what makes the tool safe to run against a customer tenant
+during business hours without a change window.
 
 Several design decisions exist only to preserve it. `-ExportRemediationGroup` writes a
 CSV of who should be in the migration security group rather than creating the group.
-Legacy per-user MFA state goes unread rather than pulling in beta endpoints and broader
-scopes. If you have a change that needs a write, open an issue before writing code.
+Legacy per-user MFA state goes unread rather than pulling in broader scopes. The single
+beta endpoint the assessment reads is a GET, needs no extra scope, and fails soft.
+
+There is exactly one exception in this repository, and it is a separate file on purpose.
+`Set-EntraPasskeyOptOut.ps1` PATCHes the September 2026 passkey opt-out. It lives in its
+own script precisely so the paragraph above stays true of everything else: no assessment
+path calls it, and it needs `Policy.ReadWrite.AuthenticationMethod` as an application
+permission the assessment does not request.
+
+**Do not add a write to any other file.** If you have a change that needs one, open an
+issue before writing code. The answer is usually a new script, not a new parameter.
 
 ## Setup
 
