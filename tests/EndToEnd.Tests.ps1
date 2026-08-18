@@ -41,6 +41,7 @@ function Get-MgContext {
 $script:LegacyMfaState = @{
     'u-admin'  = 'disabled'; 'u-member' = 'disabled'; 'u-safe' = 'disabled'
     'u-legacy' = 'enforced'; 'u-clear'  = 'enabled';  'u-svc'  = 'disabled'
+    'u-fine'   = 'disabled'
 }
 $script:ThrottledOnce = @{}
 
@@ -84,14 +85,21 @@ function Invoke-MgGraphRequest {
     }
 
     if ($Uri -match '/users\?') {
+        # Relative to the run, so the fixture does not rot. u-svc has not been touched in
+        # over a year (a missed leaver, or a service account nobody signs into) and
+        # u-legacy never has; everybody else signed in this week.
+        $recent = (Get-Date).ToUniversalTime().AddDays(-2).ToString('o')
+        $stale  = (Get-Date).ToUniversalTime().AddDays(-400).ToString('o')
+        $act = { param($when) if ($when) { [PSCustomObject]@{ lastSuccessfulSignInDateTime = $when } } else { $null } }
         return [PSCustomObject]@{ value = @(
-            [PSCustomObject]@{ id='u-admin';  displayName='Dale Hendricks'; userPrincipalName='dale@fabrikam-example.com';  userType='Member'; accountEnabled=$true }
-            [PSCustomObject]@{ id='u-member'; displayName='Marcus Whitfield'; userPrincipalName='marcus@fabrikam-example.com'; userType='Member'; accountEnabled=$true }
-            [PSCustomObject]@{ id='u-safe';   displayName='Nadia Ferreira'; userPrincipalName='nadia@fabrikam-example.com';  userType='Member'; accountEnabled=$true }
-            [PSCustomObject]@{ id='u-noreport'; displayName='Ghost Account'; userPrincipalName='ghost@fabrikam-example.com'; userType='Member'; accountEnabled=$true }
-            [PSCustomObject]@{ id='u-legacy'; displayName='Rosalind Achebe'; userPrincipalName='rosalind@fabrikam-example.com'; userType='Member'; accountEnabled=$true }
-            [PSCustomObject]@{ id='u-clear';  displayName='Out Of Scope'; userPrincipalName='clear@fabrikam-example.com';  userType='Member'; accountEnabled=$true }
-            [PSCustomObject]@{ id='u-svc';    displayName='Service Account - Scanner'; userPrincipalName='svc-scanner@fabrikam-example.com'; userType='Member'; accountEnabled=$true }
+            [PSCustomObject]@{ id='u-admin'; signInActivity=(& $act $recent);  displayName='Dale Hendricks'; userPrincipalName='dale@fabrikam-example.com';  userType='Member'; accountEnabled=$true }
+            [PSCustomObject]@{ id='u-member'; signInActivity=(& $act $recent); displayName='Marcus Whitfield'; userPrincipalName='marcus@fabrikam-example.com'; userType='Member'; accountEnabled=$true }
+            [PSCustomObject]@{ id='u-safe'; signInActivity=(& $act $recent);   displayName='Nadia Ferreira'; userPrincipalName='nadia@fabrikam-example.com';  userType='Member'; accountEnabled=$true }
+            [PSCustomObject]@{ id='u-noreport'; signInActivity=(& $act $recent); displayName='Ghost Account'; userPrincipalName='ghost@fabrikam-example.com'; userType='Member'; accountEnabled=$true }
+            [PSCustomObject]@{ id='u-legacy'; displayName='Rosalind Achebe'; userPrincipalName='rosalind@fabrikam-example.com'; userType='Member'; accountEnabled=$true; signInActivity=(& $act $null) }
+            [PSCustomObject]@{ id='u-clear'; signInActivity=(& $act $recent);  displayName='Out Of Scope'; userPrincipalName='clear@fabrikam-example.com';  userType='Member'; accountEnabled=$true }
+            [PSCustomObject]@{ id='u-svc';    displayName='Service Account - Scanner'; userPrincipalName='svc-scanner@fabrikam-example.com'; userType='Member'; accountEnabled=$true; signInActivity=(& $act $stale) }
+            [PSCustomObject]@{ id='u-fine'; signInActivity=(& $act $recent);   displayName='Perfectly Fine'; userPrincipalName='fine@fabrikam-example.com'; userType='Member'; accountEnabled=$true }
             [PSCustomObject]@{ id='u-off';    displayName='Disabled Person'; userPrincipalName='off@fabrikam-example.com';   userType='Member'; accountEnabled=$false }
         )}
     }
@@ -137,6 +145,9 @@ function Invoke-MgGraphRequest {
                                lastUpdatedDateTime='2026-08-16T03:12:44Z' }
             [PSCustomObject]@{ id='u-clear';  isAdmin=$false; isMfaCapable=$true; isMfaRegistered=$true; isPasswordlessCapable=$true
                                methodsRegistered=@('fido2SecurityKey'); systemPreferredAuthenticationMethods=@()
+                               lastUpdatedDateTime='2026-08-17T03:12:44Z' }
+            [PSCustomObject]@{ id='u-fine';   isAdmin=$false; isMfaCapable=$true; isMfaRegistered=$true; isPasswordlessCapable=$true
+                               methodsRegistered=@('passKeyDeviceBound'); systemPreferredAuthenticationMethods=@()
                                lastUpdatedDateTime='2026-08-17T03:12:44Z' }
             [PSCustomObject]@{ id='u-svc';    isAdmin=$false; isMfaCapable=$true; isMfaRegistered=$true; isPasswordlessCapable=$false
                                methodsRegistered=@('alternateMobilePhone'); systemPreferredAuthenticationMethods=@('sms')
@@ -208,24 +219,54 @@ Describe 'A default run against a stubbed tenant' {
         (Join-Path $script:OutDir 'assessment.html') | Should -Not -Exist
     }
 
-    It 'writes the trimmed fifteen-column schema' {
+    It 'writes the trimmed sixteen-column schema' {
         $columns = (Import-Csv -LiteralPath $script:CsvPath)[0].PSObject.Properties.Name
         $columns | Should -Be @(
             'Risk', 'Reason', 'NextStep', 'BlockedAtRetirement', 'DisplayName', 'UserPrincipalName',
             'UserType', 'IsAdmin', 'InSmsPolicyScope', 'InVoicePolicyScope', 'PerUserMfaState',
-            'PhoneMethodsRegistered', 'AllMethodsRegistered', 'IsPasswordlessCapable', 'UserId'
+            'DaysSinceLastSignIn', 'PhoneMethodsRegistered', 'AllMethodsRegistered',
+            'IsPasswordlessCapable', 'UserId'
         )
     }
 
-    It 'writes PerUserMfaState on a run that did not check it, rather than dropping the column' {
-        # A column that appears only on some runs breaks the diff tool and every
-        # spreadsheet built on the file. And it must not be blank: an empty cell reads
-        # as "no legacy MFA", which is the one answer this column must never imply.
+    It 'reports how long ago each account was actually used' {
+        # The question a technician asks first about a name on a work queue: is this a
+        # person, or an account a leaver process missed. Never blank -- an empty cell in a
+        # column called DaysSinceLastSignIn reads as zero, which is the opposite of no data.
         $rows = @(Import-Csv -LiteralPath $script:CsvPath)
-        foreach ($row in $rows) { $row.PerUserMfaState | Should -Be '(not checked)' }
 
-        $script:Summary.LegacyPerUserMfaChecked | Should -BeFalse
-        $script:Summary.LegacyPerUserMfaInForce | Should -Be 0
+        $svc = $rows | Where-Object UserPrincipalName -eq 'svc-scanner@fabrikam-example.com'
+        [int]$svc.DaysSinceLastSignIn | Should -BeGreaterThan 365
+
+        $rosalind = $rows | Where-Object UserPrincipalName -eq 'rosalind@fabrikam-example.com'
+        $rosalind.DaysSinceLastSignIn | Should -Be '(none recorded)'
+
+        $dale = $rows | Where-Object UserPrincipalName -eq 'dale@fabrikam-example.com'
+        [int]$dale.DaysSinceLastSignIn | Should -BeLessThan 7
+
+        foreach ($row in $rows) { $row.DaysSinceLastSignIn | Should -Not -BeNullOrEmpty }
+    }
+
+    It 'counts how much of the action list is probably not a person' {
+        # svc-scanner is 400 days idle and Rosalind has never signed in; both are on the
+        # action list, so a nine-name queue can really be a two-name queue.
+        $script:Summary.StaleAccountsInActionList | Should -Be 1
+        $script:Summary.NeverSignedInInActionList | Should -Be 1
+    }
+
+    It 'puts the staleness signal in the action list a technician opens' {
+        $actionList = @(Import-Csv -LiteralPath (Join-Path $script:OutDir 'assessment_ActionList.csv'))
+        $actionList[0].PSObject.Properties.Name | Should -Contain 'DaysSinceLastSignIn'
+    }
+
+    It 'reads legacy per-user MFA without being asked, because that is now the default' {
+        # It was opt-in until a real tenant showed what opt-in produced: an action list
+        # where every row said "go and check a portal yourself".
+        $script:Summary.LegacyPerUserMfaChecked | Should -BeTrue
+        $script:Summary.LegacyPerUserMfaInForce | Should -Be 2
+
+        $rows = @(Import-Csv -LiteralPath $script:CsvPath)
+        foreach ($row in $rows) { $row.PerUserMfaState | Should -Not -Be '(not checked)' }
     }
 
     It 'excludes the disabled user, because the registration report does not return them' {
@@ -280,13 +321,24 @@ Describe 'A default run against a stubbed tenant' {
         $legacy | Should -Not -BeNullOrEmpty -Because 'a phone method outside AMP scope is the legacy per-user MFA signal'
         $legacy.InSmsPolicyScope | Should -Be 'False'
         $legacy.InVoicePolicyScope | Should -Be 'False'
-        $legacy.Risk | Should -Be 'Moderate'
+        # High rather than Moderate: the run reads her legacy state and finds her enforced,
+        # which is a scope of its own. Moderate is what she looks like without that read.
+        $legacy.Risk | Should -Be 'High'
+        $legacy.PerUserMfaState | Should -Be 'enforced'
         $legacy.BlockedAtRetirement | Should -Be 'True'
     }
 
     It 'drops a user with no exposure at all from the default export' {
+        # Out of both policy scopes, no phone method, legacy per-user MFA confirmed
+        # disabled. Nothing to say about them, so they are not in the file.
         $rows = @(Import-Csv -LiteralPath $script:CsvPath)
-        $rows.UserPrincipalName | Should -Not -Contain 'clear@fabrikam-example.com'
+        $rows.UserPrincipalName | Should -Not -Contain 'fine@fabrikam-example.com'
+
+        # clear@ is in the file for exactly one reason, and it is worth being explicit
+        # about: legacy per-user MFA is enabled, which no other column would reveal.
+        $clear = $rows | Where-Object UserPrincipalName -eq 'clear@fabrikam-example.com'
+        $clear | Should -Not -BeNullOrEmpty
+        $clear.PerUserMfaState | Should -Be 'enabled'
     }
 
     It 'separates who is blocked from who merely lacks a passkey' {
@@ -330,7 +382,7 @@ Describe 'A default run against a stubbed tenant' {
         # Rosalind is Moderate and stopped; a High user is not. Sorting by band alone
         # would put her behind people who are in less danger than she is.
         $rows = @(Import-Csv -LiteralPath $script:CsvPath)
-        ($rows | Where-Object UserPrincipalName -eq 'rosalind@fabrikam-example.com').Risk | Should -Be 'Moderate'
+        ($rows | Where-Object UserPrincipalName -eq 'rosalind@fabrikam-example.com').Risk | Should -Be 'High'
         ($rows | Where-Object UserPrincipalName -eq 'marcus@fabrikam-example.com').BlockedAtRetirement | Should -Be 'False'
     }
 
@@ -406,8 +458,10 @@ Describe 'A run with -ExcludeUpnPattern' {
 
         # It is phone-only and in scope, so without the exclusion it would be a candidate
         # and would count toward the blocked population.
+        # Two users are excluded by the two patterns, and both were candidates: svc- has a
+        # phone method, and clear@ is in scope through legacy per-user MFA.
         $baseline = $script:Summary
-        $script:ExSummary.MigrationCandidates | Should -Be ($baseline.MigrationCandidates - 1)
+        $script:ExSummary.MigrationCandidates | Should -Be ($baseline.MigrationCandidates - 2)
         $script:ExSummary.BlockedAtRetirement | Should -Be ($baseline.BlockedAtRetirement - 1)
     }
 
@@ -419,33 +473,37 @@ Describe 'A run with -ExcludeUpnPattern' {
 
     It 'does not touch anybody who does not match' {
         $rosalind = $script:ExRows | Where-Object UserPrincipalName -eq 'rosalind@fabrikam-example.com'
-        $rosalind.Risk | Should -Be 'Moderate'
+        $rosalind.Risk | Should -Be 'High'
+        $rosalind.PerUserMfaState | Should -Be 'enforced'
     }
 }
 
-Describe 'A run with -IncludeLegacyPerUserMfa' {
+Describe 'The legacy per-user MFA read, which every run now does' {
 
-    # The tenant is the same one the default run assessed. Everything that changes here
-    # changes because the run read a state the default run could not see, which is the
-    # entire argument for the switch: same directory, different verdict.
+    # Same tenant, run twice: once by default (which reads legacy per-user MFA) and once
+    # with -SkipLegacyPerUserMfa. Everything that differs between them is what the read is
+    # worth -- same directory, different verdict -- and is the argument for it being the
+    # default rather than something to remember.
+    #
+    # $script:Rows / $script:Summary come from the default run at the top of this file.
 
     BeforeAll {
         $pwshPath = if ($IsWindows) { Join-Path $PSHOME 'pwsh.exe' } else { Join-Path $PSHOME 'pwsh' }
         if (-not (Test-Path -LiteralPath $pwshPath)) { $pwshPath = 'pwsh' }
 
-        $script:LegacyCsv = Join-Path $script:OutDir 'legacy.csv'
-        $script:LegacySummaryPath = Join-Path $script:Root 'legacy-summary.json'
-        $legacyStdErr = Join-Path $script:Root 'legacy-stderr.txt'
+        $script:LegacyCsv = Join-Path $script:OutDir 'skipped.csv'
+        $script:LegacySummaryPath = Join-Path $script:Root 'skipped-summary.json'
+        $legacyStdErr = Join-Path $script:Root 'skipped-stderr.txt'
 
         $legacyCommand = @"
 `$env:PSModulePath = '$(Join-Path $script:Root 'Modules')' + [IO.Path]::PathSeparator + `$env:PSModulePath
 `$summary = & '$(Get-AssessmentScriptPath)' -TenantId 'fabrikam-example.com' ``
-    -OutputPath '$script:LegacyCsv' -IncludeLegacyPerUserMfa -SkipAclHardening
+    -OutputPath '$script:LegacyCsv' -SkipLegacyPerUserMfa -SkipAclHardening
 `$summary | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath '$script:LegacySummaryPath'
 "@
 
         $legacyProcess = Start-Process -FilePath $pwshPath -PassThru -Wait -NoNewWindow `
-            -RedirectStandardOutput (Join-Path $script:Root 'legacy-stdout.txt') `
+            -RedirectStandardOutput (Join-Path $script:Root 'skipped-stdout.txt') `
             -RedirectStandardError $legacyStdErr `
             -ArgumentList @('-NoProfile', '-NonInteractive', '-Command', $legacyCommand)
 
@@ -461,26 +519,30 @@ Describe 'A run with -IncludeLegacyPerUserMfa' {
         $script:LegacyExit | Should -Be 0 -Because "the run failed: $script:LegacyStdErr"
     }
 
-    It 'promotes the user the default run could only guess at' {
+    It 'promotes a user that opting out could only guess at' {
         # Rosalind: officePhone, outside both modern policy scopes, not passwordless-capable.
-        # The default run can say no more than "go and check the legacy portal", and files
-        # her as Moderate. Reading the state finds her enforced, which is real exposure.
-        $baseline = $script:Rows_Default = @(Import-Csv -LiteralPath $script:CsvPath)
-        ($baseline | Where-Object UserPrincipalName -eq 'rosalind@fabrikam-example.com').Risk |
-            Should -Be 'Moderate' -Because 'this is what the tenant looks like without the switch'
+        # Opting out of the read leaves nothing to say but "go and check the legacy portal",
+        # and files her Moderate. The default run finds her enforced, which is real exposure.
+        $default = @(Import-Csv -LiteralPath $script:CsvPath)
+        $rosalind = $default | Where-Object UserPrincipalName -eq 'rosalind@fabrikam-example.com'
 
-        $rosalind = $script:LegacyRows | Where-Object UserPrincipalName -eq 'rosalind@fabrikam-example.com'
         $rosalind.PerUserMfaState | Should -Be 'enforced'
         $rosalind.Risk | Should -Be 'High'
         $rosalind.Reason | Should -Match 'legacy per-user MFA'
         $rosalind.NextStep | Should -Match 'Convert them to the modern authentication methods policy first'
+
+        # And the same user, from the run that skipped the read.
+        $skipped = $script:LegacyRows | Where-Object UserPrincipalName -eq 'rosalind@fabrikam-example.com'
+        $skipped.PerUserMfaState | Should -Be '(not checked)'
+        $skipped.Risk | Should -Be 'Moderate' -Because 'this is what the tenant looks like without the read'
+        $skipped.NextStep | Should -Match 'legacy per-user MFA service settings'
     }
 
     It 'keeps a user who is in scope through legacy MFA alone' {
         # In neither policy scope and holding no phone method, so every other term in the
         # export filter is false. Without legacy scope being a term of its own the row is
         # dropped, and the tenant's only legacy-scoped account never reaches the file.
-        $clear = $script:LegacyRows | Where-Object UserPrincipalName -eq 'clear@fabrikam-example.com'
+        $clear = @(Import-Csv -LiteralPath $script:CsvPath) | Where-Object UserPrincipalName -eq 'clear@fabrikam-example.com'
 
         $clear | Should -Not -BeNullOrEmpty
         $clear.PerUserMfaState | Should -Be 'enabled'
@@ -491,34 +553,38 @@ Describe 'A run with -IncludeLegacyPerUserMfa' {
     }
 
     It 'stops telling people to check a portal it has already checked' {
-        $marcus = $script:LegacyRows | Where-Object UserPrincipalName -eq 'marcus@fabrikam-example.com'
+        $marcus = @(Import-Csv -LiteralPath $script:CsvPath) | Where-Object UserPrincipalName -eq 'marcus@fabrikam-example.com'
         $marcus.PerUserMfaState | Should -Be 'disabled'
 
         # Dale is Critical either way; what changes is that no row still carries the
         # "go and look in the legacy portal yourself" instruction.
-        $script:LegacyRows.NextStep | Should -Not -Contain 'Check this user in the legacy per-user MFA service settings.'
+        @(Import-Csv -LiteralPath $script:CsvPath).NextStep | Should -Not -Contain 'Check this user in the legacy per-user MFA service settings.'
     }
 
     It 'retries a request throttled inside the batch rather than marking it unreadable' {
         # A 429 on an individual request comes back inside a batch that itself returned
         # 200, so nothing above the per-request loop will ever retry it. Marcus is
         # throttled on his first appearance and answered on the second.
-        $marcus = $script:LegacyRows | Where-Object UserPrincipalName -eq 'marcus@fabrikam-example.com'
+        $marcus = @(Import-Csv -LiteralPath $script:CsvPath) | Where-Object UserPrincipalName -eq 'marcus@fabrikam-example.com'
         $marcus.PerUserMfaState | Should -Be 'disabled'
     }
 
     It 'marks a denied read unreadable rather than clean' {
         # The failure that matters: a user Graph will not answer for must never read as
         # having no legacy MFA, because that is indistinguishable from a real all-clear.
-        $ghost = $script:LegacyRows | Where-Object UserPrincipalName -eq 'ghost@fabrikam-example.com'
+        $ghost = @(Import-Csv -LiteralPath $script:CsvPath) | Where-Object UserPrincipalName -eq 'ghost@fabrikam-example.com'
 
         $ghost.PerUserMfaState | Should -Be '(unreadable)'
-        $script:LegacySummary.LegacyPerUserMfaUnreadable | Should -Be 1
+        $script:Summary.LegacyPerUserMfaUnreadable | Should -Be 1
     }
 
     It 'reports what it found in the summary' {
-        $script:LegacySummary.LegacyPerUserMfaChecked | Should -BeTrue
-        $script:LegacySummary.LegacyPerUserMfaInForce | Should -Be 2
+        $script:Summary.LegacyPerUserMfaChecked | Should -BeTrue
+        $script:Summary.LegacyPerUserMfaInForce | Should -Be 2
+
+        # And the opt-out run reports the opposite, so the field means something.
+        $script:LegacySummary.LegacyPerUserMfaChecked | Should -BeFalse
+        $script:LegacySummary.LegacyPerUserMfaInForce | Should -Be 0
     }
 
     It 'still changes nothing in the tenant' {

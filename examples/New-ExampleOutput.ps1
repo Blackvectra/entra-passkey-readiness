@@ -41,6 +41,8 @@ $examplesDir = $PSScriptRoot
         'ConvertTo-SafeHtml'
         'Get-ExecutiveSummary'
         'New-HtmlReport'
+        'Test-RowFlag'
+        'Get-SignInAgeSortKey'
         'New-ActionList'
         'Get-TicketNextStep'
         'Test-NeedsTicket'
@@ -50,12 +52,17 @@ $examplesDir = $PSScriptRoot
     ))
 
 # Kept in step with the script's own lists. Only used here to derive BlockedAtRetirement.
-$phoneMethods = @('mobilePhone', 'alternateMobilePhone', 'officePhone', 'smsSignIn')
+$phoneMethods = @(
+    'mobilePhone', 'alternateMobilePhone', 'officePhone', 'smsSignIn'
+    'sms', 'mobileSMS', 'mobileCall', 'alternateMobileCall'
+)
 $survivingMfaMethods = @(
     'microsoftAuthenticatorPush', 'softwareOneTimePasscode', 'hardwareOneTimePasscode'
     'fido2SecurityKey', 'windowsHelloForBusiness', 'passKeyDeviceBound'
     'passKeyDeviceBoundAuthenticator', 'passKeyDeviceBoundWindowsHello'
     'macOsSecureEnclaveKey', 'x509Certificate', 'x509CertificateSingleFactor', 'x509CertificateMultiFactor'
+    'passKeySynced', 'microsoftAuthenticatorPasswordless'
+    'fido', 'appNotification', 'appCode'
 )
 
 # The fictional tenant. Every name and domain is invented; example.com-style domains are
@@ -63,58 +70,58 @@ $survivingMfaMethods = @(
 #
 # The set is chosen to put one row in every shape the tool distinguishes, including the
 # ones that are easy to get wrong: a Moderate user who is stopped at sign-in while a High
-# user is not, a legacy-per-user-MFA account that only the -IncludeLegacyPerUserMfa read
+# user is not, a legacy-per-user-MFA account only the legacy read
 # can see, and a user whose legacy state could not be read at all.
 $directory = @(
     @{ Name = 'Dale Hendricks'; Upn = 'dale.hendricks@fabrikam-example.com'
         Type = 'Member'; IsAdmin = $true; Sms = $true; Voice = $true
-        Methods = @('mobilePhone', 'email'); Passwordless = $false; LegacyMfa = 'disabled' }
+        Methods = @('mobilePhone', 'email'); Passwordless = $false; LegacyMfa = 'disabled'; SignInAge = 4 }
 
     @{ Name = 'Priya Raghunathan'; Upn = 'priya.raghunathan@fabrikam-example.com'
         Type = 'Member'; IsAdmin = $true; Sms = $true; Voice = $false
-        Methods = @('mobilePhone', 'officePhone'); Passwordless = $false; LegacyMfa = 'disabled' }
+        Methods = @('mobilePhone', 'officePhone'); Passwordless = $false; LegacyMfa = 'disabled'; SignInAge = 4 }
 
     # In neither modern policy scope. Without the legacy read she is Moderate and the
     # instruction is "go and check a portal"; with it she is High and actually actionable.
     @{ Name = 'Rosalind Achebe'; Upn = 'rosalind.achebe@fabrikam-example.com'
         Type = 'Member'; IsAdmin = $false; Sms = $false; Voice = $false
-        Methods = @('officePhone', 'email'); Passwordless = $false; LegacyMfa = 'enforced' }
+        Methods = @('officePhone', 'email'); Passwordless = $false; LegacyMfa = 'enforced'; SignInAge = '(none recorded)' }
 
     @{ Name = 'Marcus Whitfield'; Upn = 'marcus.whitfield@fabrikam-example.com'
         Type = 'Member'; IsAdmin = $false; Sms = $true; Voice = $true
-        Methods = @('mobilePhone'); Passwordless = $false; LegacyMfa = 'disabled' }
+        Methods = @('mobilePhone'); Passwordless = $false; LegacyMfa = 'disabled'; SignInAge = 4 }
 
     @{ Name = 'Ingrid Solberg'; Upn = 'ingrid.solberg_northwind-example.com#EXT#@fabrikam-example.onmicrosoft.com'
         Type = 'Guest'; IsAdmin = $false; Sms = $true; Voice = $false
-        Methods = @('mobilePhone'); Passwordless = $false; LegacyMfa = 'disabled' }
+        Methods = @('mobilePhone'); Passwordless = $false; LegacyMfa = 'disabled'; SignInAge = 4 }
 
     # In scope, no phone method, and a surviving method that is not passwordless. High, and
     # not stopped at sign-in: the pair of facts the BlockedAtRetirement column exists to keep apart.
     @{ Name = 'Tobias Lindqvist'; Upn = 'tobias.lindqvist@fabrikam-example.com'
         Type = 'Member'; IsAdmin = $false; Sms = $true; Voice = $true
-        Methods = @('softwareOneTimePasscode'); Passwordless = $false; LegacyMfa = 'disabled' }
+        Methods = @('softwareOneTimePasscode'); Passwordless = $false; LegacyMfa = 'disabled'; SignInAge = 4 }
 
     # The other half of the Moderate band: a phone registration with the legacy state read
     # and found disabled, so it is stale rather than a live sign-in path.
     @{ Name = 'Sofia Marchetti'; Upn = 'sofia.marchetti@fabrikam-example.com'
         Type = 'Member'; IsAdmin = $false; Sms = $false; Voice = $false
-        Methods = @('mobilePhone'); Passwordless = $false; LegacyMfa = 'disabled' }
+        Methods = @('mobilePhone'); Passwordless = $false; LegacyMfa = 'disabled'; SignInAge = 4 }
 
     @{ Name = 'Service Account - Scanner'; Upn = 'svc-scanner@fabrikam-example.com'
         Type = 'Member'; IsAdmin = $false; Sms = $false; Voice = $false
-        Methods = @('alternateMobilePhone'); Passwordless = $false; LegacyMfa = '(unreadable)' }
+        Methods = @('alternateMobilePhone'); Passwordless = $false; LegacyMfa = '(unreadable)'; SignInAge = 412 }
 
     @{ Name = 'Nadia Ferreira'; Upn = 'nadia.ferreira@fabrikam-example.com'
         Type = 'Member'; IsAdmin = $true; Sms = $true; Voice = $true
-        Methods = @('passKeyDeviceBound', 'microsoftAuthenticatorPush'); Passwordless = $true; LegacyMfa = 'disabled' }
+        Methods = @('passKeyDeviceBound', 'microsoftAuthenticatorPush'); Passwordless = $true; LegacyMfa = 'disabled'; SignInAge = 4 }
 
     @{ Name = 'Emeka Osondu'; Upn = 'emeka.osondu@fabrikam-example.com'
         Type = 'Member'; IsAdmin = $false; Sms = $false; Voice = $false
-        Methods = @('mobilePhone', 'windowsHelloForBusiness'); Passwordless = $true; LegacyMfa = 'disabled' }
+        Methods = @('mobilePhone', 'windowsHelloForBusiness'); Passwordless = $true; LegacyMfa = 'disabled'; SignInAge = 4 }
 
     @{ Name = 'Break Glass 01'; Upn = 'breakglass01@fabrikam-example.onmicrosoft.com'
         Type = 'Member'; IsAdmin = $true; Sms = $true; Voice = $false
-        Methods = @('fido2SecurityKey'); Passwordless = $true; LegacyMfa = 'disabled' }
+        Methods = @('fido2SecurityKey'); Passwordless = $true; LegacyMfa = 'disabled'; SignInAge = 4 }
 )
 
 $index = 0
@@ -142,6 +149,7 @@ $rows = foreach ($person in $directory) {
         InSmsPolicyScope       = $person.Sms
         InVoicePolicyScope     = $person.Voice
         PerUserMfaState        = $person.LegacyMfa
+        DaysSinceLastSignIn    = $person.SignInAge
         PhoneMethodsRegistered = $phoneList
         AllMethodsRegistered   = ($person.Methods -join '; ')
         IsPasswordlessCapable  = $person.Passwordless
@@ -192,27 +200,24 @@ $summary = [PSCustomObject][ordered]@{
 
 $customer = 'Fabrikam Manufacturing'
 
-# Read by Export-AssessmentCsv, which is the script's single choke point for writing a CSV.
-# These samples are invented data that ships in a public repository, so the ACL lockdown a
-# real export gets would be theatre here -- and it is a no-op off Windows in any case.
+# Passed explicitly to every writer below. These samples are invented data that ships in a
+# public repository, so the ACL lockdown a real export gets would be theatre here -- and it
+# is a no-op off Windows in any case.
 #
-# Lifted functions read it out of this scope, which no static analyser can see, so it is
-# stated rather than merely set. Anything reading these files should know they carry none
-# of the protection a real export gets, because they need none.
-$SkipAclHardening = $true
-Write-Verbose "ACL hardening skipped for generated samples: SkipAclHardening=$SkipAclHardening"
+# This used to be an ambient variable the lifted functions read out of this scope, which no
+# static analyser can see and which CI flagged as dead. The writers take a parameter now.
 
 $assessmentPath = Join-Path $examplesDir 'Example-MigrationImpact.csv'
-Export-AssessmentCsv -Data $rows -Path $assessmentPath
+Export-AssessmentCsv -Data $rows -Path $assessmentPath -SkipAclHardening
 
 $actionListPath = Join-Path $examplesDir 'Example-ActionList.csv'
-Export-AssessmentCsv -Data (New-ActionList -Rows $rows) -Path $actionListPath
+Export-AssessmentCsv -Data (New-ActionList -Rows $rows) -Path $actionListPath -SkipAclHardening
 
 $ticketPath = Join-Path $examplesDir 'Example-Tickets.csv'
-$null = New-TicketExport -Rows $rows -Path $ticketPath -Customer $customer -MaxIndividual 50 -History @{}
+$null = New-TicketExport -Rows $rows -Path $ticketPath -Customer $customer -MaxIndividual 50 -History @{} -SkipAclHardening
 
 $reportPath = Join-Path $examplesDir 'Example-Report.html'
-$null = New-HtmlReport -Summary $summary -Rows $rows -Path $reportPath -Customer $customer
+$null = New-HtmlReport -Summary $summary -Rows $rows -Path $reportPath -Customer $customer -SkipAclHardening
 
 Write-Host 'Regenerated:' -ForegroundColor Green
 foreach ($path in @($assessmentPath, $actionListPath, $ticketPath, $reportPath)) {

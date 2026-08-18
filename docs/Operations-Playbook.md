@@ -15,7 +15,7 @@ Before optimising anything, it is worth being honest about the cost distribution
 | Getting app-only auth consented in each tenant | **Days to weeks**, one time | No. This is a write and a customer conversation. |
 | Running the assessment | Minutes per tenant, parallelisable | Yes, this is what it does |
 | Reviewing candidates and filtering non-human accounts | Hours, first run; a parameter after | Yes, once you know the convention: [Service accounts](#service-accounts-and-shared-mailboxes) |
-| Validating legacy per-user MFA | Was hours, manual, per tenant; now a switch | Yes, `-IncludeLegacyPerUserMfa` |
+| Validating legacy per-user MFA | Was hours, manual, per tenant | Yes, read on every run |
 | Confirming MFA is actually enforced at all | Hours per tenant, manual | No. Checklist in [MFA-Enforcement.md](MFA-Enforcement.md) |
 | Creating remediation groups and campaigns | Minutes per tenant | Produces the list; the group is a write you make |
 | Client communications | Hours per client | No |
@@ -185,13 +185,13 @@ The file holds object IDs and risk bands only, so it carries no identifying data
 
 ### Legacy per-user MFA
 
-Users enabled for SMS or voice through legacy per-user MFA service settings are in scope for the retirement, and the modern authentication methods policy says nothing about them. This used to be a manual check per tenant. It is now `-IncludeLegacyPerUserMfa`:
+Users enabled for SMS or voice through legacy per-user MFA service settings are in scope for the retirement, and the modern authentication methods policy says nothing about them. This used to be a manual check per tenant. Every run now reads it:
 
 ```powershell
 .\Invoke-EntraSmsVoiceSweep.ps1 -TenantListPath .\tenants.csv `
     -ReportRoot "D:\ClientEvidence\EntraMigration\$stamp" `
     -ClientId <app-id> -CertificateThumbprint <thumbprint> `
-    -ThrottleLimit 6 -IncludeLegacyPerUserMfa
+    -ThrottleLimit 6
 ```
 
 It needs no permission beyond the `Policy.Read.All` every run already uses, and costs one batched Graph call per twenty users. It is off by default only because it reads a beta endpoint — the state has no v1.0 equivalent.

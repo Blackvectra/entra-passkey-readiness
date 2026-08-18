@@ -345,7 +345,7 @@ users hold a phone number as their only method that satisfies MFA. At their next
 <td class="mono">alternateMobilePhone</td>
 <td class="no">No</td>
 <td class="reason">Phone method is registered outside resolved modern policy scope; validate legacy per-user MFA exposure.
-<div class="next"><span class="next-l">Next step</span>Check this user in the legacy per-user MFA service settings. If they are enabled for SMS or voice there, convert them to the modern authentication methods policy so the exposure becomes measurable, then remediate as High. If the registration is simply stale, remove alternateMobilePhone once a phishing-resistant method is confirmed. Re-run with -IncludeLegacyPerUserMfa to have this answered automatically.</div></td>
+<div class="next"><span class="next-l">Next step</span>Check this user in the legacy per-user MFA service settings. If they are enabled for SMS or voice there, convert them to the modern authentication methods policy so the exposure becomes measurable, then remediate as High. If the registration is simply stale, remove alternateMobilePhone once a phishing-resistant method is confirmed. This run did not read that state; drop -SkipLegacyPerUserMfa to have it answered automatically.</div></td>
 </tr>
 <tr>
 <td class="name">Sofia Marchetti<div class="upn">sofia.marchetti@fabrikam-example.com</div></td>
