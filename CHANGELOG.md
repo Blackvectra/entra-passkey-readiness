@@ -6,7 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+- **The legacy per-user MFA read is now on by default**, and `-SkipLegacyPerUserMfa` opts out. It was opt-in, and a run against a real 264-user tenant showed what opt-in produced: an action list of nine users where every row was `Moderate`, every phone method was `mobilePhone`, and every `NextStep` was the same sentence telling the technician to go and check a portal by hand. Nine rows of homework is not an action list, and only two of those nine were people who actually lose their sign-in.
+
+  The read costs one batched Graph call per twenty users and no permission the script does not already request. The only argument for opt-in was that the endpoint is beta, and that does not outweigh shipping an assessment whose largest band cannot answer its own question. A total failure of the read stays survivable and loud — every row reads `(unreadable)` and the summary counts them — so the new default cannot quietly mislead.
+
 ### Fixed
+- **Two real authentication methods were treated as not surviving the retirement.** `passKeySynced` and `microsoftAuthenticatorPasswordless` turned up in `UnrecognisedMethods` on the first real-tenant run. Both are in Microsoft's `usageAuthMethod` enum and both survive. Nobody was mis-banded in that run, because every affected user also held Authenticator push — but a user whose only surviving method was a synced passkey would have been reported as locked out on 2027-02-01 when they are fine. A false positive on the one number this tool exists to get right. Added, along with the older enum spellings of methods already listed (`fido`, `appNotification`, `appCode`) and the older phone spellings (`sms`, `mobileSMS`, `mobileCall`, `alternateMobileCall`).
+
+- **The summary printed twice on an interactive run.** It was written to the host *and* returned, so a real run rendered thirty lines of summary, the findings, then the same thirty lines again. It is now returned only, which prints once when nothing captures it and stays silent when something does, and its header moved to the foot of the run so it sits directly above the block it introduces.
+
 - **`-TenantId` rejected the sign-in name, which is the obvious thing to type.** `-TenantId administrator@contoso.org` reached Graph unvalidated and came back as *"Invalid tenant id provided. You can locate your tenant id by following the instructions listed here"* plus a link — a documentation trip for a fix that is deleting the local part of a UPN. Hit on a first real-tenant run.
 
   The parameter now normalises: a UPN's domain is used as the tenant and the run says so, in a message naming both the value used and the two ways to avoid the message. Anything that is neither a GUID, a domain, nor one of Entra's own multi-tenant aliases is rejected **before** the sign-in prompt rather than after one has been answered, and the error names the offending value and both accepted forms rather than pointing at a search engine.

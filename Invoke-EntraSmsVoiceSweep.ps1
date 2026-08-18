@@ -127,12 +127,12 @@ param(
     [Parameter()]
     [switch]$IncludeUnaffected,
 
-    # Reads legacy per-user MFA state in each tenant. Worth setting on the baseline sweep
-    # at least once: it is the only exposure the assessment otherwise cannot see, and a
-    # tenant still running on legacy per-user MFA reports as unremarkable without it.
-    # Costs one batched Graph call per twenty users, and no extra permission.
+    # Skips the legacy per-user MFA read in every tenant. On by default; see the
+    # assessment script for why. Setting this trades the one exposure the assessment
+    # cannot otherwise see for a handful of Graph calls per tenant, which is rarely
+    # the trade you want on an estate sweep.
     [Parameter()]
-    [switch]$IncludeLegacyPerUserMfa,
+    [switch]$SkipLegacyPerUserMfa,
 
     # Passed through to the assessment. One convention usually covers a whole estate, so
     # this is set once for the sweep rather than per tenant.
@@ -321,7 +321,7 @@ end {
         if ($IncludeUnaffected) { $arguments.IncludeUnaffected = $true }
         if ($HtmlReport) { $arguments.HtmlReport = $true }
         if ($ExcludeUpnPattern) { $arguments.ExcludeUpnPattern = $ExcludeUpnPattern }
-        if ($IncludeLegacyPerUserMfa) { $arguments.IncludeLegacyPerUserMfa = $true }
+        if ($SkipLegacyPerUserMfa) { $arguments.SkipLegacyPerUserMfa = $true }
         if ($SkipAclHardening) { $arguments.SkipAclHardening = $true }
         # The customer label becomes the report heading and the ticket company, so every
         # artefact is client-ready without hand-editing after the sweep.

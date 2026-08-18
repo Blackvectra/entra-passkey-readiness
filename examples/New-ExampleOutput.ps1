@@ -50,12 +50,17 @@ $examplesDir = $PSScriptRoot
     ))
 
 # Kept in step with the script's own lists. Only used here to derive BlockedAtRetirement.
-$phoneMethods = @('mobilePhone', 'alternateMobilePhone', 'officePhone', 'smsSignIn')
+$phoneMethods = @(
+    'mobilePhone', 'alternateMobilePhone', 'officePhone', 'smsSignIn'
+    'sms', 'mobileSMS', 'mobileCall', 'alternateMobileCall'
+)
 $survivingMfaMethods = @(
     'microsoftAuthenticatorPush', 'softwareOneTimePasscode', 'hardwareOneTimePasscode'
     'fido2SecurityKey', 'windowsHelloForBusiness', 'passKeyDeviceBound'
     'passKeyDeviceBoundAuthenticator', 'passKeyDeviceBoundWindowsHello'
     'macOsSecureEnclaveKey', 'x509Certificate', 'x509CertificateSingleFactor', 'x509CertificateMultiFactor'
+    'passKeySynced', 'microsoftAuthenticatorPasswordless'
+    'fido', 'appNotification', 'appCode'
 )
 
 # The fictional tenant. Every name and domain is invented; example.com-style domains are
@@ -63,7 +68,7 @@ $survivingMfaMethods = @(
 #
 # The set is chosen to put one row in every shape the tool distinguishes, including the
 # ones that are easy to get wrong: a Moderate user who is stopped at sign-in while a High
-# user is not, a legacy-per-user-MFA account that only the -IncludeLegacyPerUserMfa read
+# user is not, a legacy-per-user-MFA account only the legacy read
 # can see, and a user whose legacy state could not be read at all.
 $directory = @(
     @{ Name = 'Dale Hendricks'; Upn = 'dale.hendricks@fabrikam-example.com'

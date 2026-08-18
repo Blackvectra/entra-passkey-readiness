@@ -9,7 +9,7 @@ Risk is derived from three booleans and two attributes, evaluated in a fixed ord
 | `InPolicyScope` | Resolved AMP include/exclude targets for `sms` or `voice` | User is targeted by the policy that drives the 2026-09-01 auto-enablement and nudge |
 | `HasPhoneMethodRegistered` | `methodsRegistered` contains `mobilePhone`, `alternateMobilePhone`, `officePhone`, or `smsSignIn` | User has a method that stops working on 2027-02-01 |
 | `IsPasswordlessCapable` | `isPasswordlessCapable` from the registration report | User already holds a method that survives the retirement. This is the mitigating control. |
-| `PerUserMfaState` | `/beta/users/{id}/authentication/requirements`, only with `-IncludeLegacyPerUserMfa` | Legacy per-user MFA. `enabled` or `enforced` is a scope of its own, and counts as in-scope below. Empty, `(not checked)`, or `(unreadable)` changes nothing. |
+| `PerUserMfaState` | `/beta/users/{id}/authentication/requirements`, read on every run | Legacy per-user MFA. `enabled` or `enforced` is a scope of its own, and counts as in-scope below. Empty, `(not checked)`, or `(unreadable)` changes nothing. |
 | `IsAdmin` / `UserType` | Registration report and directory | Blast-radius modifiers |
 
 `IsPasswordlessCapable` is the pivot. It is the only input that reflects a surviving control, so every band is fundamentally a statement about whether that control is present.
@@ -57,7 +57,7 @@ Phone method registered, no passwordless method, but the user did **not** resolv
 
 This is the most diagnostically useful band, and what it means depends entirely on whether the run read the legacy per-user MFA state.
 
-**Without `-IncludeLegacyPerUserMfa`,** it is an open question with three possible answers:
+**With `-SkipLegacyPerUserMfa` set,** it is an open question with three possible answers:
 
 - SMS and voice are disabled in AMP, but phone numbers were registered under legacy per-user MFA service settings and were never cleaned up.
 - The user is enabled for SMS or voice through legacy per-user MFA, which the run did not read and which is explicitly in scope for the retirement.

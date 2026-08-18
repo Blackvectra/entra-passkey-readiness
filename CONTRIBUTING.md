@@ -22,9 +22,9 @@ customer tenant during business hours without a change window.
 
 Several design decisions exist only to preserve it. `-ExportRemediationGroup` writes a
 CSV of who should be in the migration security group rather than creating the group.
-Legacy per-user MFA state is read only behind `-IncludeLegacyPerUserMfa`, because it is
-the one thing this tool reads from a beta endpoint. It needs no permission beyond the
-`Policy.Read.All` every run already requests. If you have a change that needs a write,
+Legacy per-user MFA state is the one thing this tool reads from a beta endpoint. It is
+read on every run, needs no permission beyond the `Policy.Read.All` every run already
+requests, and `-SkipLegacyPerUserMfa` exists to opt out of the beta surface entirely. If you have a change that needs a write,
 open an issue before writing code.
 
 ## Setup

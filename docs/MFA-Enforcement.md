@@ -60,7 +60,7 @@ Legacy per-user MFA is a separate enforcement layer with three states — `disab
 
 Microsoft's own recommendation (`switchFromPerUserMFA`) is to require MFA through Conditional Access and then **turn per-user MFA off for every user**. Not one or the other — the CA policy first, then disable per-user MFA, in that order.
 
-**Check:** run this tool with `-IncludeLegacyPerUserMfa`. The `PerUserMfaState` column reports every user's state, and `LegacyPerUserMfaInForce` in the summary is the count that should be zero.
+**Check:** run this tool. The `PerUserMfaState` column reports every user's state, and `LegacyPerUserMfaInForce` in the summary is the count that should be zero.
 
 ### 7. An MFA claim already in the token
 
@@ -97,7 +97,7 @@ For Entra ID Free tenants, Security Defaults is the enforcement mechanism. Do no
 
 1. **Inventory what you have.** Every Conditional Access policy, its state, its grant controls, its AND/OR setting, and every exclusion group with its current membership. If the tenant has fewer than a dozen policies this is a twenty-minute job and everything below depends on it.
 
-2. **Turn per-user MFA off — after Conditional Access covers those users, not before.** Reversing the order removes enforcement from people who currently have it. Run this tool with `-IncludeLegacyPerUserMfa` first so you know exactly who is affected and can check the count back to zero afterwards.
+2. **Turn per-user MFA off — after Conditional Access covers those users, not before.** Reversing the order removes enforcement from people who currently have it. Run this tool first so you know exactly who is affected, and check `LegacyPerUserMfaInForce` back to zero afterwards.
 
 3. **Make the MFA requirement unconditional where you mean it to be.** If a policy is meant to require MFA, it should require MFA — not MFA-or-a-compliant-device. If you want the compliant-device path, that is a different policy with a different name, and it should be an explicit decision rather than a default that was never revisited.
 
@@ -136,7 +136,7 @@ Being clear about the boundary, because a green report on one thing is easy to r
 - Which users are in scope of the SMS and voice authentication method policies, with nested groups and exclusions resolved.
 - What each user actually has registered, and whether any of it survives the retirement.
 - `BlockedAtRetirement` — whose only MFA method is a phone number, which is the population that stops working on 2027-02-01.
-- Legacy per-user MFA state per user, with `-IncludeLegacyPerUserMfa`. This is item 6 above, and it is the only item on the list this tool answers directly.
+- Legacy per-user MFA state per user, on every run. This is item 6 above, and it is the only item on the list this tool answers directly.
 
 **It does not check:**
 

@@ -133,20 +133,22 @@ param(
     [Parameter()]
     [switch]$IncludeUnaffected,
 
-    # Reads each user's legacy per-user MFA state, which is the assessment's one real blind
-    # spot. Microsoft is explicit that users enabled for SMS or voice through legacy
-    # per-user MFA are in scope for the retirement, and that state has no v1.0 equivalent:
-    # it is only readable at /beta/users/{id}/authentication/requirements.
+    # Skips the legacy per-user MFA read. On by default, and this exists to turn it off.
     #
-    # Without this, such users surface as Moderate with "go and check the legacy portal
-    # yourself". With it, they resolve into the real band and the Moderate population
-    # becomes what it should be: stale phone registrations and nothing else.
+    # It was opt-in until a real tenant showed what that produced: an action list of nine
+    # users, every row identical, every NextStep saying "go and check the legacy portal
+    # yourself" -- because without the read the Moderate band cannot tell a live sign-in
+    # path from a stale registration. Nine rows of homework is not an action list.
     #
-    # Off by default because it is a beta endpoint, not because it needs more access. The
-    # permission is Policy.Read.All, which this script already requests, and Global Reader
-    # is a supported role. Cost is one Graph call per twenty users.
+    # The read costs one batched Graph call per twenty users and no extra permission: it
+    # is Policy.Read.All, which this script already requests, with Global Reader as a
+    # supported role. The only argument for opt-in was that the endpoint is beta, and that
+    # does not outweigh shipping an assessment that cannot answer its own Moderate band.
+    #
+    # A total failure of the read is survivable and reported -- every row says
+    # (unreadable) and the summary counts them -- so the default cannot silently mislead.
     [Parameter()]
-    [switch]$IncludeLegacyPerUserMfa,
+    [switch]$SkipLegacyPerUserMfa,
 
     # Regular expressions matched against the UPN. A user who matches is marked Excluded
     # and drops out of every count, the action list, the tickets, and the report.
@@ -873,7 +875,7 @@ function Get-RemediationStep {
             if ($PerUserMfaState -eq 'disabled') {
                 return "No legacy per-user MFA exposure: this run read the per-user MFA state and it is disabled, so the phone registration is stale rather than a live sign-in path. Confirm a phishing-resistant method is registered, then remove $methods."
             }
-            return "Check this user in the legacy per-user MFA service settings. If they are enabled for SMS or voice there, convert them to the modern authentication methods policy so the exposure becomes measurable, then remediate as High. If the registration is simply stale, remove $methods once a phishing-resistant method is confirmed. Re-run with -IncludeLegacyPerUserMfa to have this answered automatically."
+            return "Check this user in the legacy per-user MFA service settings. If they are enabled for SMS or voice there, convert them to the modern authentication methods policy so the exposure becomes measurable, then remediate as High. If the registration is simply stale, remove $methods once a phishing-resistant method is confirmed. This run did not read that state; drop -SkipLegacyPerUserMfa to have it answered automatically."
         }
         'Low' {
             if ($HasPhoneMethodRegistered) {
@@ -1903,7 +1905,14 @@ foreach ($registration in $registrations) { $registrationIndex[[string](Get-Prop
 # Entra stores a phone number with a type rather than "SMS" or "voice" registrations.
 # mobilePhone can satisfy both SMS and voice; officePhone is voice-only; smsSignIn is
 # primary SMS sign-in. All four are retired with Microsoft-provided telecom delivery.
-$phoneMethods = @('mobilePhone', 'alternateMobilePhone', 'officePhone', 'smsSignIn')
+# The older enum spellings are here too. Microsoft's usageAuthMethod enum carries both
+# generations of names, and which one a tenant's report uses is not something to discover
+# on the day. Listing a phone method that never appears costs nothing; missing one hides
+# somebody who loses their sign-in.
+$phoneMethods = @(
+    'mobilePhone', 'alternateMobilePhone', 'officePhone', 'smsSignIn'
+    'sms', 'mobileSMS', 'mobileCall', 'alternateMobileCall'
+)
 
 # Methods that both survive the retirement and can satisfy MFA on their own.
 #
@@ -1928,6 +1937,20 @@ $survivingMfaMethods = @(
     'x509Certificate'
     'x509CertificateSingleFactor'
     'x509CertificateMultiFactor'
+
+    # Both turned up on the first run against a real tenant, in the UnrecognisedMethods
+    # list, where being unrecognised means being treated as not surviving. Nobody was
+    # mis-banded there because every one of those users also held Authenticator push --
+    # but a user whose only surviving method was a synced passkey would have been reported
+    # as locked out on 2027-02-01 when they are perfectly fine. A false positive on the
+    # one number this tool exists to get right.
+    'passKeySynced'
+    'microsoftAuthenticatorPasswordless'
+
+    # The older spellings of methods already in this list, from the same enum.
+    'fido'
+    'appNotification'
+    'appCode'
 )
 
 # Anything Microsoft adds later, or that this list has not caught up with, is treated as
@@ -1945,7 +1968,7 @@ $nonMfaMethods = @('email', 'securityQuestion', 'temporaryAccessPass', 'temporar
 # survived rather than thrown: the rest of the assessment is still worth having, and the
 # column says '(unreadable)' for everyone so nobody reads the run as having checked.
 $perUserMfaStates = @{}
-if ($IncludeLegacyPerUserMfa) {
+if (-not $SkipLegacyPerUserMfa) {
     $batches = [math]::Ceiling($enabledUsers.Count / 20)
     Write-Host "Reading legacy per-user MFA state for $($enabledUsers.Count) users ($batches batched request(s), beta endpoint)..." -ForegroundColor Cyan
     try {
@@ -1953,7 +1976,7 @@ if ($IncludeLegacyPerUserMfa) {
     }
     catch {
         Write-Warning "Legacy per-user MFA could not be read, so that exposure is unassessed: $($_.Exception.Message)"
-        Write-Warning 'The most common cause is missing Policy.Read.All. Every row will read (unreadable) rather than being assumed clean.'
+        Write-Warning 'The most common cause is missing Policy.Read.All. Every row will read (unreadable) rather than being assumed clean. Pass -SkipLegacyPerUserMfa to stop attempting it.'
     }
 }
 
@@ -1979,7 +2002,7 @@ $rows = foreach ($user in $enabledUsers) {
 
     # Three states with three meanings, and they must not collapse into each other:
     # not asked for, asked for but unanswered, and a real verdict.
-    $perUserMfaState = if (-not $IncludeLegacyPerUserMfa) { $script:PerUserMfaNotChecked }
+    $perUserMfaState = if ($SkipLegacyPerUserMfa) { $script:PerUserMfaNotChecked }
     elseif ($perUserMfaStates.ContainsKey($id)) { [string]$perUserMfaStates[$id] }
     else { $script:PerUserMfaUnreadable }
 
@@ -2133,7 +2156,7 @@ $summary = [PSCustomObject][ordered]@{
     UnresolvedPolicyTargets    = (@($unresolvedTargets) -join ' | ')
     # The state of the blind spot, stated on every run rather than only when it is closed.
     # A summary that simply omits legacy MFA on a default run reads as a clean tenant.
-    LegacyPerUserMfaChecked    = [bool]$IncludeLegacyPerUserMfa
+    LegacyPerUserMfaChecked    = -not [bool]$SkipLegacyPerUserMfa
     LegacyPerUserMfaInForce    = @($rows | Where-Object { $_.PerUserMfaState -in @('enabled', 'enforced') }).Count
     LegacyPerUserMfaUnreadable = @($rows | Where-Object { $_.PerUserMfaState -eq $script:PerUserMfaUnreadable }).Count
     MigrationCandidates        = $candidateRows.Count
@@ -2155,8 +2178,11 @@ $summary = [PSCustomObject][ordered]@{
     OutputPath                 = (Resolve-Path -LiteralPath $OutputPath).Path
 }
 
-Write-Host "`n===== ENTRA SMS/VOICE MIGRATION IMPACT =====" -ForegroundColor Magenta
-$summary | Format-List | Out-Host
+# The summary is printed once, at the very end, by being returned -- see the foot of this
+# script. It used to be written to the host here *and* returned, which rendered the whole
+# block twice on an interactive run: thirty lines of summary, the findings, then the same
+# thirty lines again. Returning it alone gets both cases right, because PowerShell renders
+# an uncaptured object and stays quiet about a captured one.
 
 # The action list is written on every run: it is the spreadsheet a technician works from,
 # and it costs nothing, being derived from data already in memory. No extra Graph calls.
@@ -2230,9 +2256,9 @@ if ($unresolvedTargets.Count -gt 0) {
 
 # Legacy per-user MFA is the one exposure this tool can miss entirely, so its state is
 # reported on every run: checked and clean, checked and found, or not checked at all.
-if (-not $IncludeLegacyPerUserMfa) {
-    Write-Host "`nLegacy per-user MFA was NOT checked, so this run cannot rule it out. Users enabled for SMS or voice there are in scope for the retirement and will not appear above as in scope." -ForegroundColor Yellow
-    Write-Host 'Re-run with -IncludeLegacyPerUserMfa to close that gap. It needs no extra permission beyond the Policy.Read.All this run already used.' -ForegroundColor Yellow
+if ($SkipLegacyPerUserMfa) {
+    Write-Host "`nLegacy per-user MFA was NOT checked, because -SkipLegacyPerUserMfa was set. This run cannot rule it out: users enabled for SMS or voice there are in scope for the retirement and will not appear above as in scope." -ForegroundColor Yellow
+    Write-Host 'Drop that switch to close the gap. It needs no extra permission beyond the Policy.Read.All this run already used.' -ForegroundColor Yellow
 }
 elseif ($summary.LegacyPerUserMfaInForce -gt 0) {
     Write-Host "`n$($summary.LegacyPerUserMfaInForce) user(s) are enabled or enforced in legacy per-user MFA. They are in scope for the retirement whatever the modern policy says, and the registration campaign will not reach them until they are converted to it." -ForegroundColor Red
@@ -2250,6 +2276,10 @@ Write-Host '2027-02-01  Microsoft-provided SMS/voice delivery retired. No opt-ou
 Write-Host 'Interpretation: Critical/High rows deserve validation first; Moderate rows may reveal legacy per-user MFA exposure.' -ForegroundColor Yellow
 Write-Host 'Passkey deployment guide: https://aka.ms/passkey-deployment-guide' -ForegroundColor Cyan
 Write-Host 'No tenant settings were changed.' -ForegroundColor Green
+
+# Last, so the header sits directly above the summary it introduces. Every Write-Host
+# above has already reached the host by the time the returned object renders.
+Write-Host "`n===== ENTRA SMS/VOICE MIGRATION IMPACT =====" -ForegroundColor Magenta
 
 if ($PassThru) { $exportRows }
 $summary

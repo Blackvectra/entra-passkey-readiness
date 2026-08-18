@@ -1,7 +1,8 @@
 #Requires -Version 7.0
 #Requires -Modules Pester
 
-# Covers the legacy per-user MFA reader.
+# Covers the legacy per-user MFA reader, which every run performs unless
+# -SkipLegacyPerUserMfa turns it off.
 #
 # This is the one place the assessment reaches for data it cannot get any other way, and
 # the one place where a wrong answer is worse than no answer. A user Graph declines to
@@ -304,10 +305,12 @@ Describe 'Get-RiskAssessment with a legacy per-user MFA state' {
         }
 
         It 'points an unchecked run at the switch that would answer the question' {
+            # Only reachable when somebody passed -SkipLegacyPerUserMfa, since the read is
+            # now the default -- but that is exactly when the instruction is needed.
             $step = Get-RemediationStep -Risk 'Moderate' -HasPhoneMethodRegistered $true `
                 -UserType 'Member' -PhoneMethodsRegistered 'mobilePhone'
 
-            $step | Should -Match '-IncludeLegacyPerUserMfa'
+            $step | Should -Match '-SkipLegacyPerUserMfa'
         }
     }
 }
