@@ -22,8 +22,10 @@ customer tenant during business hours without a change window.
 
 Several design decisions exist only to preserve it. `-ExportRemediationGroup` writes a
 CSV of who should be in the migration security group rather than creating the group.
-Legacy per-user MFA state goes unread rather than pulling in beta endpoints and broader
-scopes. If you have a change that needs a write, open an issue before writing code.
+Legacy per-user MFA state is read only behind `-IncludeLegacyPerUserMfa`, because it is
+the one thing this tool reads from a beta endpoint. It needs no permission beyond the
+`Policy.Read.All` every run already requests. If you have a change that needs a write,
+open an issue before writing code.
 
 ## Setup
 
@@ -38,13 +40,30 @@ PowerShell 7.0 or later. The scripts enforce it with `#Requires`.
 ## Before you open a PR
 
 ```powershell
+Get-Module -ListAvailable Pester, PSScriptAnalyzer | Select-Object Name, Version
 Invoke-Pester ./tests
 Invoke-ScriptAnalyzer -Path . -Recurse -Settings ./PSScriptAnalyzerSettings.psd1
 ```
 
+**Run the first line.** `Invoke-ScriptAnalyzer` with the module absent is a
+`CommandNotFoundException`, and depending on how it is invoked that can end up looking
+indistinguishable from a clean run -- which is a green light you did not earn and CI will
+take away. Confirm both modules are actually there before trusting either result.
+
 CI runs both and fails on any finding. Two analyzer rules are excluded, with the
 reasoning written out in `PSScriptAnalyzerSettings.psd1`; if you want to exclude a
 third, argue for it there rather than adding an inline suppression.
+
+If you change the risk model, the remediation wording, or the CSV schema, regenerate the
+published samples as well:
+
+```powershell
+./examples/New-ExampleOutput.ps1
+```
+
+They are built from the script's own functions rather than hand-maintained, and
+`tests/Samples.Tests.ps1` asserts both that the sample schema matches the script's exactly
+and that a regeneration from unchanged inputs produces byte-identical files.
 
 ## Testing
 

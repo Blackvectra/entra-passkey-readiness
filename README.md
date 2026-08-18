@@ -53,10 +53,13 @@ Two optional extras: `-HtmlReport` adds a self-contained HTML report to hand a c
 - [Prerequisites](#prerequisites) — modules, roles, Graph scopes
 - [Usage](#usage) — single tenant, estate sweeps, progress tracking, reports, tickets
 - [Output](#output) — console summary and CSV schema
+- [Service accounts](#service-accounts-and-shared-mailboxes) — keeping non-human accounts out of the work queue
+- [Legacy per-user MFA](#legacy-per-user-mfa) — the one exposure the default run cannot see
 - [Who actually gets stopped](#who-actually-gets-stopped) — the lockout population, which is not the same as the risk bands
 - [Risk classifications](#risk-classifications) — the five bands
 - [Coverage](#coverage-who-this-actually-finds) — exactly who this finds, and who it does not
 - [Limitations](#limitations) — read before presenting results to a client
+- [Is MFA even enforced?](docs/MFA-Enforcement.md) — why a Conditional Access policy is not the same as MFA being enforced
 - [Troubleshooting](#troubleshooting)
 - [Development](#development) — tests, linting, contributing
 - [Security](#security)
@@ -282,7 +285,7 @@ When `-TenantId` is supplied as a GUID, the script verifies the established Grap
 
 It is designed as a document rather than a dashboard, because it gets printed:
 
-- **An executive summary in prose**, generated from the same numbers as the cards. A report that shows only counts leaves the reader to do the interpretation, and the interpretation is what they are paying for. It refuses to describe a zero-candidate tenant as finished, because legacy per-user MFA is not readable from here.
+- **An executive summary in prose**, generated from the same numbers as the cards. A report that shows only counts leaves the reader to do the interpretation, and the interpretation is what they are paying for. It refuses to describe a zero-candidate tenant as finished unless the legacy per-user MFA state was actually read.
 - **Findings split into one table per band.** A technician works Critical to completion before touching High, and the band boundary is where that decision gets made.
 - **A next step under every row.** The diagnosis and the action sit together, so the report can be worked from directly rather than being a list you then have to interpret.
 - **A countdown to both deadlines**, computed when the report is generated.
@@ -377,6 +380,8 @@ The sweep does this for you: history lives in the per-tenant folder rather than 
 | `-CertificateThumbprint` | string | none | Certificate thumbprint for app-only auth. |
 | `-OutputPath` | string | timestamped CSV beside the script, with `-CustomerName` folded in | Destination CSV path. The report and action list are named from it. Parent directory is created if missing. |
 | `-IncludeUnaffected` | switch | off | Include every enabled user, not just migration candidates. |
+| `-IncludeLegacyPerUserMfa` | switch | off | Read each user's legacy per-user MFA state. Closes the assessment's one real blind spot. No extra permission needed; costs one batched Graph call per twenty users. See [Legacy per-user MFA](#legacy-per-user-mfa). |
+| `-ExcludeUpnPattern` | string[] | none | Regex patterns matched against the UPN. Matching users are marked `Excluded` and left out of every count and work queue. See [Service accounts](#service-accounts-and-shared-mailboxes). |
 | `-HtmlReport` | switch | off | Also write a self-contained HTML client report beside the CSVs. |
 | `-CustomerName` | string | none | Heading used on the HTML report. |
 | `-ExportTickets` | switch | off | Also write a PSA-importable ticket queue. |
@@ -388,7 +393,7 @@ The sweep does this for you: history lives in the per-tenant folder rather than 
 
 #### `Invoke-EntraSmsVoiceSweep.ps1`
 
-Accepts and passes through `-IncludeUnaffected`, `-HtmlReport`, `-ExportTickets`, `-MaxIndividualTickets`, and `-SkipAclHardening`. Its own parameters:
+Accepts and passes through `-IncludeUnaffected`, `-IncludeLegacyPerUserMfa`, `-ExcludeUpnPattern`, `-HtmlReport`, `-ExportTickets`, `-MaxIndividualTickets`, and `-SkipAclHardening`. Its own parameters:
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -420,10 +425,15 @@ Accepts and passes through `-IncludeUnaffected`, `-HtmlReport`, `-ExportTickets`
 | Field | Meaning |
 |---|---|
 | `TenantId` | Tenant the assessment actually ran against |
+| `DirectoryUsersReturned` / `EnabledUsersAssessed` / `UsersSkippedNotEnabled` | The assessment's own arithmetic. The last two must sum to the first — that is what makes a silently dropped user visible instead of invisible. |
 | `RegistrationCampaignState` | `enabled`, `disabled`, or `default (Microsoft managed)` |
 | `SmsPolicyState` / `VoicePolicyState` | AMP state of each method |
 | `SmsPolicyInclude` / `SmsPolicyExclude` | Resolved include and exclude targets, with transitive member counts |
 | `InSmsPolicyScope` / `InVoicePolicyScope` | Enabled users resolved into each method's scope |
+| `UnresolvedPolicyTargets` | **Above zero means the two counts above are a floor, not a total.** The policy targets somebody this run could not resolve to users, so the tenant is at least as exposed as reported. Empty on a clean run. |
+| `LegacyPerUserMfaChecked` | Whether `-IncludeLegacyPerUserMfa` was set. False means that exposure is unassessed, whatever else the report says. |
+| `LegacyPerUserMfaInForce` | Users `enabled` or `enforced` in legacy per-user MFA. In scope for the retirement whatever the modern policy says. |
+| `LegacyPerUserMfaUnreadable` | Users whose state Graph would not return. Marked `(unreadable)`, never assumed clean. |
 | `MigrationCandidates` | Users in policy scope **or** with a phone method registered |
 | `Critical` / `High` / `Moderate` / `Low` | Risk-band counts across migration candidates |
 | `PasswordlessCapableInScope` | In-scope users who already have a surviving method |
@@ -447,16 +457,63 @@ Accepts and passes through `-IncludeUnaffected`, `-HtmlReport`, `-ExportTickets`
 | `IsAdmin` | bool | Reported by the registration report as holding a privileged role. |
 | `InSmsPolicyScope` | bool | Resolved into the SMS method's AMP scope after exclusions. |
 | `InVoicePolicyScope` | bool | Resolved into the voice method's AMP scope after exclusions. |
+| `PerUserMfaState` | string | `disabled`, `enabled`, or `enforced` from legacy per-user MFA; `(not checked)` without `-IncludeLegacyPerUserMfa`; `(unreadable)` if Graph would not answer. Always written, so the column never appears and disappears between runs. |
 | `PhoneMethodsRegistered` | string | Semicolon-delimited subset: `mobilePhone`, `alternateMobilePhone`, `officePhone`, `smsSignIn`. |
 | `AllMethodsRegistered` | string | Every method reported for the user, or `(no row in registration report)` when the report had no data for them. |
 | `IsPasswordlessCapable` | bool | Reports a passwordless method. This is the mitigating control. |
 | `UserId` | guid | Object ID. Kept last because it is a join key, not something you read. |
 
-Fourteen columns, sorted highest risk first, then admins ahead of standard users, then display name.
+Fifteen columns, sorted highest risk first, then admins ahead of standard users, then display name.
 
 The registration report also returns `isMfaCapable`, `isMfaRegistered`, `systemPreferredAuthenticationMethods`, and a per-row timestamp. None of them changed what anybody did with the file, so they are not written. Evidence age is still reported once, as `OldestReportRowUtc` in the summary, and a user with no report row is called out in `AllMethodsRegistered` rather than needing a column of its own.
 
 ---
+
+## Service accounts and shared mailboxes
+
+A tenant targeting `All users` surfaces every shared mailbox, sync account, and service account as a migration candidate. They are technically in scope, nobody signs into them interactively, and ticketing them wastes a technician's afternoon.
+
+```powershell
+.\Get-EntraSmsVoiceMigrationImpact.ps1 -TenantId contoso.onmicrosoft.com `
+    -ExcludeUpnPattern '^svc-', '^shared-', '^noreply@'
+```
+
+Patterns are regular expressions matched case-insensitively against the UPN. Anchor them yourself: `^svc-` catches `svc-backup@contoso.com` and leaves `marc.svc-jones@contoso.com` alone, while `svc-` catches both. An invalid pattern fails at parameter binding, before the tenant is contacted.
+
+**Matching users are marked, not deleted.** Their row stays in the assessment CSV with `Risk = Excluded`, and they are left out of every count, the action list, the tickets, and the report. That distinction matters: a filter that silently removes people from a security assessment is how a real account disappears behind a careless pattern, and nothing about the output would look unusual. The summary reports `UsersExcludedByPattern` and the patterns used, and the console says how many were removed.
+
+Check that number on the first run for a new customer. If it is larger than the count of non-human accounts you expect, the pattern is too broad.
+
+The sweep accepts the same parameter, since one naming convention usually covers a whole estate.
+
+---
+
+## Legacy per-user MFA
+
+The one exposure this assessment can otherwise miss entirely.
+
+Legacy per-user MFA is a separate enforcement layer that predates the Authentication Methods Policy and is not replaced by it. A user `enabled` or `enforced` there is in scope for the SMS and voice retirement whatever the modern policy says — and the modern registration campaign does not reach them, so a passkey push aimed at that user lands nowhere and the run after this one reports them unchanged.
+
+```powershell
+.\Get-EntraSmsVoiceMigrationImpact.ps1 -TenantId contoso.onmicrosoft.com -IncludeLegacyPerUserMfa
+```
+
+Without the switch, those users surface as `Moderate` with an instruction to go and check a portal by hand. Across an estate that is one manual check per tenant that does not happen, and a tenant still running on legacy per-user MFA assesses as unremarkable.
+
+**It needs no extra access.** The state is readable at `GET /beta/users/{id}/authentication/requirements` with `Policy.Read.All` — which every run already requests — and Global Reader is a supported role. The switch is off by default because the endpoint is beta, not because it costs you permission. The cost is one batched Graph call per twenty users.
+
+What changes when it is on:
+
+| | Without the switch | With it |
+|---|---|---|
+| `PerUserMfaState` | `(not checked)` on every row | `disabled`, `enabled`, `enforced`, or `(unreadable)` |
+| A user held in legacy MFA | `Moderate`, "go and check a portal" | The band their real exposure earns, up to `Critical`, with a next step that starts by converting them to the modern policy |
+| A `Moderate` user who is genuinely clear | Indistinguishable from the above | Confirmed stale registration, no portal visit |
+| Summary | — | `LegacyPerUserMfaChecked`, `LegacyPerUserMfaInForce`, `LegacyPerUserMfaUnreadable` |
+
+**Not knowing never looks like knowing.** A denied read, a request Graph left unanswered, and a `200` with no state in the body all land as `(unreadable)`, counted in `LegacyPerUserMfaUnreadable`. None of them is ever treated as "no legacy MFA", because that reading is indistinguishable from a genuine all-clear and it is exactly the one that leaves somebody locked out with a clean report on file. A throttled request inside a batch — which returns `200` at the envelope level, so nothing above would retry it — is retried across rounds before being given up on.
+
+A non-zero `LegacyPerUserMfaInForce` is also an MFA enforcement finding in its own right: per-user MFA sitting underneath a Conditional Access policy has its own trusted-IP bypass and its own remembered-device setting, neither of which Conditional Access knows about. See [docs/MFA-Enforcement.md](docs/MFA-Enforcement.md).
 
 ## Who actually gets stopped
 
@@ -493,6 +550,7 @@ Summarised here; full logic and remediation guidance in [docs/Risk-Classificatio
 | **Moderate** | Phone method registered, no passwordless method, but outside resolved modern policy scope — usually legacy per-user MFA exposure |
 | **Low** | Exposed to the change but already passwordless-capable |
 | **Informational** | No resolved exposure |
+| **Excluded** | Not a risk level. The user matched `-ExcludeUpnPattern` and was left out of every count. |
 
 ---
 
@@ -511,7 +569,7 @@ The claim is "every user in the tenant who is exposed." Here is exactly what tha
 | Population | Why | What to do |
 |---|---|---|
 | Disabled users | `userRegistrationDetails` does not return them | Re-run after any bulk re-enablement |
-| Users enabled for SMS/voice only via legacy per-user MFA | Requires beta endpoints and broader scopes; would break the least-privilege model | The `Moderate` band surfaces the symptom. Validate that population in the legacy MFA settings portal. |
+| Users enabled for SMS/voice only via legacy per-user MFA | Only readable on a beta endpoint, so it is behind a switch rather than on by default | Run with `-IncludeLegacyPerUserMfa`. Without it the `Moderate` band surfaces the symptom and nothing confirms it. |
 | Effective Conditional Access outcome | Not read | Policy scope is not the same as being challenged at sign-in |
 | Non-human accounts | Shared mailboxes, sync accounts, and service accounts appear as ordinary users | Filter by your naming convention or exclude them from the remediation group after review |
 
@@ -524,8 +582,8 @@ These are properties of the data sources, not defects. Read them before presenti
 - **Disabled users are excluded.** `userRegistrationDetails` does not return disabled users. The script reads `accountEnabled` separately and assesses enabled users only. Disabled accounts that get re-enabled after the assessment are not represented.
 - **Reporting latency.** The registration report is not real-time. `OldestReportRowUtc` in the summary is the age of the oldest row behind the assessment, so the confidence in a run is visible. Do not treat a run as a live directory query.
 - **SMS and voice are not separately registered.** Entra stores a phone number with a type, not an "SMS registration" and a "voice registration." `mobilePhone` can satisfy both; `officePhone` is voice-only. There is no clean per-user SMS-versus-voice split available, so the script reports phone-method capability and leaves policy scope to distinguish intent.
-- **Legacy per-user MFA is not read.** Users enabled for SMS or voice through legacy per-user MFA service settings are also in scope for the retirement, but that state is not exposed through the read-only Graph v1.0 surface this script uses. Reading it requires beta endpoints and broader scopes, which would break the least-privilege model. `Moderate` findings are the signal that this exposure likely exists; validate them manually in the legacy MFA service settings portal.
-- **Conditional Access is not evaluated.** A user may be in AMP scope but never actually challenged, or may be blocked by a Conditional Access grant this script does not read. Policy scope is not the same as effective sign-in behaviour.
+- **Legacy per-user MFA is read only when asked for.** Users enabled for SMS or voice through legacy per-user MFA service settings are in scope for the retirement, and that state has no Graph v1.0 equivalent -- it exists only at `/beta/users/{id}/authentication/requirements`. `-IncludeLegacyPerUserMfa` reads it; without the switch, `PerUserMfaState` reads `(not checked)` on every row and the exposure is unassessed. The permission is the `Policy.Read.All` the script already requests, so the switch is off by default because the endpoint is beta, not because it needs more access.
+- **Conditional Access is not evaluated.** A user may be in AMP scope but never actually challenged, or may be blocked by a Conditional Access grant this script does not read. Policy scope is not the same as effective sign-in behaviour. It is also not the same as MFA being enforced at all -- see [docs/MFA-Enforcement.md](docs/MFA-Enforcement.md) for the ten common reasons a tenant with a Require-MFA policy is not actually requiring MFA.
 - **Guest and B2B readiness.** Guests are assessed, but passkey support for B2B and internal guest users is on a separate Microsoft timeline. Treat guest findings as requiring independent validation.
 - **Nested groups are resolved transitively; dynamic groups are point-in-time.** A dynamic group's membership can change between the assessment and September 1.
 

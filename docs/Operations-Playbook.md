@@ -14,8 +14,9 @@ Before optimising anything, it is worth being honest about the cost distribution
 |---|---|---|
 | Getting app-only auth consented in each tenant | **Days to weeks**, one time | No. This is a write and a customer conversation. |
 | Running the assessment | Minutes per tenant, parallelisable | Yes, this is what it does |
-| Reviewing candidates and filtering non-human accounts | Hours, first run; minutes after | Partly, see [Service accounts](#service-accounts-and-shared-mailboxes) |
-| Validating legacy per-user MFA | Hours, manual, per tenant | No. Not readable at this permission level. |
+| Reviewing candidates and filtering non-human accounts | Hours, first run; a parameter after | Yes, once you know the convention: [Service accounts](#service-accounts-and-shared-mailboxes) |
+| Validating legacy per-user MFA | Was hours, manual, per tenant; now a switch | Yes, `-IncludeLegacyPerUserMfa` |
+| Confirming MFA is actually enforced at all | Hours per tenant, manual | No. Checklist in [MFA-Enforcement.md](MFA-Enforcement.md) |
 | Creating remediation groups and campaigns | Minutes per tenant | Produces the list; the group is a write you make |
 | Client communications | Hours per client | No |
 | Tracking progress across re-runs | Was hours; now minutes | Yes, `Compare-EntraSmsVoiceAssessment.ps1` |
@@ -184,11 +185,30 @@ The file holds object IDs and risk bands only, so it carries no identifying data
 
 ### Legacy per-user MFA
 
-Users enabled for SMS or voice through legacy per-user MFA service settings are in scope for the retirement and are **not readable** through the Graph surface this tool uses. Reading them needs beta endpoints and broader permissions, which would break the least-privilege model that makes the tool safe to run unattended across an estate.
+Users enabled for SMS or voice through legacy per-user MFA service settings are in scope for the retirement, and the modern authentication methods policy says nothing about them. This used to be a manual check per tenant. It is now `-IncludeLegacyPerUserMfa`:
 
-A large `Moderate` count is the signal. Budget a manual check per tenant in the legacy MFA portal, once, early. A tenant with a high Moderate count and SMS disabled in the modern policy is the classic legacy-MFA shape.
+```powershell
+.\Invoke-EntraSmsVoiceSweep.ps1 -TenantListPath .\tenants.csv `
+    -ReportRoot "D:\ClientEvidence\EntraMigration\$stamp" `
+    -ClientId <app-id> -CertificateThumbprint <thumbprint> `
+    -ThrottleLimit 6 -IncludeLegacyPerUserMfa
+```
 
-Do not report a zero-candidate tenant as finished until this check is done.
+It needs no permission beyond the `Policy.Read.All` every run already uses, and costs one batched Graph call per twenty users. It is off by default only because it reads a beta endpoint — the state has no v1.0 equivalent.
+
+**Set it on the baseline sweep at minimum.** Without it a tenant still running on legacy per-user MFA assesses as unremarkable: its exposed users land in `Moderate` with an instruction to go and check a portal, which across ninety tenants is ninety manual checks that do not happen.
+
+Three numbers in the summary:
+
+| Field | Read it as |
+|---|---|
+| `LegacyPerUserMfaChecked` | False means the tenant has an unassessed exposure, whatever else the report says. |
+| `LegacyPerUserMfaInForce` | Users `enabled` or `enforced` there. These are in scope for the retirement regardless of the modern policy, **and the registration campaign will not reach them** until they are converted to it. |
+| `LegacyPerUserMfaUnreadable` | Graph would not answer. Marked `(unreadable)`, never assumed clean. Anything above zero means re-run before calling the tenant assessed. |
+
+A non-zero `LegacyPerUserMfaInForce` is not just a migration finding, it is an MFA enforcement finding: per-user MFA sitting underneath a Conditional Access policy is its own problem. See [MFA-Enforcement.md](MFA-Enforcement.md).
+
+Do not report a zero-candidate tenant as finished until this has been read and come back clean.
 
 ### Reporting latency
 
@@ -217,16 +237,16 @@ Gaps worth knowing about, roughly in order of how much time each would save an e
 
 | Idea | Why it would help |
 |---|---|
-| `-ExcludeUpnPattern` parameter | Every operator writes the same `Where-Object` filter for service accounts. Making it a parameter puts it in the ticket and action-list paths too, not just the pipeline. |
 | Estate-wide HTML report | Reports are per-tenant today. A single roll-up ranking customers by Critical count is what an account manager actually wants. |
-| Legacy per-user MFA read behind an explicit opt-in switch | Would close the largest coverage gap, at the cost of beta endpoints and broader scopes. Opt-in keeps the least-privilege default intact. |
 | Trend series rather than pairwise diff | The diff compares two runs. Ten runs plotted would show whether a campaign is decelerating, which is the thing you want to catch early. |
+| Reading Conditional Access policies | The largest remaining gap, and it is not a small feature: evaluating whether a policy set actually enforces MFA means modelling grant-control combinations, exclusion groups, and workload identities. Manual checklist in [MFA-Enforcement.md](MFA-Enforcement.md) until then. |
 
 ---
 
 ## Related
 
 - [README](../README.md) — installation, parameters, output schema
+- [MFA-Enforcement.md](MFA-Enforcement.md) — why a Conditional Access policy is not the same as MFA being enforced
 - [Risk-Classification.md](Risk-Classification.md) — how the five bands are derived
 - [Microsoft-Migration-Background.md](Microsoft-Migration-Background.md) — the timeline and framework mapping
 - [SECURITY.md](../SECURITY.md) — handling exports
