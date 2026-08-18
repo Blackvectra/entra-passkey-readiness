@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+- **`DaysSinceLastSignIn`**, on the assessment CSV and the action list. The first question a technician asks about a name on a work queue is whether it is a person or an account a leaver process missed, and the report had no answer. Read from `signInActivity` using the `AuditLog.Read.All` the script already requests. Two constraints come with it, both handled: selecting it caps the page size at 500 rather than 999, and it needs Entra ID P1/P2 — a tenant without that licensing falls back to the plain query and every row reads `(not available)` rather than losing the run. `(none recorded)` rather than `(never)`, because Microsoft keeps interactive sign-in history only back to April 2020 and the column should not assert the stronger claim.
+
+  The action list now sorts recently-active first within a band, and `StaleAccountsInActionList` / `NeverSignedInInActionList` say how much of the queue is probably not a person before anybody starts chasing names.
+
+- **`-ExportFixScript`**, which writes a `..._Remediation.ps1` of commands to review and run by hand. The assessment still writes nothing to any tenant: this produces a file, and the file opens with a `throw` so running it unread does nothing. Every Graph call in it is commented out.
+
+  The central remediation cannot be automated by anyone — no API registers a passkey on somebody's behalf, because registration needs the user present. What the script encodes is the order: issue a Temporary Access Pass so they can register **without** the phone they are about to lose, let them register, verify the new method, and only then remove the phone. That last line is commented and last, because doing it first is precisely the lockout this tool exists to prevent. Stale and legacy-per-user-MFA accounts are called out in their block as different tickets.
+
+### Fixed
+- **The action list sorted wrongly for anyone who piped an exported CSV back in.** `[bool]$_.BlockedAtRetirement` is `$true` for the *string* `'False'`, because a non-empty string is truthy — so the blocked-users-first sort worked on in-memory rows and silently did nothing on imported ones. Whoever opened that file worked the queue in the wrong order with no way to tell. Both boolean sort keys and the sign-in-age key now parse rather than cast, and a test asserts the two paths agree.
+
 ### Changed
 - **The legacy per-user MFA read is now on by default**, and `-SkipLegacyPerUserMfa` opts out. It was opt-in, and a run against a real 264-user tenant showed what opt-in produced: an action list of nine users where every row was `Moderate`, every phone method was `mobilePhone`, and every `NextStep` was the same sentence telling the technician to go and check a portal by hand. Nine rows of homework is not an action list, and only two of those nine were people who actually lose their sign-in.
 

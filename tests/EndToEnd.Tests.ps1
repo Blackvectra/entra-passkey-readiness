@@ -85,15 +85,21 @@ function Invoke-MgGraphRequest {
     }
 
     if ($Uri -match '/users\?') {
+        # Relative to the run, so the fixture does not rot. u-svc has not been touched in
+        # over a year (a missed leaver, or a service account nobody signs into) and
+        # u-legacy never has; everybody else signed in this week.
+        $recent = (Get-Date).ToUniversalTime().AddDays(-2).ToString('o')
+        $stale  = (Get-Date).ToUniversalTime().AddDays(-400).ToString('o')
+        $act = { param($when) if ($when) { [PSCustomObject]@{ lastSuccessfulSignInDateTime = $when } } else { $null } }
         return [PSCustomObject]@{ value = @(
-            [PSCustomObject]@{ id='u-admin';  displayName='Dale Hendricks'; userPrincipalName='dale@fabrikam-example.com';  userType='Member'; accountEnabled=$true }
-            [PSCustomObject]@{ id='u-member'; displayName='Marcus Whitfield'; userPrincipalName='marcus@fabrikam-example.com'; userType='Member'; accountEnabled=$true }
-            [PSCustomObject]@{ id='u-safe';   displayName='Nadia Ferreira'; userPrincipalName='nadia@fabrikam-example.com';  userType='Member'; accountEnabled=$true }
-            [PSCustomObject]@{ id='u-noreport'; displayName='Ghost Account'; userPrincipalName='ghost@fabrikam-example.com'; userType='Member'; accountEnabled=$true }
-            [PSCustomObject]@{ id='u-legacy'; displayName='Rosalind Achebe'; userPrincipalName='rosalind@fabrikam-example.com'; userType='Member'; accountEnabled=$true }
-            [PSCustomObject]@{ id='u-clear';  displayName='Out Of Scope'; userPrincipalName='clear@fabrikam-example.com';  userType='Member'; accountEnabled=$true }
-            [PSCustomObject]@{ id='u-svc';    displayName='Service Account - Scanner'; userPrincipalName='svc-scanner@fabrikam-example.com'; userType='Member'; accountEnabled=$true }
-            [PSCustomObject]@{ id='u-fine';   displayName='Perfectly Fine'; userPrincipalName='fine@fabrikam-example.com'; userType='Member'; accountEnabled=$true }
+            [PSCustomObject]@{ id='u-admin'; signInActivity=(& $act $recent);  displayName='Dale Hendricks'; userPrincipalName='dale@fabrikam-example.com';  userType='Member'; accountEnabled=$true }
+            [PSCustomObject]@{ id='u-member'; signInActivity=(& $act $recent); displayName='Marcus Whitfield'; userPrincipalName='marcus@fabrikam-example.com'; userType='Member'; accountEnabled=$true }
+            [PSCustomObject]@{ id='u-safe'; signInActivity=(& $act $recent);   displayName='Nadia Ferreira'; userPrincipalName='nadia@fabrikam-example.com';  userType='Member'; accountEnabled=$true }
+            [PSCustomObject]@{ id='u-noreport'; signInActivity=(& $act $recent); displayName='Ghost Account'; userPrincipalName='ghost@fabrikam-example.com'; userType='Member'; accountEnabled=$true }
+            [PSCustomObject]@{ id='u-legacy'; displayName='Rosalind Achebe'; userPrincipalName='rosalind@fabrikam-example.com'; userType='Member'; accountEnabled=$true; signInActivity=(& $act $null) }
+            [PSCustomObject]@{ id='u-clear'; signInActivity=(& $act $recent);  displayName='Out Of Scope'; userPrincipalName='clear@fabrikam-example.com';  userType='Member'; accountEnabled=$true }
+            [PSCustomObject]@{ id='u-svc';    displayName='Service Account - Scanner'; userPrincipalName='svc-scanner@fabrikam-example.com'; userType='Member'; accountEnabled=$true; signInActivity=(& $act $stale) }
+            [PSCustomObject]@{ id='u-fine'; signInActivity=(& $act $recent);   displayName='Perfectly Fine'; userPrincipalName='fine@fabrikam-example.com'; userType='Member'; accountEnabled=$true }
             [PSCustomObject]@{ id='u-off';    displayName='Disabled Person'; userPrincipalName='off@fabrikam-example.com';   userType='Member'; accountEnabled=$false }
         )}
     }
@@ -213,13 +219,44 @@ Describe 'A default run against a stubbed tenant' {
         (Join-Path $script:OutDir 'assessment.html') | Should -Not -Exist
     }
 
-    It 'writes the trimmed fifteen-column schema' {
+    It 'writes the trimmed sixteen-column schema' {
         $columns = (Import-Csv -LiteralPath $script:CsvPath)[0].PSObject.Properties.Name
         $columns | Should -Be @(
             'Risk', 'Reason', 'NextStep', 'BlockedAtRetirement', 'DisplayName', 'UserPrincipalName',
             'UserType', 'IsAdmin', 'InSmsPolicyScope', 'InVoicePolicyScope', 'PerUserMfaState',
-            'PhoneMethodsRegistered', 'AllMethodsRegistered', 'IsPasswordlessCapable', 'UserId'
+            'DaysSinceLastSignIn', 'PhoneMethodsRegistered', 'AllMethodsRegistered',
+            'IsPasswordlessCapable', 'UserId'
         )
+    }
+
+    It 'reports how long ago each account was actually used' {
+        # The question a technician asks first about a name on a work queue: is this a
+        # person, or an account a leaver process missed. Never blank -- an empty cell in a
+        # column called DaysSinceLastSignIn reads as zero, which is the opposite of no data.
+        $rows = @(Import-Csv -LiteralPath $script:CsvPath)
+
+        $svc = $rows | Where-Object UserPrincipalName -eq 'svc-scanner@fabrikam-example.com'
+        [int]$svc.DaysSinceLastSignIn | Should -BeGreaterThan 365
+
+        $rosalind = $rows | Where-Object UserPrincipalName -eq 'rosalind@fabrikam-example.com'
+        $rosalind.DaysSinceLastSignIn | Should -Be '(none recorded)'
+
+        $dale = $rows | Where-Object UserPrincipalName -eq 'dale@fabrikam-example.com'
+        [int]$dale.DaysSinceLastSignIn | Should -BeLessThan 7
+
+        foreach ($row in $rows) { $row.DaysSinceLastSignIn | Should -Not -BeNullOrEmpty }
+    }
+
+    It 'counts how much of the action list is probably not a person' {
+        # svc-scanner is 400 days idle and Rosalind has never signed in; both are on the
+        # action list, so a nine-name queue can really be a two-name queue.
+        $script:Summary.StaleAccountsInActionList | Should -Be 1
+        $script:Summary.NeverSignedInInActionList | Should -Be 1
+    }
+
+    It 'puts the staleness signal in the action list a technician opens' {
+        $actionList = @(Import-Csv -LiteralPath (Join-Path $script:OutDir 'assessment_ActionList.csv'))
+        $actionList[0].PSObject.Properties.Name | Should -Contain 'DaysSinceLastSignIn'
     }
 
     It 'reads legacy per-user MFA without being asked, because that is now the default' {

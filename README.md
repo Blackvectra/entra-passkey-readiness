@@ -69,7 +69,8 @@ Passing a sign-in name — `-TenantId administrator@contoso.org` — is the obvi
 - [Usage](#usage) — single tenant, estate sweeps, progress tracking, reports, tickets
 - [Output](#output) — console summary and CSV schema
 - [Service accounts](#service-accounts-and-shared-mailboxes) — keeping non-human accounts out of the work queue
-- [Legacy per-user MFA](#legacy-per-user-mfa) — the one exposure the default run cannot see
+- [Legacy per-user MFA](#legacy-per-user-mfa) — the one exposure that needs a beta endpoint
+- [Fixing what it finds](#fixing-what-it-finds) — a reviewed script, never an automatic write
 - [Who actually gets stopped](#who-actually-gets-stopped) — the lockout population, which is not the same as the risk bands
 - [Risk classifications](#risk-classifications) — the five bands
 - [Coverage](#coverage-who-this-actually-finds) — exactly who this finds, and who it does not
@@ -395,6 +396,7 @@ The sweep does this for you: history lives in the per-tenant folder rather than 
 | `-CertificateThumbprint` | string | none | Certificate thumbprint for app-only auth. |
 | `-OutputPath` | string | timestamped CSV beside the script, with `-CustomerName` folded in | Destination CSV path. The report and action list are named from it. Parent directory is created if missing. |
 | `-IncludeUnaffected` | switch | off | Include every enabled user, not just migration candidates. |
+| `-ExportFixScript` | switch | off | Also writes a `..._Remediation.ps1` of commands for you to review and run yourself. The assessment still writes nothing to any tenant, and the generated file refuses to run until you read it. See [Fixing what it finds](#fixing-what-it-finds). |
 | `-SkipLegacyPerUserMfa` | switch | off | **Skips** the legacy per-user MFA read, which every run otherwise performs. Only worth setting to avoid the beta endpoint entirely; it costs you the assessment's one real blind spot. See [Legacy per-user MFA](#legacy-per-user-mfa). |
 | `-ExcludeUpnPattern` | string[] | none | Regex patterns matched against the UPN. Matching users are marked `Excluded` and left out of every count and work queue. See [Service accounts](#service-accounts-and-shared-mailboxes). |
 | `-HtmlReport` | switch | off | Also write a self-contained HTML client report beside the CSVs. |
@@ -455,6 +457,7 @@ Accepts and passes through `-IncludeUnaffected`, `-SkipLegacyPerUserMfa`, `-Excl
 | `BlockedAtRetirement` | **Users stopped at sign-in on 2027-02-01.** A phone is their only method that satisfies MFA. The number to drive to zero. |
 | `BlockedAdminsAtRetirement` | How many of those hold a privileged role |
 | `UnrecognisedMethods` | Any registered method name this tool does not classify. Treated as not surviving, so affected users read as more exposed. |
+| `StaleAccountsInActionList` / `NeverSignedInInActionList` | How much of the work queue is probably not a person. Check these against your leaver process before anybody starts chasing names. |
 | `UsersMissingFromReport` | Enabled users with no row in the registration report (see Limitations) |
 | `OldestReportRowUtc` | Age of the oldest registration-report row; the honest confidence marker for the run |
 
@@ -472,13 +475,14 @@ Accepts and passes through `-IncludeUnaffected`, `-SkipLegacyPerUserMfa`, `-Excl
 | `IsAdmin` | bool | Reported by the registration report as holding a privileged role. |
 | `InSmsPolicyScope` | bool | Resolved into the SMS method's AMP scope after exclusions. |
 | `InVoicePolicyScope` | bool | Resolved into the voice method's AMP scope after exclusions. |
+| `DaysSinceLastSignIn` | int or marker | Whole days since the last successful sign-in. `(none recorded)` means never, or not since April 2020 -- Microsoft keeps no history before then. `(not available)` means the tenant is not licensed to report sign-in activity (Entra ID P1/P2). **A name on a work queue that has not signed in for a year is a deprovisioning ticket, not a passkey one.** |
 | `PerUserMfaState` | string | `disabled`, `enabled`, or `enforced` from legacy per-user MFA; `(not checked)` if `-SkipLegacyPerUserMfa` was set; `(unreadable)` if Graph would not answer. Always written, so the column never appears and disappears between runs. |
 | `PhoneMethodsRegistered` | string | Semicolon-delimited subset: `mobilePhone`, `alternateMobilePhone`, `officePhone`, `smsSignIn`. |
 | `AllMethodsRegistered` | string | Every method reported for the user, or `(no row in registration report)` when the report had no data for them. |
 | `IsPasswordlessCapable` | bool | Reports a passwordless method. This is the mitigating control. |
 | `UserId` | guid | Object ID. Kept last because it is a join key, not something you read. |
 
-Fifteen columns, sorted highest risk first, then admins ahead of standard users, then display name.
+Sixteen columns, sorted highest risk first, then admins ahead of standard users, then display name.
 
 The registration report also returns `isMfaCapable`, `isMfaRegistered`, `systemPreferredAuthenticationMethods`, and a per-row timestamp. None of them changed what anybody did with the file, so they are not written. Evidence age is still reported once, as `OldestReportRowUtc` in the summary, and a user with no report row is called out in `AllMethodsRegistered` rather than needing a column of its own.
 
@@ -529,6 +533,25 @@ What changes when it is on:
 **Not knowing never looks like knowing.** A denied read, a request Graph left unanswered, and a `200` with no state in the body all land as `(unreadable)`, counted in `LegacyPerUserMfaUnreadable`. None of them is ever treated as "no legacy MFA", because that reading is indistinguishable from a genuine all-clear and it is exactly the one that leaves somebody locked out with a clean report on file. A throttled request inside a batch — which returns `200` at the envelope level, so nothing above would retry it — is retried across rounds before being given up on.
 
 A non-zero `LegacyPerUserMfaInForce` is also an MFA enforcement finding in its own right: per-user MFA sitting underneath a Conditional Access policy has its own trusted-IP bypass and its own remembered-device setting, neither of which Conditional Access knows about. See [docs/MFA-Enforcement.md](docs/MFA-Enforcement.md).
+
+## Fixing what it finds
+
+The assessment writes nothing to any tenant, and that does not change. What `-ExportFixScript` adds is a **file**:
+
+```powershell
+.\Get-EntraSmsVoiceMigrationImpact.ps1 -TenantId contoso.org -ExportFixScript
+```
+
+You get `..._Remediation.ps1` beside the CSVs: one commented block per actionable user, with the exact Graph calls. Nothing in it has run, and it opens with a `throw` so running it unread does nothing at all. Every command that would change the tenant is commented out.
+
+**The central remediation cannot be automated, by anyone.** There is no Graph call that registers a passkey on somebody's behalf — registration requires the user present with their device. That is the point of a passkey. What the script automates is the supporting cast, and the order is the whole value:
+
+1. **Issue a Temporary Access Pass.** This is what lets somebody register a passkey *without* the phone they are about to lose. Skip it and you strand exactly the people you were trying to help.
+2. **The user registers.** A human step. The script says so and stops.
+3. **Verify the new method exists.**
+4. **Only then remove the phone method.** This line is commented out and it is last, because removing a phone before a replacement is confirmed working is precisely the lockout this whole tool exists to prevent.
+
+The commands need `UserAuthenticationMethod.ReadWrite.All` and `Policy.ReadWrite.AuthenticationMethod` — write permissions, well beyond the read-only set the assessment ran with. That escalation is yours to make deliberately.
 
 ## Who actually gets stopped
 

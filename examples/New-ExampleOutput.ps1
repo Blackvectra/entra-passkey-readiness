@@ -41,6 +41,8 @@ $examplesDir = $PSScriptRoot
         'ConvertTo-SafeHtml'
         'Get-ExecutiveSummary'
         'New-HtmlReport'
+        'Test-RowFlag'
+        'Get-SignInAgeSortKey'
         'New-ActionList'
         'Get-TicketNextStep'
         'Test-NeedsTicket'
@@ -73,53 +75,53 @@ $survivingMfaMethods = @(
 $directory = @(
     @{ Name = 'Dale Hendricks'; Upn = 'dale.hendricks@fabrikam-example.com'
         Type = 'Member'; IsAdmin = $true; Sms = $true; Voice = $true
-        Methods = @('mobilePhone', 'email'); Passwordless = $false; LegacyMfa = 'disabled' }
+        Methods = @('mobilePhone', 'email'); Passwordless = $false; LegacyMfa = 'disabled'; SignInAge = 4 }
 
     @{ Name = 'Priya Raghunathan'; Upn = 'priya.raghunathan@fabrikam-example.com'
         Type = 'Member'; IsAdmin = $true; Sms = $true; Voice = $false
-        Methods = @('mobilePhone', 'officePhone'); Passwordless = $false; LegacyMfa = 'disabled' }
+        Methods = @('mobilePhone', 'officePhone'); Passwordless = $false; LegacyMfa = 'disabled'; SignInAge = 4 }
 
     # In neither modern policy scope. Without the legacy read she is Moderate and the
     # instruction is "go and check a portal"; with it she is High and actually actionable.
     @{ Name = 'Rosalind Achebe'; Upn = 'rosalind.achebe@fabrikam-example.com'
         Type = 'Member'; IsAdmin = $false; Sms = $false; Voice = $false
-        Methods = @('officePhone', 'email'); Passwordless = $false; LegacyMfa = 'enforced' }
+        Methods = @('officePhone', 'email'); Passwordless = $false; LegacyMfa = 'enforced'; SignInAge = '(none recorded)' }
 
     @{ Name = 'Marcus Whitfield'; Upn = 'marcus.whitfield@fabrikam-example.com'
         Type = 'Member'; IsAdmin = $false; Sms = $true; Voice = $true
-        Methods = @('mobilePhone'); Passwordless = $false; LegacyMfa = 'disabled' }
+        Methods = @('mobilePhone'); Passwordless = $false; LegacyMfa = 'disabled'; SignInAge = 4 }
 
     @{ Name = 'Ingrid Solberg'; Upn = 'ingrid.solberg_northwind-example.com#EXT#@fabrikam-example.onmicrosoft.com'
         Type = 'Guest'; IsAdmin = $false; Sms = $true; Voice = $false
-        Methods = @('mobilePhone'); Passwordless = $false; LegacyMfa = 'disabled' }
+        Methods = @('mobilePhone'); Passwordless = $false; LegacyMfa = 'disabled'; SignInAge = 4 }
 
     # In scope, no phone method, and a surviving method that is not passwordless. High, and
     # not stopped at sign-in: the pair of facts the BlockedAtRetirement column exists to keep apart.
     @{ Name = 'Tobias Lindqvist'; Upn = 'tobias.lindqvist@fabrikam-example.com'
         Type = 'Member'; IsAdmin = $false; Sms = $true; Voice = $true
-        Methods = @('softwareOneTimePasscode'); Passwordless = $false; LegacyMfa = 'disabled' }
+        Methods = @('softwareOneTimePasscode'); Passwordless = $false; LegacyMfa = 'disabled'; SignInAge = 4 }
 
     # The other half of the Moderate band: a phone registration with the legacy state read
     # and found disabled, so it is stale rather than a live sign-in path.
     @{ Name = 'Sofia Marchetti'; Upn = 'sofia.marchetti@fabrikam-example.com'
         Type = 'Member'; IsAdmin = $false; Sms = $false; Voice = $false
-        Methods = @('mobilePhone'); Passwordless = $false; LegacyMfa = 'disabled' }
+        Methods = @('mobilePhone'); Passwordless = $false; LegacyMfa = 'disabled'; SignInAge = 4 }
 
     @{ Name = 'Service Account - Scanner'; Upn = 'svc-scanner@fabrikam-example.com'
         Type = 'Member'; IsAdmin = $false; Sms = $false; Voice = $false
-        Methods = @('alternateMobilePhone'); Passwordless = $false; LegacyMfa = '(unreadable)' }
+        Methods = @('alternateMobilePhone'); Passwordless = $false; LegacyMfa = '(unreadable)'; SignInAge = 412 }
 
     @{ Name = 'Nadia Ferreira'; Upn = 'nadia.ferreira@fabrikam-example.com'
         Type = 'Member'; IsAdmin = $true; Sms = $true; Voice = $true
-        Methods = @('passKeyDeviceBound', 'microsoftAuthenticatorPush'); Passwordless = $true; LegacyMfa = 'disabled' }
+        Methods = @('passKeyDeviceBound', 'microsoftAuthenticatorPush'); Passwordless = $true; LegacyMfa = 'disabled'; SignInAge = 4 }
 
     @{ Name = 'Emeka Osondu'; Upn = 'emeka.osondu@fabrikam-example.com'
         Type = 'Member'; IsAdmin = $false; Sms = $false; Voice = $false
-        Methods = @('mobilePhone', 'windowsHelloForBusiness'); Passwordless = $true; LegacyMfa = 'disabled' }
+        Methods = @('mobilePhone', 'windowsHelloForBusiness'); Passwordless = $true; LegacyMfa = 'disabled'; SignInAge = 4 }
 
     @{ Name = 'Break Glass 01'; Upn = 'breakglass01@fabrikam-example.onmicrosoft.com'
         Type = 'Member'; IsAdmin = $true; Sms = $true; Voice = $false
-        Methods = @('fido2SecurityKey'); Passwordless = $true; LegacyMfa = 'disabled' }
+        Methods = @('fido2SecurityKey'); Passwordless = $true; LegacyMfa = 'disabled'; SignInAge = 4 }
 )
 
 $index = 0
@@ -147,6 +149,7 @@ $rows = foreach ($person in $directory) {
         InSmsPolicyScope       = $person.Sms
         InVoicePolicyScope     = $person.Voice
         PerUserMfaState        = $person.LegacyMfa
+        DaysSinceLastSignIn    = $person.SignInAge
         PhoneMethodsRegistered = $phoneList
         AllMethodsRegistered   = ($person.Methods -join '; ')
         IsPasswordlessCapable  = $person.Passwordless

@@ -9,7 +9,7 @@
 
 BeforeAll {
     . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
-    . (Import-ScriptFunction -Path (Get-AssessmentScriptPath) -Name @('Get-PropertyValue', 'New-ActionList'))
+    . (Import-ScriptFunction -Path (Get-AssessmentScriptPath) -Name @('Get-PropertyValue', 'Test-RowFlag', 'Get-SignInAgeSortKey', 'New-ActionList'))
 
     $script:ExamplesDir = Join-Path (Split-Path -Parent $PSScriptRoot) 'examples'
 
@@ -38,7 +38,7 @@ Describe 'Example-MigrationImpact.csv' {
         # The registration report offers more fields than this. They were dropped because
         # none of them changed what anybody did with the file.
         $columns = $script:Assessment[0].PSObject.Properties.Name
-        $columns.Count | Should -BeLessOrEqual 15
+        $columns.Count | Should -BeLessOrEqual 16
         $columns | Should -Not -Contain 'IsMfaCapable'
         $columns | Should -Not -Contain 'SystemPreferredMethods'
         $columns | Should -Not -Contain 'RegistrationReportLastUpdatedUtc'
@@ -93,8 +93,9 @@ Describe 'Example-ActionList.csv' {
 
     It 'exposes the columns a technician needs and none of the diagnostic ones' {
         $script:ActionList[0].PSObject.Properties.Name | Should -Be @(
-            'Risk', 'BlockedAtRetirement', 'DisplayName', 'UserPrincipalName', 'IsAdmin',
-            'PhoneMethodsRegistered', 'IsPasswordlessCapable', 'NextStep', 'UserId'
+            'Risk', 'BlockedAtRetirement', 'DaysSinceLastSignIn', 'DisplayName',
+            'UserPrincipalName', 'IsAdmin', 'PhoneMethodsRegistered', 'IsPasswordlessCapable',
+            'NextStep', 'UserId'
         )
     }
 
@@ -298,6 +299,37 @@ Describe 'The samples are reproducible' {
         foreach ($sample in $samples) {
             (Get-FileHash -LiteralPath $sample -Algorithm SHA256).Hash |
                 Should -Be $before[$sample] -Because "$(Split-Path -Leaf $sample) changed with no change to its inputs"
+        }
+    }
+}
+
+Describe 'Rows that have been through a CSV sort the same as rows that have not' {
+
+    # The published action list is generated from in-memory rows; anybody piping an
+    # exported CSV back through New-ActionList is working with strings. Those two paths
+    # produced different orders, because [bool]'False' is $true -- a non-empty string is
+    # truthy -- so the blocked-users-first sort quietly did nothing on imported rows.
+    # Whoever opened that file worked the queue in the wrong order and could not tell.
+
+    It 'treats a string boolean the way the column means it' {
+        Test-RowFlag $true | Should -BeTrue
+        Test-RowFlag 'True' | Should -BeTrue
+        Test-RowFlag $false | Should -BeFalse
+        Test-RowFlag 'False' | Should -BeFalse -Because '[bool] on this string is $true, which is the whole bug'
+        Test-RowFlag $null | Should -BeFalse
+        Test-RowFlag '' | Should -BeFalse
+    }
+
+    It 'puts blocked users first even when the rows came from a file' {
+        $imported = @(Import-Csv -LiteralPath (Join-Path $script:ExamplesDir 'Example-MigrationImpact.csv'))
+        $generated = @(New-ActionList -Rows $imported)
+
+        foreach ($band in @('Critical', 'High', 'Moderate')) {
+            $inBand = @($generated | Where-Object Risk -eq $band)
+            $flags = @($inBand | ForEach-Object { Test-RowFlag $_.BlockedAtRetirement })
+            for ($i = 1; $i -lt $flags.Count; $i++) {
+                if ($flags[$i]) { $flags[$i - 1] | Should -BeTrue -Because "$band is out of order once imported" }
+            }
         }
     }
 }
