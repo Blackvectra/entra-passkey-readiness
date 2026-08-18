@@ -411,6 +411,13 @@ tenant you signed in to, which is the simplest thing to do for a single customer
 }
 
 function Connect-AssessmentGraph {
+    # Reads $TenantId, $ClientId and $CertificateThumbprint straight out of the script's
+    # param block rather than taking them as parameters, and that is deliberate. This is
+    # the script's own connect step: it is called once, from one place, and is meaningless
+    # anywhere else. Every other function that touched ambient state was doing it by
+    # accident and has been given real parameters; tests/RepoHygiene.Tests.ps1 keeps it
+    # that way and names this function as the one allowed exception.
+    #
     # Least-privilege read permissions only. Nothing here grants write access to any object.
     # Delegated: these are requested as scopes.
     # App-only: the same four must be granted as APPLICATION permissions on the app registration.
@@ -1068,7 +1075,13 @@ function New-HtmlReport {
         [Parameter(Mandatory)]$Summary,
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Rows,
         [Parameter(Mandatory)][string]$Path,
-        [string]$Customer
+        [string]$Customer,
+
+        # Taken as a parameter rather than read out of the caller's scope. These file-writing
+        # helpers are lifted into tests and into examples/New-ExampleOutput.ps1, where an
+        # ambient read is a variable nobody can see being consulted -- and static analysis
+        # flags it as dead in the caller, which is how it reached CI twice.
+        [switch]$SkipAclHardening
     )
 
     # The assessment time, not the moment this HTML was written. In a real run they are
@@ -1593,7 +1606,13 @@ function Get-TicketHistory {
 function Save-TicketHistory {
     param(
         [Parameter(Mandatory)][string]$Path,
-        [Parameter(Mandatory)][hashtable]$History
+        [Parameter(Mandatory)][hashtable]$History,
+
+        # Taken as a parameter rather than read out of the caller's scope. These file-writing
+        # helpers are lifted into tests and into examples/New-ExampleOutput.ps1, where an
+        # ambient read is a variable nobody can see being consulted -- and static analysis
+        # flags it as dead in the caller, which is how it reached CI twice.
+        [switch]$SkipAclHardening
     )
 
     $directory = Split-Path -Parent $Path
@@ -1649,7 +1668,10 @@ function New-TicketExport {
 
         # User ids already ticketed by an earlier run, mapped to the risk band they were at
         # when the ticket was raised. Empty for a first run.
-        [AllowEmptyCollection()][hashtable]$History = @{}
+        [AllowEmptyCollection()][hashtable]$History = @{},
+
+        # Forwarded to Export-AssessmentCsv, which writes the ticket file.
+        [switch]$SkipAclHardening
     )
 
     $today = Get-Date
@@ -1853,7 +1875,7 @@ $sample
             -Risk 'Moderate'))
     }
 
-    Export-AssessmentCsv -Data $tickets.ToArray() -Path $Path
+    Export-AssessmentCsv -Data $tickets.ToArray() -Path $Path -SkipAclHardening:$SkipAclHardening
 
     # History carries forward everything it already held plus everyone ticketed this run,
     # so a user who remediates and later regresses is still recognised as previously seen.
@@ -1901,7 +1923,12 @@ function New-RemediationScript {
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Rows,
         [Parameter(Mandatory)][string]$Path,
         [string]$Customer,
-        [Parameter(Mandatory)][string]$GeneratedFrom
+        [Parameter(Mandatory)][string]$GeneratedFrom,
+
+        # Taken as a parameter rather than read out of the caller's scope. Reaching into
+        # ambient state works until something calls this from somewhere else -- a test, the
+        # sample generator -- and then it is a variable nobody can see being read.
+        [switch]$SkipAclHardening
     )
 
     $targets = @($Rows | Where-Object { $_.Risk -in @('Critical', 'High', 'Moderate') })
@@ -2055,7 +2082,13 @@ function Export-AssessmentCsv {
     # ACL hardening cannot be forgotten on a future export.
     param(
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Data,
-        [Parameter(Mandatory)][string]$Path
+        [Parameter(Mandatory)][string]$Path,
+
+        # Taken as a parameter rather than read out of the caller's scope. These file-writing
+        # helpers are lifted into tests and into examples/New-ExampleOutput.ps1, where an
+        # ambient read is a variable nobody can see being consulted -- and static analysis
+        # flags it as dead in the caller, which is how it reached CI twice.
+        [switch]$SkipAclHardening
     )
 
     $Data | Protect-CsvInjection | Export-Csv -LiteralPath $Path -NoTypeInformation -Encoding utf8BOM
@@ -2351,7 +2384,7 @@ if ($outputDirectory -and -not (Test-Path -LiteralPath $outputDirectory)) {
 if ($exportRows.Count -eq 0) {
     Write-Warning 'No migration candidates were found. An empty CSV will be written for evidence retention.'
 }
-Export-AssessmentCsv -Data $exportRows -Path $OutputPath
+Export-AssessmentCsv -Data $exportRows -Path $OutputPath -SkipAclHardening:$SkipAclHardening
 
 # The registration report lags live directory state; the oldest row age is the honest
 # confidence marker for the whole assessment, so it is surfaced in the summary.
@@ -2433,7 +2466,7 @@ $summary = [PSCustomObject][ordered]@{
 $actionListPath = [System.IO.Path]::ChangeExtension($OutputPath, $null).TrimEnd('.') + '_ActionList.csv'
 $actionListRows = New-ActionList -Rows $rows
 
-Export-AssessmentCsv -Data $actionListRows -Path $actionListPath
+Export-AssessmentCsv -Data $actionListRows -Path $actionListPath -SkipAclHardening:$SkipAclHardening
 $summary | Add-Member -NotePropertyName ActionListPath -NotePropertyValue (Resolve-Path -LiteralPath $actionListPath).Path
 Write-Host "Action list ($($actionListRows.Count) users, attach this to a ticket): $actionListPath" -ForegroundColor Green
 
@@ -2442,14 +2475,15 @@ if ($ExportFixScript) {
     # Full rows, not the action list: the action list is deliberately narrow and does not
     # carry PerUserMfaState. The function filters to the actionable bands itself.
     $written = New-RemediationScript -Rows $rows -Path $fixPath -Customer $CustomerName `
-        -GeneratedFrom (Resolve-Path -LiteralPath $OutputPath).Path
+        -GeneratedFrom (Resolve-Path -LiteralPath $OutputPath).Path `
+        -SkipAclHardening:$SkipAclHardening
     $summary | Add-Member -NotePropertyName FixScriptPath -NotePropertyValue $written
     Write-Host "Remediation commands (review before running; nothing has been run): $written" -ForegroundColor Green
 }
 
 if ($HtmlReport) {
     $htmlPath = [System.IO.Path]::ChangeExtension($OutputPath, 'html')
-    $written = New-HtmlReport -Summary $summary -Rows $exportRows -Path $htmlPath -Customer $CustomerName
+    $written = New-HtmlReport -Summary $summary -Rows $exportRows -Path $htmlPath -Customer $CustomerName -SkipAclHardening:$SkipAclHardening
     $summary | Add-Member -NotePropertyName HtmlReportPath -NotePropertyValue (Resolve-Path -LiteralPath $written).Path
     Write-Host "Client report: $written" -ForegroundColor Green
 }
@@ -2465,9 +2499,10 @@ if ($ExportTickets) {
     $history = if ($IgnoreTicketHistory) { @{} } else { Get-TicketHistory -Path $historyPath }
 
     $ticketResult = New-TicketExport -Rows $rows -Path $ticketPath -Customer $CustomerName `
-        -MaxIndividual $MaxIndividualTickets -History $history
+        -MaxIndividual $MaxIndividualTickets -History $history `
+        -SkipAclHardening:$SkipAclHardening
 
-    Save-TicketHistory -Path $historyPath -History $ticketResult.History
+    Save-TicketHistory -Path $historyPath -History $ticketResult.History -SkipAclHardening:$SkipAclHardening
 
     $summary | Add-Member -NotePropertyName TicketExportPath -NotePropertyValue (Resolve-Path -LiteralPath $ticketResult.Path).Path
     $summary | Add-Member -NotePropertyName TicketsGenerated -NotePropertyValue $ticketResult.Count

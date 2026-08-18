@@ -25,7 +25,6 @@ BeforeAll {
 
     $script:SignInAgeNever = '(none recorded)'
     $script:StaleSignInDays = 90
-    $SkipAclHardening = $true
 
     function New-Row {
         param(
@@ -51,7 +50,8 @@ BeforeAll {
     function New-Script {
         param([object[]]$Rows)
         $path = Join-Path ([System.IO.Path]::GetTempPath()) "fix-$(New-Guid).ps1"
-        $null = New-RemediationScript -Rows $Rows -Path $path -Customer 'Fabrikam' -GeneratedFrom 'C:\evidence\x.csv'
+        $null = New-RemediationScript -Rows $Rows -Path $path -Customer 'Fabrikam' `
+            -GeneratedFrom 'C:\evidence\x.csv' -SkipAclHardening
         return (Get-Content -LiteralPath $path -Raw)
     }
 }

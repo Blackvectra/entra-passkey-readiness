@@ -200,27 +200,24 @@ $summary = [PSCustomObject][ordered]@{
 
 $customer = 'Fabrikam Manufacturing'
 
-# Read by Export-AssessmentCsv, which is the script's single choke point for writing a CSV.
-# These samples are invented data that ships in a public repository, so the ACL lockdown a
-# real export gets would be theatre here -- and it is a no-op off Windows in any case.
+# Passed explicitly to every writer below. These samples are invented data that ships in a
+# public repository, so the ACL lockdown a real export gets would be theatre here -- and it
+# is a no-op off Windows in any case.
 #
-# Lifted functions read it out of this scope, which no static analyser can see, so it is
-# stated rather than merely set. Anything reading these files should know they carry none
-# of the protection a real export gets, because they need none.
-$SkipAclHardening = $true
-Write-Verbose "ACL hardening skipped for generated samples: SkipAclHardening=$SkipAclHardening"
+# This used to be an ambient variable the lifted functions read out of this scope, which no
+# static analyser can see and which CI flagged as dead. The writers take a parameter now.
 
 $assessmentPath = Join-Path $examplesDir 'Example-MigrationImpact.csv'
-Export-AssessmentCsv -Data $rows -Path $assessmentPath
+Export-AssessmentCsv -Data $rows -Path $assessmentPath -SkipAclHardening
 
 $actionListPath = Join-Path $examplesDir 'Example-ActionList.csv'
-Export-AssessmentCsv -Data (New-ActionList -Rows $rows) -Path $actionListPath
+Export-AssessmentCsv -Data (New-ActionList -Rows $rows) -Path $actionListPath -SkipAclHardening
 
 $ticketPath = Join-Path $examplesDir 'Example-Tickets.csv'
-$null = New-TicketExport -Rows $rows -Path $ticketPath -Customer $customer -MaxIndividual 50 -History @{}
+$null = New-TicketExport -Rows $rows -Path $ticketPath -Customer $customer -MaxIndividual 50 -History @{} -SkipAclHardening
 
 $reportPath = Join-Path $examplesDir 'Example-Report.html'
-$null = New-HtmlReport -Summary $summary -Rows $rows -Path $reportPath -Customer $customer
+$null = New-HtmlReport -Summary $summary -Rows $rows -Path $reportPath -Customer $customer -SkipAclHardening
 
 Write-Host 'Regenerated:' -ForegroundColor Green
 foreach ($path in @($assessmentPath, $actionListPath, $ticketPath, $reportPath)) {

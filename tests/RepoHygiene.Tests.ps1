@@ -180,3 +180,55 @@ Describe 'Evidence hygiene' {
         $uncovered | Should -BeNullOrEmpty -Because "the evidence check does not cover:`n$($uncovered -join "`n")"
     }
 }
+
+Describe 'Functions do not reach into the script param block' {
+
+    # A function that reads $SkipAclHardening out of ambient scope works when the script
+    # calls it and breaks the moment anything else does -- a test, the sample generator --
+    # because the variable simply is not there. Static analysis cannot see the read either,
+    # so it reports the assignment in the caller as dead code. That combination failed CI
+    # twice before the writers were given real parameters.
+    #
+    # Connect-AssessmentGraph is the one exception, and it is deliberate: it is the script's
+    # own connect step, called once from one place, meaningless anywhere else.
+
+    BeforeAll {
+        $script:AllowedAmbientReaders = @('Connect-AssessmentGraph')
+    }
+
+    It 'takes shared settings as parameters rather than reading them out of scope' {
+        $errors = $null
+        $tokens = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+            (Get-AssessmentScriptPath), [ref]$tokens, [ref]$errors)
+
+        $scriptParams = @($ast.ParamBlock.Parameters.Name.VariablePath.UserPath)
+        $offenders = @()
+
+        foreach ($fn in $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
+            if ($fn.Name -in $script:AllowedAmbientReaders) { continue }
+
+            $declared = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            if ($fn.Body.ParamBlock) {
+                foreach ($p in $fn.Body.ParamBlock.Parameters) { [void]$declared.Add($p.Name.VariablePath.UserPath) }
+            }
+            foreach ($a in $fn.FindAll({ $args[0] -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true)) {
+                if ($a.Left -is [System.Management.Automation.Language.VariableExpressionAst]) {
+                    [void]$declared.Add($a.Left.VariablePath.UserPath)
+                }
+            }
+            foreach ($f in $fn.FindAll({ $args[0] -is [System.Management.Automation.Language.ForEachStatementAst] }, $true)) {
+                [void]$declared.Add($f.Variable.VariablePath.UserPath)
+            }
+
+            $ambient = @($fn.FindAll({ $args[0] -is [System.Management.Automation.Language.VariableExpressionAst] }, $true) |
+                ForEach-Object { $_.VariablePath.UserPath } |
+                Where-Object { $_ -in $scriptParams -and -not $declared.Contains($_) } |
+                Sort-Object -Unique)
+
+            if ($ambient.Count -gt 0) { $offenders += "$($fn.Name) reads $($ambient -join ', ')" }
+        }
+
+        $offenders -join ' | ' | Should -BeNullOrEmpty
+    }
+}
