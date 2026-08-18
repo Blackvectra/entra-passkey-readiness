@@ -533,13 +533,13 @@ Legacy per-user MFA is a separate enforcement layer that predates the Authentica
 .\Get-EntraSmsVoiceMigrationImpact.ps1 -TenantId contoso.onmicrosoft.com
 ```
 
-Without the switch, those users surface as `Moderate` with an instruction to go and check a portal by hand. Across an estate that is one manual check per tenant that does not happen, and a tenant still running on legacy per-user MFA assesses as unremarkable.
+Every run reads this state by default. Opting out with `-SkipLegacyPerUserMfa` leaves those users surfacing as `Moderate` with an instruction to go and check a portal by hand. Across an estate that is one manual check per tenant that does not happen, and a tenant still running on legacy per-user MFA assesses as unremarkable.
 
-**It needs no extra access.** The state is readable at `GET /beta/users/{id}/authentication/requirements` with `Policy.Read.All` — which every run already requests — and Global Reader is a supported role. The switch is off by default because the endpoint is beta, not because it costs you permission. The cost is one batched Graph call per twenty users.
+**It needs no extra access.** The state is readable at `GET /beta/users/{id}/authentication/requirements` with `Policy.Read.All` — which every run already requests — and Global Reader is a supported role. The only reason to skip it is to avoid the beta endpoint entirely, not permission. The cost is one batched Graph call per twenty users.
 
-What changes when it is on:
+What the check changes:
 
-| | Without the switch | With it |
+| | With `-SkipLegacyPerUserMfa` | Default run |
 |---|---|---|
 | `PerUserMfaState` | `(not checked)` on every row | `disabled`, `enabled`, `enforced`, or `(unreadable)` |
 | A user held in legacy MFA | `Moderate`, "go and check a portal" | The band their real exposure earns, up to `Critical`, with a next step that starts by converting them to the modern policy |
