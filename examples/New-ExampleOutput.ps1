@@ -44,12 +44,23 @@ $examplesDir = $PSScriptRoot
         'Test-RowFlag'
         'Get-SignInAgeSortKey'
         'New-ActionList'
+        'Get-ActionListEntry'
+        'Get-FriendlyMethodName'
+        'Get-FriendlySignInAge'
         'Get-TicketNextStep'
         'Test-NeedsTicket'
         'New-TicketExport'
         'Protect-CsvInjection'
         'Export-AssessmentCsv'
     ))
+
+# Get-ActionListEntry and Get-FriendlyMethodName read these script-scope markers; the
+# real script sets them once before any row is built, which this standalone lift never
+# runs far enough to reach.
+$script:NoReportRowMarker = '(no row in registration report)'
+$script:SignInAgeNever = '(none recorded)'
+$script:SignInAgeUnavailable = '(not available)'
+$script:StaleSignInDays = 90
 
 # Kept in step with the script's own lists. Only used here to derive BlockedAtRetirement.
 $phoneMethods = @(
@@ -110,6 +121,14 @@ $directory = @(
     @{ Name = 'Service Account - Scanner'; Upn = 'svc-scanner@fabrikam-example.com'
         Type = 'Member'; IsAdmin = $false; Sms = $false; Voice = $false
         Methods = @('alternateMobilePhone'); Passwordless = $false; LegacyMfa = '(unreadable)'; SignInAge = 412 }
+
+    # Dormant but NOT stopped at sign-in: no phone at all, so BlockedAtRetirement is false
+    # and priority falls to "4 - Likely leaver" rather than "1 - Lockout". This is the
+    # common real-world shape -- an account nobody has used in years, holding only a
+    # surviving-but-not-passwordless method it registered once and never touched again.
+    @{ Name = 'Marguerite Delacroix'; Upn = 'marguerite.delacroix@fabrikam-example.com'
+        Type = 'Member'; IsAdmin = $false; Sms = $true; Voice = $true
+        Methods = @('softwareOneTimePasscode'); Passwordless = $false; LegacyMfa = 'disabled'; SignInAge = 620 }
 
     @{ Name = 'Nadia Ferreira'; Upn = 'nadia.ferreira@fabrikam-example.com'
         Type = 'Member'; IsAdmin = $true; Sms = $true; Voice = $true
@@ -216,7 +235,7 @@ $assessmentPath = Join-Path $examplesDir 'Example-MigrationImpact.csv'
 Export-AssessmentCsv -Data $rows -Path $assessmentPath -SkipAclHardening
 
 $actionListPath = Join-Path $examplesDir 'Example-ActionList.csv'
-Export-AssessmentCsv -Data (New-ActionList -Rows $rows) -Path $actionListPath -SkipAclHardening
+Export-AssessmentCsv -Data @(New-ActionList -Rows $rows) -Path $actionListPath -SkipAclHardening
 
 $ticketPath = Join-Path $examplesDir 'Example-Tickets.csv'
 $null = New-TicketExport -Rows $rows -Path $ticketPath -Customer $customer -MaxIndividual 50 -History @{} -SkipAclHardening

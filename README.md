@@ -19,23 +19,27 @@ Install-Module Microsoft.Graph.Authentication -Scope CurrentUser
 .\Get-EntraSmsVoiceMigrationImpact.ps1
 ```
 
-That is the whole thing. A browser opens, you sign in as Global Reader or Security Reader, and you get two spreadsheets beside each other:
+That is the whole thing. A browser opens, you sign in as Global Reader or Security Reader, and you get two spreadsheets in a folder named for the tenant:
+
+```
+reports\Contoso\Contoso_2026-08-18.csv
+reports\Contoso\Contoso_2026-08-18_ActionList.csv
+```
 
 | File | What it is |
 |---|---|
-| `...Impact.csv` | The full assessment: one risk-ranked row per exposed user, highest risk first |
-| `..._ActionList.csv` | The work list: affected users only, what they have, what to do. Attach it to a ticket ([sample](examples/Example-ActionList.csv)) |
+| `<tenant>_<date>.csv` | The full assessment: one risk-ranked row per exposed user, highest risk first |
+| `..._ActionList.csv` | The work list: affected users only, what they have, what to do, in plain language — no IDs. Attach it to a ticket ([sample](examples/Example-ActionList.csv)) |
 
 Both open straight into Excel. Values that would otherwise be read as formulas are neutralised on the way out, so a display name beginning `=` cannot execute when somebody opens the file.
 
-Add `-CustomerName "Contoso Manufacturing"` to put the client's name into every filename, which is what you want when you are running several clients and then attaching one set to that client's ticket:
+The folder name comes from `-CustomerName` when you pass it, otherwise from the domain of the account you signed in with, otherwise from the tenant's GUID as a last resort — so running five clients back to back produces five folders you can tell apart at a glance, not five files distinguishable only by a timestamp. A re-run the same day overwrites that day's files; different days sit side by side. Pass `-CustomerName "Contoso Manufacturing"` when the sign-in domain does not read as the client's name:
 
-```
-EntraSmsVoiceMigrationImpact_Contoso-Manufacturing_20260817_170000.csv
-EntraSmsVoiceMigrationImpact_Contoso-Manufacturing_20260817_170000_ActionList.csv
+```powershell
+.\Get-EntraSmsVoiceMigrationImpact.ps1 -CustomerName "Contoso Manufacturing"
 ```
 
-That is the only switch most runs need. Use `-OutputPath` if you want them somewhere specific; everything else is named from it.
+Use `-OutputPath` if you want the files somewhere else entirely; everything else is named from it.
 
 Two optional extras: `-HtmlReport` adds a self-contained HTML report to hand a client directly ([sample](examples/Example-Report.html)), and `-ExportTickets` adds a CSV shaped for bulk PSA import ([sample](examples/Example-Tickets.csv)). Neither is needed for the normal run, and nothing is created in any external system by any of it — every output is a file on disk.
 
@@ -182,6 +186,61 @@ cd entra-passkey-readiness
 # Only needed if downloaded as a zip rather than cloned
 Get-ChildItem *.ps1 | Unblock-File
 ```
+
+### "cannot be loaded … is not digitally signed"
+
+If the very first run stops with:
+
+```
+File ...\Get-EntraSmsVoiceMigrationImpact.ps1 is not digitally signed.
+You cannot run this script on the current system.
+```
+
+nothing is wrong with the script or your account. You downloaded the repository as a **zip**, so Windows tagged every extracted file with the Mark of the Web, and your PowerShell execution policy refuses to run downloaded scripts that are not signed. Fix it step by step:
+
+1. **Open PowerShell 7** (`pwsh`), not Windows PowerShell 5.1 — the scripts require 7.0+ and will refuse 5.1 anyway. If `pwsh` is not installed: `winget install Microsoft.PowerShell`, then open a new terminal.
+
+2. **Go to the folder you extracted.** Note that extracting the zip usually creates a doubled folder — the scripts are in the *inner* one:
+
+   ```powershell
+   cd C:\Users\<you>\entra-passkey-readiness-main\entra-passkey-readiness-main
+   ```
+
+3. **Confirm the diagnosis** — this shows the download tag on each file:
+
+   ```powershell
+   Get-ChildItem *.ps1 | Get-Item -Stream Zone.Identifier -ErrorAction SilentlyContinue
+   ```
+
+   Output listing `Zone.Identifier` streams means the files are marked as downloaded.
+
+4. **Remove the tag from everything in the folder** (recursive, so the tests and examples are covered too):
+
+   ```powershell
+   Get-ChildItem -Recurse | Unblock-File
+   ```
+
+5. **Check your execution policy:**
+
+   ```powershell
+   Get-ExecutionPolicy -List
+   ```
+
+   `RemoteSigned` is the policy this project expects: local and unblocked scripts run, unsigned downloads do not. If every scope reads `Undefined` or `Restricted`, set it for your user only — no admin rights needed:
+
+   ```powershell
+   Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+   ```
+
+6. **Run the script again:**
+
+   ```powershell
+   .\Get-EntraSmsVoiceMigrationImpact.ps1
+   ```
+
+If step 5 shows a policy set at `MachinePolicy` or `UserPolicy` scope (Group Policy), `Set-ExecutionPolicy` cannot override it — that is your organisation's endpoint policy doing its job. Options, in order of preference: clone with `git clone` instead of downloading a zip (cloned files carry no Mark of the Web, so `RemoteSigned` machines run them as local scripts); ask your endpoint team to allow the script; or run it from a machine not under that policy.
+
+**Do not use `-ExecutionPolicy Bypass` as a habit.** It works, but it teaches you to disable a control instead of satisfying it, and this is a tool you may run on customer-facing machines.
 
 ---
 
@@ -335,8 +394,8 @@ See [examples/Example-Report.html](examples/Example-Report.html) for a rendered 
 
 The action list is written on every run. It contains just the Critical, High, and Moderate users, and does two jobs:
 
-- **The file you attach to a ticket you raised yourself.** Eight columns, sorted worst-first with admins ahead of standard users, so it is worked top-down: `Risk`, `DisplayName`, `UserPrincipalName`, `IsAdmin`, `PhoneMethodsRegistered`, `IsPasswordlessCapable`, `NextStep`, `UserId`. Everything a technician needs and none of the diagnostic columns that make the full export wide.
-- **The membership list** for the migration security group Microsoft's guidance tells you to create as step one, ready for bulk import on `UserPrincipalName`.
+- **The file you attach to a ticket you raised yourself.** Seven columns, in plain language rather than Graph's enum spellings, and no object IDs: `Priority`, `User`, `SignIn`, `LastSignIn`, `Has`, `Problem`, `DoThis`. `Has` reads `Phone + Authenticator` instead of `mobilePhone; microsoftAuthenticatorPush`. `Priority` sorts the queue: `1 - Lockout` (stops working 2027-02-01) ahead of `2 - Admin`, `3 - Migrate`, and `4 - Likely leaver` (stale or never signed in — check before chasing). Everything a technician needs to work the queue top-down, and none of the diagnostic columns that make the full export wide.
+- **The membership list** for the migration security group Microsoft's guidance tells you to create as step one, ready for bulk import on `SignIn` (the user's sign-in name/UPN).
 
 See [examples/Example-ActionList.csv](examples/Example-ActionList.csv).
 
@@ -647,6 +706,7 @@ These are properties of the data sources, not defects. Read them before presenti
 
 | Symptom | Cause and fix |
 |---|---|
+| `...is not digitally signed. You cannot run this script on the current system.` | The repo was downloaded as a zip, so the files carry the Mark of the Web and the execution policy refuses them. Step-by-step fix in [Installation](#cannot-be-loaded--is-not-digitally-signed): `Get-ChildItem -Recurse \| Unblock-File`, then confirm the policy is `RemoteSigned`. |
 | `Microsoft.Graph.Authentication is required but is not installed.` | Run `Install-Module Microsoft.Graph.Authentication -Scope CurrentUser`. |
 | Sign-in succeeds but results are for the wrong tenant | A cached Graph session was reused. Run `Disconnect-MgGraph`, then re-run with an explicit `-TenantId`. |
 | `Insufficient privileges to complete the operation` on the reports endpoint | `AuditLog.Read.All` was not consented. Have an admin consent to all four delegated scopes. |

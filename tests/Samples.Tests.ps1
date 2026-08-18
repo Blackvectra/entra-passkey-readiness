@@ -9,7 +9,17 @@
 
 BeforeAll {
     . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
-    . (Import-ScriptFunction -Path (Get-AssessmentScriptPath) -Name @('Get-PropertyValue', 'Test-RowFlag', 'Get-SignInAgeSortKey', 'New-ActionList'))
+    . (Import-ScriptFunction -Path (Get-AssessmentScriptPath) -Name @(
+            'Get-PropertyValue', 'Test-RowFlag', 'Get-SignInAgeSortKey', 'New-ActionList',
+            'Get-ActionListEntry', 'Get-FriendlyMethodName', 'Get-FriendlySignInAge'
+        ))
+    # Get-ActionListEntry and Get-FriendlyMethodName read these script-scope markers; the
+    # real script sets them once at the top before any row is built. This standalone
+    # import does not run that far, so the markers are set here to match.
+    $script:NoReportRowMarker = '(no row in registration report)'
+    $script:SignInAgeNever = '(none recorded)'
+    $script:SignInAgeUnavailable = '(not available)'
+    $script:StaleSignInDays = 90
 
     $script:ExamplesDir = Join-Path (Split-Path -Parent $PSScriptRoot) 'examples'
 
@@ -91,66 +101,54 @@ Describe 'Example-MigrationImpact.csv' {
 
 Describe 'Example-ActionList.csv' {
 
-    It 'exposes the columns a technician needs and none of the diagnostic ones' {
+    It 'exposes plain-language columns and no object IDs' {
         $script:ActionList[0].PSObject.Properties.Name | Should -Be @(
-            'Risk', 'BlockedAtRetirement', 'DaysSinceLastSignIn', 'DisplayName',
-            'UserPrincipalName', 'IsAdmin', 'PhoneMethodsRegistered', 'IsPasswordlessCapable',
-            'NextStep', 'UserId'
+            'Priority', 'User', 'SignIn', 'LastSignIn', 'Has', 'Problem', 'DoThis'
         )
     }
 
-    It 'contains only the actionable bands' {
-        foreach ($row in $script:ActionList) {
-            $row.Risk | Should -BeIn @('Critical', 'High', 'Moderate')
-        }
-    }
-
-    It 'is sorted worst first, so it can be worked top-down' {
-        $ranks = $script:ActionList | ForEach-Object { $script:RiskOrder[$_.Risk] }
+    It 'is sorted by priority, so it can be worked top-down' {
+        $order = @{ '1 - Lockout' = 1; '2 - Admin' = 2; '3 - Migrate' = 3; '4 - Likely leaver' = 4 }
+        $ranks = $script:ActionList | ForEach-Object { $order[$_.Priority] }
         for ($i = 1; $i -lt $ranks.Count; $i++) {
             $ranks[$i] | Should -BeGreaterOrEqual $ranks[$i - 1]
         }
     }
 
-    It 'puts users who get stopped at sign-in ahead of the rest of their band' {
-        # A Moderate user with only a phone is stopped; a High user holding Authenticator
-        # is not. Within a band, the ones who stop working are worked first.
-        foreach ($band in @('Critical', 'High', 'Moderate')) {
-            $inBand = @($script:ActionList | Where-Object Risk -eq $band)
-            $flags = @($inBand | ForEach-Object { $_.BlockedAtRetirement -eq 'True' })
-            for ($i = 1; $i -lt $flags.Count; $i++) {
-                if ($flags[$i]) { $flags[$i - 1] | Should -BeTrue -Because "$band is not ordered by who gets stopped" }
-            }
+    It 'puts lockouts at priority 1, ahead of everything else' {
+        # A user who stops signing in on 2027-02-01 is worked before anyone else,
+        # including an admin who merely lacks a phishing-resistant method.
+        $lockedOut = @($script:Assessment | Where-Object BlockedAtRetirement -eq 'True' | ForEach-Object { $_.UserPrincipalName })
+        foreach ($upn in $lockedOut) {
+            $row = $script:ActionList | Where-Object SignIn -eq $upn
+            if ($row) { $row.Priority | Should -Be '1 - Lockout' }
         }
     }
 
-    It 'agrees with the assessment on who gets stopped at sign-in' {
-        $byUpn = @{}
-        foreach ($row in $script:Assessment) { $byUpn[$row.UserPrincipalName] = $row }
+    It 'flags a dormant account as priority 4 rather than burying it in the risk band' {
+        $stale = @($script:ActionList | Where-Object Priority -eq '4 - Likely leaver')
+        $stale.Count | Should -BeGreaterThan 0 -Because 'the sample includes a dormant account'
+        foreach ($row in $stale) {
+            $row.DoThis | Should -Match 'leaver'
+        }
+    }
 
+    It 'keeps SignIn so it still works as a bulk group import' {
         foreach ($row in $script:ActionList) {
-            $row.BlockedAtRetirement | Should -BeExactly $byUpn[$row.UserPrincipalName].BlockedAtRetirement
+            $row.SignIn | Should -Match '@'
         }
     }
 
-    It 'puts privileged accounts ahead of standard users inside a band' {
-        $critical = @($script:ActionList | Where-Object Risk -eq 'Critical')
-        if ($critical.Count -gt 1) {
-            $admins = @($critical | Where-Object { $_.IsAdmin -eq 'True' })
-            $admins.Count | Should -BeGreaterThan 0
-        }
-    }
-
-    It 'keeps UserPrincipalName so it still works as a bulk group import' {
+    It 'writes what each user holds in words, not Graph enum spellings' {
         foreach ($row in $script:ActionList) {
-            $row.UserPrincipalName | Should -Match '@'
+            $row.Has | Should -Not -Match 'mobilePhone|microsoftAuthenticator|passKeyDeviceBound'
         }
     }
 
     It 'accounts for every actionable user in the assessment, and no others' {
         $expected = @($script:Assessment | Where-Object { $_.Risk -in @('Critical', 'High', 'Moderate') } |
                 ForEach-Object { $_.UserPrincipalName }) | Sort-Object
-        $actual = @($script:ActionList | ForEach-Object { $_.UserPrincipalName }) | Sort-Object
+        $actual = @($script:ActionList | ForEach-Object { $_.SignIn }) | Sort-Object
 
         $actual | Should -Be $expected
     }
@@ -158,18 +156,19 @@ Describe 'Example-ActionList.csv' {
 
 Describe 'The samples agree with each other' {
 
-    It 'gives the same next step for a user in the action list as in the assessment' {
-        # This is the guarantee the single Get-RemediationStep function exists to provide.
-        # If these ever disagree, the report a client reads and the list a technician works
-        # are recommending different things for the same person.
+    It 'covers the same actionable users as the assessment, with a real instruction for each' {
+        # The action list condenses the assessment's paragraph-length NextStep into a
+        # short DoThis rather than reusing it verbatim, so the two files are not compared
+        # word for word -- but every actionable user in one must be in the other, with
+        # something to actually do.
         $byUpn = @{}
         foreach ($row in $script:Assessment) { $byUpn[$row.UserPrincipalName] = $row }
 
         foreach ($row in $script:ActionList) {
-            $source = $byUpn[$row.UserPrincipalName]
-            $source | Should -Not -BeNullOrEmpty -Because "$($row.UserPrincipalName) is not in the assessment"
-            $row.NextStep | Should -BeExactly $source.NextStep
-            $row.Risk | Should -BeExactly $source.Risk
+            $source = $byUpn[$row.SignIn]
+            $source | Should -Not -BeNullOrEmpty -Because "$($row.SignIn) is not in the assessment"
+            $row.DoThis | Should -Not -BeNullOrEmpty
+            $row.Problem | Should -Not -BeNullOrEmpty
         }
     }
 
@@ -210,7 +209,7 @@ Describe 'The samples agree with each other' {
 
         foreach ($row in $quiet) {
             $html | Should -Not -BeLike "*$([System.Net.WebUtility]::HtmlEncode($row.DisplayName))*"
-            $script:ActionList.UserPrincipalName | Should -Not -Contain $row.UserPrincipalName
+            $script:ActionList.SignIn | Should -Not -Contain $row.UserPrincipalName
         }
     }
 }
@@ -220,19 +219,13 @@ Describe 'New-ActionList' {
     It 'reproduces the published sample exactly from the assessment rows' {
         # The sample is not hand-maintained: it is what the shipping code produces. If this
         # fails, the file in examples/ has drifted from the export a real run writes.
-        $rows = $script:Assessment | ForEach-Object {
-            $_.IsAdmin = ($_.IsAdmin -eq 'True')
-            $_.IsPasswordlessCapable = ($_.IsPasswordlessCapable -eq 'True')
-            $_
-        }
-
-        $generated = New-ActionList -Rows $rows
+        $generated = New-ActionList -Rows $script:Assessment
 
         $generated.Count | Should -Be $script:ActionList.Count
         for ($i = 0; $i -lt $generated.Count; $i++) {
-            $generated[$i].UserPrincipalName | Should -BeExactly $script:ActionList[$i].UserPrincipalName
-            $generated[$i].Risk | Should -BeExactly $script:ActionList[$i].Risk
-            $generated[$i].NextStep | Should -BeExactly $script:ActionList[$i].NextStep
+            $generated[$i].SignIn | Should -BeExactly $script:ActionList[$i].SignIn
+            $generated[$i].Priority | Should -BeExactly $script:ActionList[$i].Priority
+            $generated[$i].DoThis | Should -BeExactly $script:ActionList[$i].DoThis
         }
     }
 
@@ -240,7 +233,9 @@ Describe 'New-ActionList' {
         $quiet = @(
             [PSCustomObject]@{ Risk = 'Low'; DisplayName = 'A'; UserPrincipalName = 'a@example.com'
                 IsAdmin = $false; PhoneMethodsRegistered = ''; IsPasswordlessCapable = $true
-                BlockedAtRetirement = $false; NextStep = 'No action required.'; UserId = '1' }
+                BlockedAtRetirement = $false; NextStep = 'No action required.'; UserId = '1'
+                UserType = 'Member'; PerUserMfaState = 'disabled'; DaysSinceLastSignIn = '1'
+                InSmsPolicyScope = $false; InVoicePolicyScope = $false; AllMethodsRegistered = 'passKeyDeviceBound' }
         )
         @(New-ActionList -Rows $quiet).Count | Should -Be 0
     }
@@ -320,16 +315,22 @@ Describe 'Rows that have been through a CSV sort the same as rows that have not'
         Test-RowFlag '' | Should -BeFalse
     }
 
-    It 'puts blocked users first even when the rows came from a file' {
+    It 'puts blocked users at priority 1 even when the rows came from a file' {
+        # Get-ActionListEntry reads BlockedAtRetirement through Test-RowFlag for exactly
+        # this reason: an imported CSV row carries the string 'True', not the boolean.
         $imported = @(Import-Csv -LiteralPath (Join-Path $script:ExamplesDir 'Example-MigrationImpact.csv'))
         $generated = @(New-ActionList -Rows $imported)
 
-        foreach ($band in @('Critical', 'High', 'Moderate')) {
-            $inBand = @($generated | Where-Object Risk -eq $band)
-            $flags = @($inBand | ForEach-Object { Test-RowFlag $_.BlockedAtRetirement })
-            for ($i = 1; $i -lt $flags.Count; $i++) {
-                if ($flags[$i]) { $flags[$i - 1] | Should -BeTrue -Because "$band is out of order once imported" }
-            }
+        $lockedOut = @($imported | Where-Object BlockedAtRetirement -eq 'True' | ForEach-Object { $_.UserPrincipalName })
+        foreach ($upn in $lockedOut) {
+            $row = $generated | Where-Object SignIn -eq $upn
+            if ($row) { $row.Priority | Should -Be '1 - Lockout' }
+        }
+
+        $order = @{ '1 - Lockout' = 1; '2 - Admin' = 2; '3 - Migrate' = 3; '4 - Likely leaver' = 4 }
+        $ranks = $generated | ForEach-Object { $order[$_.Priority] }
+        for ($i = 1; $i -lt $ranks.Count; $i++) {
+            $ranks[$i] | Should -BeGreaterOrEqual $ranks[$i - 1] -Because 'the queue is out of order once imported'
         }
     }
 }

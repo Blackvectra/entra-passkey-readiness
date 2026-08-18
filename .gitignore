@@ -2,6 +2,10 @@
 # Tenant evidence. Never commit a real export, not even to a private repo.
 # These exports contain UPNs, admin status, registered auth methods, and
 # identity-security posture. Treat them like a pen test report.
+#
+# reports/<tenant>/ is where a default run (no -OutputPath) writes: one folder
+# per tenant, named from -CustomerName or the sign-in domain. Ignored wholesale
+# so a customer's evidence is never committable no matter what it is called.
 # ---------------------------------------------------------------------------
 EntraSmsVoiceMigrationImpact_*.csv
 *.tenant.csv

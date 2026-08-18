@@ -184,7 +184,7 @@ footer { margin-top: 46px; padding-top: 18px; border-top: 1px solid var(--rule);
 Migration impact assessment &middot;
 Tenant c0ffee00-1111-4222-8333-444455556666 &middot;
 17 August 2026, 09:14 local &middot;
-11 enabled users evaluated &middot;
+12 enabled users evaluated &middot;
 No tenant settings were changed
 </div>
 </div>
@@ -194,13 +194,13 @@ No tenant settings were changed
 
 <h2>Summary</h2>
 <div class="lede">
-<p>11 of 11 enabled users are migration candidates: they are targeted by the SMS or voice authentication methods policy, they have a phone-based method registered, or both.</p>
-<p>6 of them have no phishing-resistant method registered today, so they are the population a passkey campaign needs to reach.</p>
+<p>12 of 12 enabled users are migration candidates: they are targeted by the SMS or voice authentication methods policy, they have a phone-based method registered, or both.</p>
+<p>7 of them have no phishing-resistant method registered today, so they are the population a passkey campaign needs to reach.</p>
 <p>Of those, 7 hold a phone number as their only method that satisfies MFA. These are the accounts that stop working on 1 February 2027: at their next sign-in they meet a passkey registration prompt they cannot skip, and until they complete it they cannot get in. 2 of them are privileged.</p>
 <p>Anyone who cannot complete that registration at the moment they are stopped -- no compatible device to hand, signing in from a shared terminal, or on the phone to the help desk from an airport -- is unable to work until they can. Driving this number to zero before the date is the whole job; the other counts describe how much campaign work stands between here and that.</p>
 <p>2 of those accounts hold a privileged role. Privileged accounts are the first remediation priority: if one is blocked at sign-in and its recovery path also depends on a phone number, the result is an availability problem on top of an authentication problem. Confirm the emergency-access accounts specifically.</p>
 <p>2 user(s) have a phone method registered but did not resolve into the modern policy scope. That pattern usually means legacy per-user MFA, which is equally in scope for the retirement and is not readable through the least-privilege Graph surface this assessment uses. Treat it as a finding to validate manually, not as a clean result.</p>
-<p>2 of the 7 users in policy scope (29%) already hold a method that survives the retirement. That figure is the progress measure worth tracking between runs.</p>
+<p>2 of the 8 users in policy scope (25%) already hold a method that survives the retirement. That figure is the progress measure worth tracking between runs.</p>
 </div>
 
 <div class="clock">
@@ -217,20 +217,20 @@ users hold a phone number as their only method that satisfies MFA. At their next
 </div>
 
 <h2>Exposure</h2>
-<div class="bar"><div class="seg s-crit" style="width:18.18%" title="Critical: 2"></div><div class="seg s-high" style="width:36.36%" title="High: 4"></div><div class="seg s-mod" style="width:18.18%" title="Moderate: 2"></div><div class="seg s-low" style="width:27.27%" title="Low: 3"></div></div>
+<div class="bar"><div class="seg s-crit" style="width:16.67%" title="Critical: 2"></div><div class="seg s-high" style="width:41.67%" title="High: 5"></div><div class="seg s-mod" style="width:16.67%" title="Moderate: 2"></div><div class="seg s-low" style="width:25%" title="Low: 3"></div></div>
 <div class="legend">
 <span><i class="dot s-crit"></i>Critical 2</span>
-<span><i class="dot s-high"></i>High 4</span>
+<span><i class="dot s-high"></i>High 5</span>
 <span><i class="dot s-mod"></i>Moderate 2</span>
 <span><i class="dot s-low"></i>Low 3</span>
 </div>
 
 <div class="grid">
 <div class="card crit"><div class="n">2</div><div class="l">Critical</div></div>
-<div class="card high"><div class="n">4</div><div class="l">High</div></div>
+<div class="card high"><div class="n">5</div><div class="l">High</div></div>
 <div class="card mod"><div class="n">2</div><div class="l">Moderate</div></div>
 <div class="card low"><div class="n">3</div><div class="l">Low</div></div>
-<div class="card"><div class="n">11</div><div class="l">Migration candidates</div></div>
+<div class="card"><div class="n">12</div><div class="l">Migration candidates</div></div>
 <div class="card"><div class="n">2</div><div class="l">Already passwordless</div></div>
 </div>
 
@@ -245,13 +245,13 @@ users hold a phone number as their only method that satisfies MFA. At their next
 <dt>Voice method state</dt><dd>enabled</dd>
 <dt>Voice include targets</dt><dd>group: All Staff (Sydney)</dd>
 <dt>Voice exclude targets</dt><dd>none</dd>
-<dt>Users in SMS scope</dt><dd>7</dd>
-<dt>Users in voice scope</dt><dd>4</dd>
+<dt>Users in SMS scope</dt><dd>8</dd>
+<dt>Users in voice scope</dt><dd>5</dd>
 <dt>Oldest report row</dt><dd>2026-08-16T03:12:44Z &mdash; the registration report lags live directory state, so this is the age of the evidence</dd>
 <dt>Users missing from report</dt><dd>0</dd>
 </dl>
 
-<h2>Actionable findings (8)</h2>
+<h2>Actionable findings (9)</h2>
 <div class="tablewrap">
 <section class="band">
 <h3 class="band-h crit">Critical <span class="band-n">2</span></h3>
@@ -284,8 +284,8 @@ users hold a phone number as their only method that satisfies MFA. At their next
 </table>
 </section>
 <section class="band">
-<h3 class="band-h high">High <span class="band-n">4</span></h3>
-<p class="band-blurb">Targeted by policy with no method that survives the retirement. Remediate as a scoped registration campaign rather than one ticket at a time.</p>
+<h3 class="band-h high">High <span class="band-n">5</span></h3>
+<p class="band-blurb">Targeted by policy with no passwordless method. Remediate as a scoped registration campaign rather than one ticket at a time.</p>
 <table>
 <colgroup><col class="c-user"><col class="c-type"><col class="c-scope"><col class="c-phone"><col class="c-pwless"><col class="c-why"></colgroup>
 <thead><tr>
@@ -311,6 +311,15 @@ users hold a phone number as their only method that satisfies MFA. At their next
 <div class="next"><span class="next-l">Next step</span>Include in the passkey registration campaign. Direct the user to register a passkey or Microsoft Authenticator for their device type, confirm the registration landed, then remove mobilePhone.</div></td>
 </tr>
 <tr>
+<td class="name">Marguerite Delacroix<div class="upn">marguerite.delacroix@fabrikam-example.com</div></td>
+<td>Member</td>
+<td>SMS + Voice</td>
+<td class="mono">none reported</td>
+<td class="no">No</td>
+<td class="reason">User is in scope via SMS/voice policy and is not passwordless-capable.
+<div class="next"><span class="next-l">Next step</span>Include in the passkey registration campaign. The user is in scope with no passwordless method, so they will be auto-enabled and nudged on 2026-09-01 whether or not you act first.</div></td>
+</tr>
+<tr>
 <td class="name">Rosalind Achebe<div class="upn">rosalind.achebe@fabrikam-example.com</div></td>
 <td>Member</td>
 <td>not in AMP scope</td>
@@ -326,7 +335,7 @@ users hold a phone number as their only method that satisfies MFA. At their next
 <td class="mono">none reported</td>
 <td class="no">No</td>
 <td class="reason">User is in scope via SMS/voice policy and is not passwordless-capable.
-<div class="next"><span class="next-l">Next step</span>Include in the passkey registration campaign. The user is in scope with no method that survives the retirement, so they will be auto-enabled and nudged on 2026-09-01 whether or not you act first.</div></td>
+<div class="next"><span class="next-l">Next step</span>Include in the passkey registration campaign. The user is in scope with no passwordless method, so they will be auto-enabled and nudged on 2026-09-01 whether or not you act first.</div></td>
 </tr>
 </tbody>
 </table>

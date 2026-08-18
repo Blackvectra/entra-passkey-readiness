@@ -219,29 +219,9 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-if (-not $OutputPath) {
-    # Every artefact of a run is named from this one path, so folding the customer in here
-    # names all of them at once. Running five clients back to back otherwise produces five
-    # sets of files distinguishable only by timestamp, which is a poor thing to be sorting
-    # out at the point you are attaching one of them to a ticket.
-    #
-    # The tool stem stays at the front: the .gitignore rule that stops a live export being
-    # committed anchors on it, and a filename that quietly slips past that rule is worse
-    # than one that reads slightly less naturally.
-    $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-    $baseDirectory = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
-
-    $customerPart = ''
-    if ($CustomerName) {
-        # Operator-supplied and often pasted from a PSA export, so treat it as untrusted:
-        # strip path characters and traversal before it reaches a filename.
-        $safeCustomer = ($CustomerName -replace '[\\/:*?"<>|]', '_') -replace '\s+', '-'
-        $safeCustomer = [System.IO.Path]::GetFileName($safeCustomer.Trim().Trim('.'))
-        if ($safeCustomer) { $customerPart = "$safeCustomer`_" }
-    }
-
-    $OutputPath = Join-Path -Path $baseDirectory -ChildPath "EntraSmsVoiceMigrationImpact_$customerPart$stamp.csv"
-}
+# When -OutputPath is not given, the default is computed AFTER the Graph connection, not
+# here: it is named from the tenant actually connected to, and that is not known yet.
+# See Get-DefaultOutputPath and the call after Connect-AssessmentGraph.
 
 # Graph endpoints are declared once so the read-only surface of this script is auditable at a glance.
 $script:GraphBase = 'https://graph.microsoft.com/v1.0'
@@ -408,6 +388,53 @@ tenant you signed in to, which is the simplest thing to do for a single customer
     }
 
     return $trimmed
+}
+
+function Get-SafeFileLabel {
+    # Anything operator-supplied or tenant-derived is untrusted before it reaches a path:
+    # strip path characters and traversal, collapse whitespace, refuse to return a
+    # component that could climb out of the folder it names.
+    param([string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) { return '' }
+    $safe = ($Value -replace '[\\/:*?"<>|]', '_') -replace '\s+', '-'
+    return [System.IO.Path]::GetFileName($safe.Trim().Trim('.'))
+}
+
+function Get-DefaultOutputPath {
+    # reports\<tenant>\<tenant>_<date>.csv -- a folder per tenant, files named from the
+    # tenant rather than a timestamp, because "which of these five numbered files is the
+    # one I attach to this client's ticket" is a question nobody should be answering.
+    #
+    # The label is the best human name available: -CustomerName when given, otherwise the
+    # domain of the signed-in account, otherwise a domain passed as -TenantId, and only
+    # then the tenant GUID. Date, not time: a re-run the same day replaces that day's
+    # files, which is what a correction run is for; different days sit side by side.
+    #
+    # Everything lands under reports\ because .gitignore excludes that folder wholesale --
+    # live tenant evidence must never be committable no matter what the tenant is called.
+    param(
+        [string]$CustomerName,
+        [string]$Account,
+        [string]$TenantId,
+        [Parameter(Mandatory)][string]$TenantGuid,
+        [Parameter(Mandatory)][string]$BaseDirectory,
+        [Parameter(Mandatory)][datetime]$RunDate
+    )
+
+    $label = Get-SafeFileLabel $CustomerName
+    if (-not $label -and $Account -match '@') {
+        $label = Get-SafeFileLabel (($Account -split '@')[-1])
+    }
+    if (-not $label -and $TenantId -and
+        $TenantId -notmatch '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$' -and
+        $TenantId -notin @('common', 'organizations', 'consumers')) {
+        $label = Get-SafeFileLabel $TenantId
+    }
+    if (-not $label) { $label = $TenantGuid }
+
+    $folder = Join-Path -Path $BaseDirectory -ChildPath (Join-Path 'reports' $label)
+    return Join-Path -Path $folder -ChildPath ('{0}_{1:yyyy-MM-dd}.csv' -f $label, $RunDate)
 }
 
 function Connect-AssessmentGraph {
@@ -1036,7 +1063,7 @@ function Get-RemediationStep {
             if ($HasPhoneMethodRegistered) {
                 return $legacyPrefix + "Include in the passkey registration campaign. Direct the user to register a passkey or Microsoft Authenticator for their device type, confirm the registration landed, then remove $methods."
             }
-            return $legacyPrefix + 'Include in the passkey registration campaign. The user is in scope with no method that survives the retirement, so they will be auto-enabled and nudged on 2026-09-01 whether or not you act first.'
+            return $legacyPrefix + 'Include in the passkey registration campaign. The user is in scope with no passwordless method, so they will be auto-enabled and nudged on 2026-09-01 whether or not you act first.'
         }
         'Moderate' {
             # Two different instructions, because the run may already have answered the
@@ -1244,7 +1271,7 @@ function New-HtmlReport {
 
         $bandBlurb = switch ($band) {
             'Critical' { 'Privileged accounts, targeted by policy, with a phone method and no phishing-resistant alternative. Individual work, scheduled, verified with a real test sign-in.' }
-            'High'     { 'Targeted by policy with no method that survives the retirement. Remediate as a scoped registration campaign rather than one ticket at a time.' }
+            'High'     { 'Targeted by policy with no passwordless method. Remediate as a scoped registration campaign rather than one ticket at a time.' }
             default    { 'A phone method is registered but the user is outside the resolved modern policy scope. Usually legacy per-user MFA. Validate this population manually before concluding it is unaffected.' }
         }
 
@@ -1611,37 +1638,186 @@ Timeline dates are per Microsoft Learn: passkeys by default and retirement of Mi
     return $Path
 }
 
+function Get-FriendlyMethodName {
+    # Turns 'mobilePhone; microsoftAuthenticatorPush; softwareOneTimePasscode' into
+    # 'Phone + Authenticator + App code'. The enum spellings are for Graph; the action
+    # list is for a person, and every extra decode a technician performs per row is time
+    # taken from the actual work. Unknown names pass through untranslated -- hiding a
+    # method a person holds is worse than an awkward word in a cell.
+    param([string]$Methods)
+
+    if ($Methods -eq $script:NoReportRowMarker) { return 'Unknown - not in the registration report' }
+    if ([string]::IsNullOrWhiteSpace($Methods)) { return 'Nothing registered' }
+
+    # Raw enum name -> display name, both generations of spellings. Ordered strongest
+    # first so the cell reads best-method-leading.
+    $map = [ordered]@{
+        'passKeyDeviceBound'              = 'Passkey'
+        'passKeyDeviceBoundAuthenticator' = 'Passkey'
+        'passKeyDeviceBoundWindowsHello'  = 'Passkey'
+        'passKeySynced'                   = 'Passkey'
+        'fido2SecurityKey'                = 'FIDO2 key'
+        'fido'                            = 'FIDO2 key'
+        'windowsHelloForBusiness'         = 'Windows Hello'
+        'macOsSecureEnclaveKey'           = 'Platform key (macOS)'
+        'x509Certificate'                 = 'Certificate'
+        'x509CertificateSingleFactor'     = 'Certificate'
+        'x509CertificateMultiFactor'      = 'Certificate'
+        'microsoftAuthenticatorPasswordless' = 'Authenticator (passwordless)'
+        'microsoftAuthenticatorPush'      = 'Authenticator'
+        'appNotification'                 = 'Authenticator'
+        'softwareOneTimePasscode'         = 'App code'
+        'appCode'                         = 'App code'
+        'hardwareOneTimePasscode'         = 'Hardware token'
+        'mobilePhone'                     = 'Phone'
+        'sms'                             = 'Phone'
+        'mobileSMS'                       = 'Phone'
+        'alternateMobilePhone'            = 'Alt phone'
+        'alternateMobileCall'             = 'Alt phone'
+        'officePhone'                     = 'Office phone'
+        'mobileCall'                      = 'Office phone'
+        'smsSignIn'                       = 'SMS sign-in'
+        'temporaryAccessPass'             = 'TAP'
+        'temporaryAccessPassMultiUse'     = 'TAP'
+        'email'                           = 'Email'
+        'securityQuestion'                = 'Security questions'
+        'appPassword'                     = 'App password'
+    }
+
+    $raw = @($Methods -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $friendly = [System.Collections.Generic.List[string]]::new()
+    foreach ($key in $map.Keys) {
+        if (($raw -contains $key) -and (-not $friendly.Contains($map[$key]))) {
+            $friendly.Add($map[$key])
+        }
+    }
+    foreach ($name in $raw) {
+        if (-not $map.Contains($name)) { $friendly.Add($name) }
+    }
+    return ($friendly -join ' + ')
+}
+
+function Get-FriendlySignInAge {
+    param([string]$Age)
+
+    if ($Age -eq $script:SignInAgeNever) { return 'Never recorded' }
+    if ($Age -eq $script:SignInAgeUnavailable) { return 'Unknown' }
+    $days = 0
+    if ([int]::TryParse($Age, [ref]$days)) {
+        if ($days -eq 0) { return 'Today' }
+        if ($days -eq 1) { return 'Yesterday' }
+        return "$days days ago"
+    }
+    return $Age
+}
+
+function Get-ActionListEntry {
+    # One verdict per actionable row: which queue it belongs to, what is actually wrong,
+    # and what to do -- each short enough to read in a spreadsheet cell. The full-sentence
+    # reasoning stays in the assessment CSV's Reason and NextStep columns; this file is
+    # the one a technician works top-down, and it earns its keep by being scannable.
+    param([Parameter(Mandatory)]$Row)
+
+    $blocked = Test-RowFlag (Get-PropertyValue $Row 'BlockedAtRetirement')
+    $admin = Test-RowFlag (Get-PropertyValue $Row 'IsAdmin')
+    $age = [string](Get-PropertyValue $Row 'DaysSinceLastSignIn')
+    $ageKey = Get-SignInAgeSortKey $age
+    $stale = ($age -eq $script:SignInAgeNever) -or
+        (($ageKey -ge $script:StaleSignInDays) -and ($ageKey -ne [int]::MaxValue))
+    $legacyState = [string](Get-PropertyValue $Row 'PerUserMfaState')
+    $legacy = $legacyState -in @('enabled', 'enforced')
+    $isGuest = ([string](Get-PropertyValue $Row 'UserType')) -eq 'Guest'
+    $inScope = (Test-RowFlag (Get-PropertyValue $Row 'InSmsPolicyScope')) -or
+        (Test-RowFlag (Get-PropertyValue $Row 'InVoicePolicyScope'))
+    $hasPhone = -not [string]::IsNullOrWhiteSpace([string](Get-PropertyValue $Row 'PhoneMethodsRegistered'))
+
+    # Lockouts outrank everything, including staleness: a dormant account that would stop
+    # working is still worked first, with the leaver check folded into its instruction.
+    # An active person outranks a probable leaver, which is why 4 exists at all.
+    $rank = if ($blocked) { 1 } elseif ($admin) { 2 } elseif ($stale) { 4 } else { 3 }
+    $priority = @{ 1 = '1 - Lockout'; 2 = '2 - Admin'; 3 = '3 - Migrate'; 4 = '4 - Likely leaver' }[$rank]
+
+    $problem = if ($blocked) {
+        'A phone is the only MFA that still works after 2027-02-01' + $(if ($admin) { ' - and this is an admin' } else { '' })
+    }
+    elseif ($admin) {
+        'Admin without a phishing-resistant method' + $(if ($legacy) { " (legacy MFA $legacyState)" } else { '' })
+    }
+    elseif ($legacy) { "On legacy per-user MFA ($legacyState); the passkey campaign cannot reach them" }
+    elseif ($isGuest -and $inScope) { 'Guest in SMS/voice policy scope with no surviving method' }
+    elseif ($inScope) { 'In SMS/voice policy scope with no surviving method' }
+    else { 'Phone registered outside every policy scope - likely a stale registration' }
+
+    $doThis = if ($rank -eq 4) {
+        if ($isGuest) { 'Confirm this guest still needs access; remove the guest instead of migrating them.' }
+        else { 'Check the leaver process first. If they are gone, disable and deprovision instead of migrating.' }
+    }
+    elseif ($blocked) {
+        $step = 'Issue a Temporary Access Pass, have them register a passkey or Authenticator, verify it works, then remove the phone.'
+        if ($legacy) { $step += ' Convert off legacy per-user MFA in the same session.' }
+        if ($stale) { $step = "Dormant - confirm with the leaver process first. Then: $step" }
+        $step
+    }
+    elseif ($admin) {
+        $step = 'Book a session: register a FIDO2 key or passkey and test a real sign-in.'
+        if ($legacy) { $step += ' Convert off legacy per-user MFA once it works.' }
+        if ($hasPhone) { $step += ' Remove the phone last.' }
+        if ($stale) { $step = "Dormant - confirm with the leaver process first. Then: $step" }
+        $step
+    }
+    elseif ($isGuest) {
+        'Confirm this guest can register a passkey (B2B support is on its own timeline) before setting a date. Leave the phone until a replacement works.'
+    }
+    else {
+        $step = if ($legacy) { 'Convert to the modern authentication policy, then include in the passkey campaign.' }
+        else { 'Include in the passkey registration campaign.' }
+        if ($hasPhone) { $step += ' Remove the phone once a surviving method is confirmed.' }
+        $step
+    }
+
+    return [PSCustomObject]@{
+        Rank     = $rank
+        Priority = $priority
+        Problem  = $problem
+        DoThis   = $doThis
+        AgeKey   = $ageKey
+    }
+}
+
 function New-ActionList {
-    # Two jobs, one file. It is the membership list for the migration security group
-    # Microsoft's guidance tells you to create in step one, and it is the action list you
-    # attach to a ticket you raised yourself. Both want the same population; the second
-    # also wants to know what to do, which is why PhoneMethodsRegistered and NextStep are
-    # here and the diagnostic columns are not.
+    # The file a technician works top-down and the one that gets attached to a ticket, so
+    # it carries exactly what that person needs and nothing else: who, how to reach them,
+    # what they hold (in words, not enum spellings), what is wrong, and what to do.
+    # Object IDs, raw booleans, and the paragraph-length reasoning stay in the assessment
+    # CSV, which remains the evidence record.
     #
     # A function rather than inline export code so the published sample in examples/ can be
     # generated by the same path a real run takes, instead of by something that resembles it.
     param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Rows)
 
-    $order = @{ Critical = 0; High = 1; Moderate = 2; Low = 3; Informational = 4; Excluded = 5 }
+    $entries = foreach ($row in @($Rows | Where-Object { $_.Risk -in @('Critical', 'High', 'Moderate') })) {
+        $verdict = Get-ActionListEntry -Row $row
+        [PSCustomObject]@{
+            Rank       = $verdict.Rank
+            AgeKey     = $verdict.AgeKey
+            Priority   = $verdict.Priority
+            User       = [string](Get-PropertyValue $row 'DisplayName')
+            SignIn     = [string](Get-PropertyValue $row 'UserPrincipalName')
+            LastSignIn = Get-FriendlySignInAge ([string](Get-PropertyValue $row 'DaysSinceLastSignIn'))
+            Has        = Get-FriendlyMethodName ([string](Get-PropertyValue $row 'AllMethodsRegistered'))
+            Problem    = $verdict.Problem
+            DoThis     = $verdict.DoThis
+        }
+    }
 
-    # Same read order as the main CSV: worst first, admins ahead of standard users. This
-    # file is worked top-down by whoever opens the ticket, so directory order is useless.
-    # Blocked users first inside a band: they are the ones who stop working, and a Moderate
-    # user with only a phone is stopped while a High user holding Authenticator is not.
-    return @($Rows |
-        Where-Object { $_.Risk -in @('Critical', 'High', 'Moderate') } |
+    # Queue order: priority, then recently-active first inside a priority (markers sort
+    # last), then name. The two sort keys are dropped on the way out.
+    return @($entries |
         Sort-Object `
-            @{ Expression = { $order[[string]$_.Risk] }; Ascending = $true }, `
-            @{ Expression = { Test-RowFlag (Get-PropertyValue $_ 'BlockedAtRetirement') }; Descending = $true }, `
-            @{ Expression = { Test-RowFlag (Get-PropertyValue $_ 'IsAdmin') }; Descending = $true }, `
-            # Recently active first. An account nobody has signed into for a year is a
-            # deprovisioning ticket, and it should not sit above a person at the top of
-            # somebody's queue. Non-numeric markers sort last, which is where they belong.
-            @{ Expression = { Get-SignInAgeSortKey (Get-PropertyValue $_ 'DaysSinceLastSignIn') }; Ascending = $true }, `
-            @{ Expression = { [string]$_.DisplayName }; Ascending = $true } |
-        Select-Object Risk, BlockedAtRetirement, DaysSinceLastSignIn, DisplayName,
-            UserPrincipalName, IsAdmin, PhoneMethodsRegistered, IsPasswordlessCapable,
-            NextStep, UserId)
+            @{ Expression = 'Rank'; Ascending = $true }, `
+            @{ Expression = 'AgeKey'; Ascending = $true }, `
+            @{ Expression = 'User'; Ascending = $true } |
+        Select-Object Priority, User, SignIn, LastSignIn, Has, Problem, DoThis)
 }
 
 function Get-TicketNextStep {
@@ -2200,6 +2376,15 @@ $TenantId = Resolve-TenantIdentifier -Value $TenantId
 
 $graphContext = Connect-AssessmentGraph
 
+if (-not $OutputPath) {
+    $baseDirectory = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+    $OutputPath = Get-DefaultOutputPath -CustomerName $CustomerName `
+        -Account ([string](Get-PropertyValue $graphContext 'Account')) `
+        -TenantId $TenantId -TenantGuid ([string]$graphContext.TenantId) `
+        -BaseDirectory $baseDirectory -RunDate $assessmentStartUtc
+    Write-Host "Writing to: $OutputPath" -ForegroundColor Cyan
+}
+
 Write-Host 'Reading enabled users (members and guests)...' -ForegroundColor Cyan
 
 # signInActivity is asked for so a work queue can distinguish a person from an account a
@@ -2253,7 +2438,11 @@ Write-Host 'Reading authentication strengths and Conditional Access MFA policies
 $authStrengthsReadable = $true
 $authStrengthFindings = @()
 try {
-    $authStrengthFindings = Get-AuthenticationStrengthReport
+    # @() at the call site, not just inside the function: PowerShell unrolls a
+    # zero-element pipeline across a function's own return boundary regardless of the
+    # @() wrapped around it inside Get-AuthenticationStrengthReport. Only wrapping here
+    # stops a tenant with no matching strengths from assigning $null.
+    $authStrengthFindings = @(Get-AuthenticationStrengthReport)
 }
 catch {
     $authStrengthsReadable = $false
@@ -2263,7 +2452,9 @@ catch {
 $caReadable = $true
 $caMfaPolicies = @()
 try {
-    $caMfaPolicies = Get-ConditionalAccessMfaReport
+    # Same reason as the strengths read above: the call site's @() is what actually
+    # protects against $null, not the one inside the function.
+    $caMfaPolicies = @(Get-ConditionalAccessMfaReport)
 }
 catch {
     $caReadable = $false
@@ -2612,7 +2803,12 @@ $summary = [PSCustomObject][ordered]@{
 # Emitting the list is read-only. Creating and populating the migration security group
 # stays a deliberate manual step, because that is a write and this tool does not write.
 $actionListPath = [System.IO.Path]::ChangeExtension($OutputPath, $null).TrimEnd('.') + '_ActionList.csv'
-$actionListRows = New-ActionList -Rows $rows
+# @() is load-bearing: a tenant where nobody lands in an actionable band -- the good
+# outcome this whole tool works toward -- makes New-ActionList return an empty collection,
+# which PowerShell unrolls to $null on assignment, and $null fails Export-AssessmentCsv's
+# parameter binding. The first genuinely clean tenant this ran against crashed here after
+# every Graph call had already been paid for.
+$actionListRows = @(New-ActionList -Rows $rows)
 
 Export-AssessmentCsv -Data $actionListRows -Path $actionListPath -SkipAclHardening:$SkipAclHardening
 $summary | Add-Member -NotePropertyName ActionListPath -NotePropertyValue (Resolve-Path -LiteralPath $actionListPath).Path
@@ -2764,7 +2960,18 @@ else {
         Write-Host "  Conditional Access: these policies grant through an SMS/voice-permitting strength: $($summary.CaPoliciesOnSmsVoiceStrength)." -ForegroundColor Yellow
     }
     if ($summary.CaMfaPoliciesEnabled -gt 0) {
-        Write-Host "  Conditional Access: $($summary.CaMfaPoliciesEnabled) enabled polic(ies) require MFA: $($summary.CaPoliciesRequiringMfa)." -ForegroundColor Green
+        # Enabled policies only on the green line. A run against a real tenant printed
+        # "4 enabled policies require MFA:" followed by all ten including the disabled
+        # ones, which reads as ten working policies to anyone skimming.
+        $caEnabledNames = (@($caMfaPolicies | Where-Object State -eq 'enabled' | ForEach-Object { $_.DisplayName }) -join ' | ')
+        $caPolicyWord = if ($summary.CaMfaPoliciesEnabled -eq 1) { 'policy requires' } else { 'policies require' }
+        Write-Host "  Conditional Access: $($summary.CaMfaPoliciesEnabled) enabled $caPolicyWord MFA: $caEnabledNames." -ForegroundColor Green
+
+        $caInert = @($caMfaPolicies | Where-Object State -ne 'enabled')
+        if ($caInert.Count -gt 0) {
+            $caInertNames = (@($caInert | ForEach-Object { "$($_.DisplayName) [$($_.State)]" }) -join ' | ')
+            Write-Host "    $($caInert.Count) more MFA polic$(if ($caInert.Count -eq 1) { 'y is' } else { 'ies are' }) disabled or report-only and enforce nothing: $caInertNames." -ForegroundColor Cyan
+        }
         Write-Host '    Names and states only. Whether their assignments cover every user is not assessed here; review scoping in the portal.' -ForegroundColor Cyan
     }
     else {
