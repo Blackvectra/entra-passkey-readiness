@@ -195,6 +195,11 @@ if (-not $OutputPath) {
 # Graph endpoints are declared once so the read-only surface of this script is auditable at a glance.
 $script:GraphBase = 'https://graph.microsoft.com/v1.0'
 
+# One beta read, declared here for the same auditability reason. optOutSettings.passkeyDynamicMigration
+# (the September 2026 auto-enablement opt-out) is not exposed on v1.0. Still a GET; the PATCH that
+# sets it lives in Set-EntraPasskeyOptOut.ps1, which is deliberately not part of this script.
+$script:GraphBeta = 'https://graph.microsoft.com/beta'
+
 # Group display names are resolved once and reused; the same exclusion group is commonly
 # referenced by both the SMS and voice method configurations.
 $script:GroupNameCache = @{}
@@ -393,14 +398,23 @@ function Get-AuthMethodsPolicyState {
     if ([string]::IsNullOrWhiteSpace($migrationState)) { $migrationState = 'unknown' }
 
     # Opt-out flag (beta only; non-fatal if the endpoint is unavailable).
-    $passkeyOptedOut = $false
+    #
+    # Tri-state as a STRING, never a boolean. A boolean collapses "could not read" into
+    # "not opted out", and those are operationally different: the second says the tenant is
+    # still on the 2026-09-01 timeline, the first says nobody knows. Since the whole point of
+    # recording this is to keep track of which tenants were deliberately deferred, a failed
+    # read that silently reports 'false' degrades exactly the record it exists to protect.
+    $passkeyOptedOut = 'unknown'
     try {
-        $betaPolicy = Invoke-GraphGet -Uri 'https://graph.microsoft.com/beta/policies/authenticationmethodspolicy'
+        $betaPolicy = Invoke-GraphGet -Uri "$script:GraphBeta/policies/authenticationMethodsPolicy"
         $optOut = Get-PropertyValue $betaPolicy 'optOutSettings'
-        $passkeyOptedOut = [bool](Get-PropertyValue $optOut 'passkeyDynamicMigration')
+        $passkeyOptedOut = if ([bool](Get-PropertyValue $optOut 'passkeyDynamicMigration')) { 'true' } else { 'false' }
     }
     catch {
-        Write-Verbose "Could not read optOutSettings from beta endpoint: $($_.Exception.Message)"
+        # Warning, not Verbose: nobody runs a 90-tenant sweep with -Verbose, and this is the
+        # difference between "not deferred" and "we do not know whether it is deferred".
+        $passkeyOptedOut = 'read-failed'
+        Write-Warning "Could not read optOutSettings.passkeyDynamicMigration from the beta endpoint: $($_.Exception.Message) -- reporting 'read-failed' rather than 'false' so this tenant is not mistaken for one that was never deferred."
     }
 
     return [PSCustomObject]@{
@@ -1572,9 +1586,16 @@ $policyState = Get-AuthMethodsPolicyState
 $campaignState = $policyState.CampaignState
 
 # Tenants not yet at migrationComplete have the legacy per-user MFA service as authoritative.
-# The modern AMP scope does not reflect their full exposure; warn rather than silently pass.
-if ($policyState.MigrationState -ne 'migrationComplete' -and $policyState.MigrationState -ne 'unknown') {
-    Write-Warning "policyMigrationState is '$($policyState.MigrationState)'. Legacy per-user MFA settings are still authoritative for this tenant. Users enabled for SMS/voice there are in scope for the retirement and are not visible through the modern AMP scope this assessment reads. Treat the results as a lower bound, not a complete picture."
+# The modern AMP scope does not reflect their full exposure, so these results are a lower
+# bound rather than a clean read.
+#
+# 'unknown' is deliberately NOT excluded. The Graph enum returns premigration /
+# migrationInProgress / migrationComplete, so 'unknown' means the property was absent from the
+# payload -- i.e. the read failed in a way this script cannot interpret. Treating an
+# uninterpretable read as clean is the one direction this tool must never fail in.
+$script:ResultsAreLowerBound = ($policyState.MigrationState -ne 'migrationComplete')
+if ($script:ResultsAreLowerBound) {
+    Write-Warning "policyMigrationState is '$($policyState.MigrationState)'. Legacy per-user MFA settings are still authoritative for this tenant. Users enabled for SMS/voice there are auto-enabled for passkeys on 2026-09-01 and are NOT visible through the modern authentication methods policy this assessment reads. Treat these results as a LOWER BOUND, not a complete picture, and check the legacy per-user MFA service settings manually."
 }
 
 Write-Host 'Resolving SMS and voice policy scope (nested groups and exclusions)...' -ForegroundColor Cyan
@@ -1697,7 +1718,14 @@ $rows = foreach ($user in $enabledUsers) {
 }
 
 $rows = @($rows)
-$affectedRows = @($rows | Where-Object { $_.InSmsPolicyScope -or $_.InVoicePolicyScope -or $_.HasPhoneMethodRegistered })
+# PhoneMethodsRegistered, not HasPhoneMethodRegistered: the latter is a parameter name on
+# Get-RiskAssessment/Get-RemediationStep and was never a column on these rows. Under
+# StrictMode Latest the missing property threw, and -or short-circuiting hid it until a user
+# fell outside BOTH scopes -- which is every user of a tenant with SMS/voice disabled, every
+# non-pilot user of a scoped rollout, and everyone in an excludeTarget. The empty string is
+# falsy and a joined method list is truthy, so this matches $hasPhoneMethod exactly; the same
+# [bool]$row.PhoneMethodsRegistered idiom is already used at the HTML and ticket call sites.
+$affectedRows = @($rows | Where-Object { $_.InSmsPolicyScope -or $_.InVoicePolicyScope -or $_.PhoneMethodsRegistered })
 $exportRows = if ($IncludeUnaffected) { $rows } else { $affectedRows }
 
 # Sort so remediation order is the read order: highest risk first, admins ahead of standard users.
@@ -1733,6 +1761,11 @@ $summary = [PSCustomObject][ordered]@{
     RegistrationCampaignState  = $campaignState
     MigrationState             = $policyState.MigrationState
     PasskeyOptedOut            = $policyState.PasskeyOptedOut
+    # The triage signal, derived once here so the sweep cannot disagree with the per-tenant
+    # run about what a given migration state means. 'LowerBound' says the counts below
+    # UNDERSTATE exposure because legacy per-user MFA is still authoritative and unreadable
+    # from this Graph surface. A zero-finding LowerBound tenant is not a clean tenant.
+    AssessmentConfidence       = if ($script:ResultsAreLowerBound) { 'LowerBound' } else { 'Complete' }
     SmsPolicyState             = $smsScope.State
     VoicePolicyState           = $voiceScope.State
     SmsPolicyInclude           = ($smsScope.IncludeNotes -join ' | ')
