@@ -665,3 +665,48 @@ Describe 'The legacy per-user MFA read, which every run now does' {
         $script:LegacyStdErr | Should -Not -Match 'expected POST'
     }
 }
+
+Describe 'A tenant with nobody left to action' {
+
+    # Excluding every user reduces the action list to zero rows the same way a small,
+    # already-clean tenant does. A real run against such a tenant crashed with "Cannot
+    # bind argument to parameter 'Data' because it is null": New-ActionList's internal
+    # `return @($pipeline)` still unrolls to $null across the function's own return
+    # boundary when the pipeline emits nothing, regardless of the @() wrapped around it
+    # inside the function. Only wrapping the call site -- `@(New-ActionList ...)` --
+    # actually prevents it. Nothing here should ever throw.
+
+    BeforeAll {
+        $pwshPath = if ($IsWindows) { Join-Path $PSHOME 'pwsh.exe' } else { Join-Path $PSHOME 'pwsh' }
+        if (-not (Test-Path -LiteralPath $pwshPath)) { $pwshPath = 'pwsh' }
+
+        $script:NobodyCsv = Join-Path $script:OutDir 'nobody.csv'
+        $script:NobodySummaryPath = Join-Path $script:Root 'nobody-summary.json'
+        $nobodyStdErr = Join-Path $script:Root 'nobody-stderr.txt'
+
+        $nobodyCommand = @"
+`$env:PSModulePath = '$(Join-Path $script:Root 'Modules')' + [IO.Path]::PathSeparator + `$env:PSModulePath
+`$summary = & '$(Get-AssessmentScriptPath)' -TenantId 'fabrikam-example.com' ``
+    -OutputPath '$script:NobodyCsv' -ExcludeUpnPattern '.' -SkipAclHardening
+`$summary | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath '$script:NobodySummaryPath'
+"@
+
+        $nobodyProcess = Start-Process -FilePath $pwshPath -PassThru -Wait -NoNewWindow `
+            -RedirectStandardOutput (Join-Path $script:Root 'nobody-stdout.txt') `
+            -RedirectStandardError $nobodyStdErr `
+            -ArgumentList @('-NoProfile', '-NonInteractive', '-Command', $nobodyCommand)
+
+        $script:NobodyExit = $nobodyProcess.ExitCode
+        $script:NobodyStdErr = if (Test-Path $nobodyStdErr) { Get-Content -LiteralPath $nobodyStdErr -Raw } else { '' }
+        $script:NobodyActionListPath = [System.IO.Path]::ChangeExtension($script:NobodyCsv, $null).TrimEnd('.') + '_ActionList.csv'
+    }
+
+    It 'completes without error' {
+        $script:NobodyExit | Should -Be 0 -Because "the run failed: $script:NobodyStdErr"
+    }
+
+    It 'still writes an action list file, with a header and zero rows' {
+        Test-Path -LiteralPath $script:NobodyActionListPath | Should -BeTrue
+        @(Import-Csv -LiteralPath $script:NobodyActionListPath) | Should -BeNullOrEmpty
+    }
+}

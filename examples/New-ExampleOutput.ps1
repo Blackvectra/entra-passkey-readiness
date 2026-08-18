@@ -216,7 +216,7 @@ $assessmentPath = Join-Path $examplesDir 'Example-MigrationImpact.csv'
 Export-AssessmentCsv -Data $rows -Path $assessmentPath -SkipAclHardening
 
 $actionListPath = Join-Path $examplesDir 'Example-ActionList.csv'
-Export-AssessmentCsv -Data (New-ActionList -Rows $rows) -Path $actionListPath -SkipAclHardening
+Export-AssessmentCsv -Data @(New-ActionList -Rows $rows) -Path $actionListPath -SkipAclHardening
 
 $ticketPath = Join-Path $examplesDir 'Example-Tickets.csv'
 $null = New-TicketExport -Rows $rows -Path $ticketPath -Customer $customer -MaxIndividual 50 -History @{} -SkipAclHardening

@@ -2253,7 +2253,7 @@ Write-Host 'Reading authentication strengths and Conditional Access MFA policies
 $authStrengthsReadable = $true
 $authStrengthFindings = @()
 try {
-    $authStrengthFindings = Get-AuthenticationStrengthReport
+    $authStrengthFindings = @(Get-AuthenticationStrengthReport)
 }
 catch {
     $authStrengthsReadable = $false
@@ -2263,7 +2263,7 @@ catch {
 $caReadable = $true
 $caMfaPolicies = @()
 try {
-    $caMfaPolicies = Get-ConditionalAccessMfaReport
+    $caMfaPolicies = @(Get-ConditionalAccessMfaReport)
 }
 catch {
     $caReadable = $false
@@ -2612,7 +2612,7 @@ $summary = [PSCustomObject][ordered]@{
 # Emitting the list is read-only. Creating and populating the migration security group
 # stays a deliberate manual step, because that is a write and this tool does not write.
 $actionListPath = [System.IO.Path]::ChangeExtension($OutputPath, $null).TrimEnd('.') + '_ActionList.csv'
-$actionListRows = New-ActionList -Rows $rows
+$actionListRows = @(New-ActionList -Rows $rows)
 
 Export-AssessmentCsv -Data $actionListRows -Path $actionListPath -SkipAclHardening:$SkipAclHardening
 $summary | Add-Member -NotePropertyName ActionListPath -NotePropertyValue (Resolve-Path -LiteralPath $actionListPath).Path
