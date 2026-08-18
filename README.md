@@ -16,10 +16,10 @@ Every Microsoft Graph call is a GET. It does not modify users, groups, policies,
 ```powershell
 Install-Module Microsoft.Graph.Authentication -Scope CurrentUser
 
-.\Get-EntraSmsVoiceMigrationImpact.ps1 -TenantId contoso.onmicrosoft.com
+.\Get-EntraSmsVoiceMigrationImpact.ps1
 ```
 
-That is the whole thing. Sign in as Global Reader or Security Reader, and you get two spreadsheets beside each other:
+That is the whole thing. A browser opens, you sign in as Global Reader or Security Reader, and you get two spreadsheets beside each other:
 
 | File | What it is |
 |---|---|
@@ -38,6 +38,21 @@ EntraSmsVoiceMigrationImpact_Contoso-Manufacturing_20260817_170000_ActionList.cs
 That is the only switch most runs need. Use `-OutputPath` if you want them somewhere specific; everything else is named from it.
 
 Two optional extras: `-HtmlReport` adds a self-contained HTML report to hand a client directly ([sample](examples/Example-Report.html)), and `-ExportTickets` adds a CSV shaped for bulk PSA import ([sample](examples/Example-Tickets.csv)). Neither is needed for the normal run, and nothing is created in any external system by any of it — every output is a file on disk.
+
+### Signing in
+
+For a single customer, **omit `-TenantId` and just sign in.** The run reports whichever tenant you authenticated to, so it cannot be wrong about which customer it assessed.
+
+`-TenantId` exists for the case where a leftover Graph session from a previous customer would otherwise be reused silently — so pass it whenever you work across several tenants in one sitting. It takes a **tenant GUID or a verified domain**, not the account you sign in with:
+
+```powershell
+.\Get-EntraSmsVoiceMigrationImpact.ps1 -TenantId contoso.org                # verified domain
+.\Get-EntraSmsVoiceMigrationImpact.ps1 -TenantId contoso.onmicrosoft.com    # or the initial domain
+```
+
+Passing a sign-in name — `-TenantId administrator@contoso.org` — is the obvious thing to try and the parameter takes it: the domain is used as the tenant and the run says so. Anything that is neither a GUID nor a domain is rejected before the sign-in prompt rather than after it.
+
+**Passwords are not a parameter, and will not be.** Interactive sign-in for one-off runs; certificate-based app-only for anything scheduled or estate-wide ([below](#unattended-authentication)). Both work with MFA and Conditional Access, which a password in a script does not.
 
 ## The three scripts
 
@@ -375,7 +390,7 @@ The sweep does this for you: history lives in the per-tenant folder rather than 
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `-TenantId` | string | current Graph context | Tenant GUID or verified domain. Forces re-auth if it does not match the live session. Mandatory for app-only. |
+| `-TenantId` | string | current Graph context | Tenant GUID or verified domain — **not** a sign-in name, though a UPN is accepted and its domain used. Omit it to sign in interactively. Forces re-auth if it does not match the live session. Mandatory for app-only. |
 | `-ClientId` | guid | none | App registration ID for unattended app-only auth. Requires `-CertificateThumbprint`. |
 | `-CertificateThumbprint` | string | none | Certificate thumbprint for app-only auth. |
 | `-OutputPath` | string | timestamped CSV beside the script, with `-CustomerName` folded in | Destination CSV path. The report and action list are named from it. Parent directory is created if missing. |

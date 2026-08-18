@@ -7,6 +7,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 
 ### Fixed
+- **`-TenantId` rejected the sign-in name, which is the obvious thing to type.** `-TenantId administrator@contoso.org` reached Graph unvalidated and came back as *"Invalid tenant id provided. You can locate your tenant id by following the instructions listed here"* plus a link — a documentation trip for a fix that is deleting the local part of a UPN. Hit on a first real-tenant run.
+
+  The parameter now normalises: a UPN's domain is used as the tenant and the run says so, in a message naming both the value used and the two ways to avoid the message. Anything that is neither a GUID, a domain, nor one of Entra's own multi-tenant aliases is rejected **before** the sign-in prompt rather than after one has been answered, and the error names the offending value and both accepted forms rather than pointing at a search engine.
+
+  The README's quick start now omits `-TenantId` entirely, because interactive sign-in is the simplest correct thing for a single customer and the run reports whichever tenant it authenticated to. `-TenantId` is documented for what it is actually for: stopping a leftover Graph session from a previous customer being reused silently. Passwords remain unsupported and are now documented as a deliberate omission rather than an oversight.
+
 - **An unrecognised policy target silently under-scoped the tenant.** The include-target loop was `if`/`elseif`/`elseif` with no `else`, so a target type this script does not handle — a value Microsoft adds later, `unknownFutureValue`, or any shape not seen here — was dropped without a word. Every user it covered then read as out of scope, and nothing in the CSV, the summary, or the console said the scope was incomplete. An operator reading "policy enabled, nobody in scope" takes that as good news; it is the falsely-safe failure, and the worst kind this tool can have.
 
   Unresolved targets still cannot be turned into users — inventing a membership would be worse than admitting the gap, and treating an unknown include as "everybody" would make every report unusable and train people to ignore the warning. So they are recorded on the scope result, named in the `SmsPolicyInclude`/`VoicePolicyExclude` notes, counted in a new `UnresolvedPolicyTargets` summary field, and warned about in red, stating that the in-scope counts are a floor rather than a total. An unresolved *exclude* is recorded too, though it fails the safe way: those users stay in scope and are over-reported.

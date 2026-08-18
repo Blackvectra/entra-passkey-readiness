@@ -279,6 +279,59 @@ Install it for the current user with:
     Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
 }
 
+function Resolve-TenantIdentifier {
+    <#
+    .SYNOPSIS
+        Normalises whatever somebody actually typed into -TenantId, or explains why it
+        cannot be one.
+    .DESCRIPTION
+        -TenantId wants a tenant GUID or a verified domain. The thing people reach for is
+        the account they sign in with, because that is the credential in their head:
+
+            -TenantId Administrator@contoso.org
+
+        Graph answers that with "Invalid tenant id provided" and a link to a documentation
+        page about finding your tenant ID -- which is a long way round for a fix that is
+        deleting nine characters. The domain half of a UPN is the tenant's domain in every
+        ordinary case, so take it and say so rather than failing.
+
+        Anything that is neither a GUID nor domain-shaped fails here, at parameter time,
+        instead of after a sign-in prompt has already been answered.
+    #>
+    param([AllowNull()][AllowEmptyString()][string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
+    $trimmed = $Value.Trim()
+
+    if ($trimmed -match '^[^@\s]+@(?<domain>[^@\s]+)$') {
+        $domain = $Matches.domain
+        Write-Warning "-TenantId was given the sign-in name '$trimmed'. Using the domain '$domain' as the tenant, and you can sign in as that account at the prompt. Pass '$domain' directly, or omit -TenantId altogether, to skip this message."
+        $trimmed = $domain
+    }
+
+    $isGuid = $trimmed -match '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$'
+    # A verified domain always has a dot. onmicrosoft.com tenants included.
+    $isDomain = $trimmed -match '^[A-Za-z0-9][A-Za-z0-9-]*(\.[A-Za-z0-9][A-Za-z0-9-]*)+$'
+    # Entra's own multi-tenant aliases. Allowed because Connect-MgGraph accepts them and
+    # the run reports the tenant it actually reached, so neither can mislabel a report.
+    $isAlias = $trimmed -in @('common', 'organizations')
+
+    if (-not ($isGuid -or $isDomain -or $isAlias)) {
+        throw @"
+-TenantId '$Value' is not a tenant identifier.
+
+It wants one of:
+  a tenant GUID       e.g. c0ffee00-1111-4222-8333-444455556666
+  a verified domain   e.g. contoso.org  or  contoso.onmicrosoft.com
+
+Or omit -TenantId entirely and sign in interactively -- the run then reports whichever
+tenant you signed in to, which is the simplest thing to do for a single customer.
+"@
+    }
+
+    return $trimmed
+}
+
 function Connect-AssessmentGraph {
     # Least-privilege read permissions only. Nothing here grants write access to any object.
     # Delegated: these are requested as scopes.
@@ -1809,6 +1862,11 @@ function Export-AssessmentCsv {
 # ---------------------------------------------------------------------------
 
 Assert-GraphDependency
+
+# Normalise before connecting, so a sign-in name becomes the tenant it belongs to rather
+# than an error from Graph that names neither the problem nor the fix.
+$TenantId = Resolve-TenantIdentifier -Value $TenantId
+
 $graphContext = Connect-AssessmentGraph
 
 Write-Host 'Reading enabled users (members and guests)...' -ForegroundColor Cyan
