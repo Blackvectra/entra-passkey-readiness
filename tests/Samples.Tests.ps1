@@ -45,12 +45,13 @@ Describe 'Example-MigrationImpact.csv' {
     }
 
     It 'stays narrow enough to read in a spreadsheet' {
-        # The registration report offers more fields than this. They were dropped because
-        # none of them changed what anybody did with the file.
+        # The registration report offers more fields than this. Most were dropped because
+        # none of them changed what anybody did with the file; PreferredMethod is the one
+        # exception, since a real tenant showed it answers a question BlockedAtRetirement
+        # does not -- what a safe user's sign-in prompt still defaults to.
         $columns = $script:Assessment[0].PSObject.Properties.Name
-        $columns.Count | Should -BeLessOrEqual 16
+        $columns.Count | Should -BeLessOrEqual 17
         $columns | Should -Not -Contain 'IsMfaCapable'
-        $columns | Should -Not -Contain 'SystemPreferredMethods'
         $columns | Should -Not -Contain 'RegistrationReportLastUpdatedUtc'
     }
 

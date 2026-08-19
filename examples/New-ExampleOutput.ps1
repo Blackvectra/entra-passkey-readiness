@@ -53,6 +53,9 @@ $examplesDir = $PSScriptRoot
         'Protect-CsvInjection'
         'Export-AssessmentCsv'
     ))
+# PreferredRaw is hand-supplied per fictional person below rather than derived through
+# Get-PreferredAuthenticationMethod, which expects a real registration-report object this
+# generator does not build -- the same shortcut already taken for LegacyMfa and Passwordless.
 
 # Get-ActionListEntry and Get-FriendlyMethodName read these script-scope markers; the
 # real script sets them once before any row is built, which this standalone lift never
@@ -86,41 +89,49 @@ $survivingMfaMethods = @(
 $directory = @(
     @{ Name = 'Dale Hendricks'; Upn = 'dale.hendricks@fabrikam-example.com'
         Type = 'Member'; IsAdmin = $true; Sms = $true; Voice = $true
-        Methods = @('mobilePhone', 'email'); Passwordless = $false; LegacyMfa = 'disabled'; SignInAge = 4 }
+        Methods = @('mobilePhone', 'email'); Passwordless = $false; LegacyMfa = 'disabled'; SignInAge = 4
+        PreferredRaw = 'sms' }
 
     @{ Name = 'Priya Raghunathan'; Upn = 'priya.raghunathan@fabrikam-example.com'
         Type = 'Member'; IsAdmin = $true; Sms = $true; Voice = $false
-        Methods = @('mobilePhone', 'officePhone'); Passwordless = $false; LegacyMfa = 'disabled'; SignInAge = 4 }
+        Methods = @('mobilePhone', 'officePhone'); Passwordless = $false; LegacyMfa = 'disabled'; SignInAge = 4
+        PreferredRaw = 'sms' }
 
     # In neither modern policy scope. Without the legacy read she is Moderate and the
     # instruction is "go and check a portal"; with it she is High and actually actionable.
     @{ Name = 'Rosalind Achebe'; Upn = 'rosalind.achebe@fabrikam-example.com'
         Type = 'Member'; IsAdmin = $false; Sms = $false; Voice = $false
-        Methods = @('officePhone', 'email'); Passwordless = $false; LegacyMfa = 'enforced'; SignInAge = '(none recorded)' }
+        Methods = @('officePhone', 'email'); Passwordless = $false; LegacyMfa = 'enforced'; SignInAge = '(none recorded)'
+        PreferredRaw = 'voiceOffice' }
 
     @{ Name = 'Marcus Whitfield'; Upn = 'marcus.whitfield@fabrikam-example.com'
         Type = 'Member'; IsAdmin = $false; Sms = $true; Voice = $true
-        Methods = @('mobilePhone'); Passwordless = $false; LegacyMfa = 'disabled'; SignInAge = 4 }
+        Methods = @('mobilePhone'); Passwordless = $false; LegacyMfa = 'disabled'; SignInAge = 4
+        PreferredRaw = 'sms' }
 
     @{ Name = 'Ingrid Solberg'; Upn = 'ingrid.solberg_northwind-example.com#EXT#@fabrikam-example.onmicrosoft.com'
         Type = 'Guest'; IsAdmin = $false; Sms = $true; Voice = $false
-        Methods = @('mobilePhone'); Passwordless = $false; LegacyMfa = 'disabled'; SignInAge = 4 }
+        Methods = @('mobilePhone'); Passwordless = $false; LegacyMfa = 'disabled'; SignInAge = 4
+        PreferredRaw = 'sms' }
 
     # In scope, no phone method, and a surviving method that is not passwordless. High, and
     # not stopped at sign-in: the pair of facts the BlockedAtRetirement column exists to keep apart.
     @{ Name = 'Tobias Lindqvist'; Upn = 'tobias.lindqvist@fabrikam-example.com'
         Type = 'Member'; IsAdmin = $false; Sms = $true; Voice = $true
-        Methods = @('softwareOneTimePasscode'); Passwordless = $false; LegacyMfa = 'disabled'; SignInAge = 4 }
+        Methods = @('softwareOneTimePasscode'); Passwordless = $false; LegacyMfa = 'disabled'; SignInAge = 4
+        PreferredRaw = 'oath' }
 
     # The other half of the Moderate band: a phone registration with the legacy state read
     # and found disabled, so it is stale rather than a live sign-in path.
     @{ Name = 'Sofia Marchetti'; Upn = 'sofia.marchetti@fabrikam-example.com'
         Type = 'Member'; IsAdmin = $false; Sms = $false; Voice = $false
-        Methods = @('mobilePhone'); Passwordless = $false; LegacyMfa = 'disabled'; SignInAge = 4 }
+        Methods = @('mobilePhone'); Passwordless = $false; LegacyMfa = 'disabled'; SignInAge = 4
+        PreferredRaw = 'sms' }
 
     @{ Name = 'Service Account - Scanner'; Upn = 'svc-scanner@fabrikam-example.com'
         Type = 'Member'; IsAdmin = $false; Sms = $false; Voice = $false
-        Methods = @('alternateMobilePhone'); Passwordless = $false; LegacyMfa = '(unreadable)'; SignInAge = 412 }
+        Methods = @('alternateMobilePhone'); Passwordless = $false; LegacyMfa = '(unreadable)'; SignInAge = 412
+        PreferredRaw = 'voiceAlternateMobile' }
 
     # Dormant but NOT stopped at sign-in: no phone at all, so BlockedAtRetirement is false
     # and priority falls to "4 - Likely leaver" rather than "1 - Lockout". This is the
@@ -128,19 +139,31 @@ $directory = @(
     # surviving-but-not-passwordless method it registered once and never touched again.
     @{ Name = 'Marguerite Delacroix'; Upn = 'marguerite.delacroix@fabrikam-example.com'
         Type = 'Member'; IsAdmin = $false; Sms = $true; Voice = $true
-        Methods = @('softwareOneTimePasscode'); Passwordless = $false; LegacyMfa = 'disabled'; SignInAge = 620 }
+        Methods = @('softwareOneTimePasscode'); Passwordless = $false; LegacyMfa = 'disabled'; SignInAge = 620
+        PreferredRaw = 'oath' }
 
     @{ Name = 'Nadia Ferreira'; Upn = 'nadia.ferreira@fabrikam-example.com'
         Type = 'Member'; IsAdmin = $true; Sms = $true; Voice = $true
-        Methods = @('passKeyDeviceBound', 'microsoftAuthenticatorPush'); Passwordless = $true; LegacyMfa = 'disabled'; SignInAge = 4 }
+        Methods = @('passKeyDeviceBound', 'microsoftAuthenticatorPush'); Passwordless = $true; LegacyMfa = 'disabled'; SignInAge = 4
+        PreferredRaw = 'push' }
 
+    # The case a real tenant surfaced: already migrated (Windows Hello, Low risk, not in
+    # the action list at all) but system-preferred MFA is off and his own old choice of
+    # SMS never updated itself. Not locked out on 2027-02-01 -- but the prompt he is used
+    # to seeing vanishes that day with no warning. UsersDefaultingToPhonePrompt exists to
+    # catch exactly him, since nothing else on this row would.
     @{ Name = 'Emeka Osondu'; Upn = 'emeka.osondu@fabrikam-example.com'
         Type = 'Member'; IsAdmin = $false; Sms = $false; Voice = $false
-        Methods = @('mobilePhone', 'windowsHelloForBusiness'); Passwordless = $true; LegacyMfa = 'disabled'; SignInAge = 4 }
+        Methods = @('mobilePhone', 'windowsHelloForBusiness'); Passwordless = $true; LegacyMfa = 'disabled'; SignInAge = 4
+        PreferredRaw = 'sms' }
 
+    # No phone registered at all, so no phone-shaped value is possible; 'none' is what
+    # Graph reports when nothing in the classic second-factor enum applies (a FIDO2-only
+    # user, notably -- passkeys predate that enum).
     @{ Name = 'Break Glass 01'; Upn = 'breakglass01@fabrikam-example.onmicrosoft.com'
         Type = 'Member'; IsAdmin = $true; Sms = $true; Voice = $false
-        Methods = @('fido2SecurityKey'); Passwordless = $true; LegacyMfa = 'disabled'; SignInAge = 4 }
+        Methods = @('fido2SecurityKey'); Passwordless = $true; LegacyMfa = 'disabled'; SignInAge = 4
+        PreferredRaw = 'none' }
 )
 
 $index = 0
@@ -171,6 +194,7 @@ $rows = foreach ($person in $directory) {
         DaysSinceLastSignIn    = $person.SignInAge
         PhoneMethodsRegistered = $phoneList
         AllMethodsRegistered   = ($person.Methods -join '; ')
+        PreferredMethod        = Get-FriendlyMethodName ([string]$person.PreferredRaw)
         IsPasswordlessCapable  = $person.Passwordless
         UserId                 = ('11111111-aaaa-4bbb-8ccc-{0:d12}' -f $index)
     }
@@ -214,6 +238,10 @@ $summary = [PSCustomObject][ordered]@{
     PasswordlessCapableInScope = @($candidates | Where-Object { ($_.InSmsPolicyScope -or $_.InVoicePolicyScope) -and $_.IsPasswordlessCapable }).Count
     BlockedAtRetirement        = @($candidates | Where-Object BlockedAtRetirement).Count
     BlockedAdminsAtRetirement  = @($candidates | Where-Object { $_.BlockedAtRetirement -and $_.IsAdmin }).Count
+    UsersDefaultingToPhonePrompt = @($rows | Where-Object {
+            $_.Risk -ne 'Excluded' -and -not $_.BlockedAtRetirement -and
+            $_.PreferredMethod -in @('Phone', 'Alt phone', 'Office phone')
+        }).Count
     UnrecognisedMethods        = ''
     UsersExcludedByPattern     = 0
     ExcludeUpnPattern          = ''

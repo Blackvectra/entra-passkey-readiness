@@ -36,7 +36,8 @@ BeforeAll {
             VoicePolicyInclude = ''; VoicePolicyExclude = ''
             InSmsPolicyScope = 7; InVoicePolicyScope = 4; MigrationCandidates = 10
             Critical = 2; High = 3; Moderate = 2; Low = 3; PasswordlessCapableInScope = 2
-            BlockedAtRetirement = 4; BlockedAdminsAtRetirement = 2; UnrecognisedMethods = ''
+            BlockedAtRetirement = 4; BlockedAdminsAtRetirement = 2; UsersDefaultingToPhonePrompt = 1
+            UnrecognisedMethods = ''
             UsersMissingFromReport = 0; OldestReportRowUtc = '2026-08-15T03:12:44Z'
             OutputPath = 'C:\evidence\contoso.csv'
         }
