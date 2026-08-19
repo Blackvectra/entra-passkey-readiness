@@ -1017,6 +1017,43 @@ function Test-OnlyPhoneBasedMfa {
     return ($surviving.Count -eq 0)
 }
 
+function Get-PreferredAuthenticationMethod {
+    # The method Entra actually prompts a user with by default at sign-in -- a different
+    # question from what they have registered. A user can hold Authenticator push and
+    # still not be blocked on 2027-02-01, but if SMS is what they are used to seeing at
+    # the sign-in prompt, that prompt disappears on the retirement date with no warning,
+    # and the support call that follows looks nothing like the lockouts this tool tracks.
+    #
+    # Graph carries two different fields for this, and only one applies at a time:
+    #   - isSystemPreferredAuthenticationMethodEnabled true: Entra recalculates the
+    #     strongest registered method live, in systemPreferredAuthenticationMethods. This
+    #     cannot get stuck on SMS once a better method exists.
+    #   - Otherwise: the user's own fixed choice, userPreferredMethodForSecondaryAuthentication.
+    #     Nothing recalculates this automatically -- someone who registered Authenticator
+    #     last year can still default to a text message today.
+    param($Registration)
+
+    if (-not $Registration) { return $script:NoReportRowMarker }
+
+    if ([bool](Get-PropertyValue $Registration 'isSystemPreferredAuthenticationMethodEnabled')) {
+        $preferred = @(Get-PropertyValue $Registration 'systemPreferredAuthenticationMethods')
+        if ($preferred.Count -gt 0 -and $preferred[0]) { return [string]$preferred[0] }
+        return 'none'
+    }
+
+    $chosen = Get-PropertyValue $Registration 'userPreferredMethodForSecondaryAuthentication'
+    if ($chosen) { return [string]$chosen } else { return 'none' }
+}
+
+function Test-PreferredMethodIsPhone {
+    # The four userDefaultAuthenticationMethod values that deliver over Microsoft-provided
+    # telephony. A different enum from methodsRegistered's usageAuthMethod -- Graph spells
+    # a preferred voice call as voiceMobile/voiceAlternateMobile/voiceOffice here, not
+    # mobileCall/alternateMobileCall -- so this cannot reuse $phoneMethods.
+    param([string]$Raw)
+    return [bool]($Raw -and ($Raw -in @('sms', 'voiceMobile', 'voiceAlternateMobile', 'voiceOffice')))
+}
+
 function Get-RemediationStep {
     # The single source of the per-user next step. It reaches the CSV as the NextStep
     # column, the HTML report under each row's reason, and the opening line of every
@@ -1582,6 +1619,7 @@ $(if ($blockedAtRetirement -gt 0) {
 <dt>Users in voice scope</dt><dd>$(ConvertTo-SafeHtml $Summary.InVoicePolicyScope)</dd>
 <dt>Oldest report row</dt><dd>$(ConvertTo-SafeHtml $Summary.OldestReportRowUtc) &mdash; the registration report lags live directory state, so this is the age of the evidence</dd>
 <dt>Users missing from report</dt><dd>$(ConvertTo-SafeHtml $Summary.UsersMissingFromReport)</dd>
+<dt>Still default to SMS/voice at sign-in</dt><dd>$(ConvertTo-SafeHtml $Summary.UsersDefaultingToPhonePrompt) &mdash; not locked out, but the prompt they see today disappears on 2027-02-01 unless they change their default first</dd>
 </dl>
 
 <h2>Actionable findings ($($actionable.Count))</h2>
@@ -1682,6 +1720,17 @@ function Get-FriendlyMethodName {
         'email'                           = 'Email'
         'securityQuestion'                = 'Security questions'
         'appPassword'                     = 'App password'
+
+        # userDefaultAuthenticationMethod, not usageAuthMethod: the enum
+        # systemPreferredAuthenticationMethods and userPreferredMethodForSecondaryAuthentication
+        # use for the PreferredMethod column. Spelled differently from the methodsRegistered
+        # enum above -- a preferred voice call is 'voiceMobile', not 'mobileCall'.
+        'push'                            = 'Authenticator'
+        'oath'                            = 'App code'
+        'voiceMobile'                     = 'Phone'
+        'voiceAlternateMobile'            = 'Alt phone'
+        'voiceOffice'                     = 'Office phone'
+        'none'                            = 'None set'
     }
 
     $raw = @($Methods -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
@@ -2599,6 +2648,12 @@ $rows = foreach ($user in $enabledUsers) {
     $onlyPhoneBasedMfa = Test-OnlyPhoneBasedMfa -MethodsRegistered ([string[]]$methods) `
         -PhoneMethods $phoneMethods -SurvivingMfaMethods $survivingMfaMethods
 
+    # A different population from BlockedAtRetirement: not locked out -- a stronger method
+    # is registered -- but still shown a text message by default today, with nothing
+    # scheduled to change that before it stops working. The summary aggregates this from
+    # the finished rows below, the same way every other tenant-wide count in this script does.
+    $preferredMethod = Get-FriendlyMethodName ([string](Get-PreferredAuthenticationMethod -Registration $registration))
+
     $upn = [string](Get-PropertyValue $user 'userPrincipalName')
 
     # Excluded users keep their row so the export stays a complete record of what was
@@ -2627,10 +2682,13 @@ $rows = foreach ($user in $enabledUsers) {
     # is stated in the column somebody actually reads.
     $allMethods = if ($registration) { ($methods -join '; ') } else { $script:NoReportRowMarker }
 
-    # Sixteen columns, chosen so the file is readable in Excel. The registration report
-    # also returns isMfaCapable, isMfaRegistered, systemPreferredAuthenticationMethods and
-    # a per-row timestamp; none of them changed what anybody did with the file, and the
-    # evidence age is still reported once, as OldestReportRowUtc in the summary.
+    # Seventeen columns, chosen so the file is readable in Excel. The registration report
+    # also returns isMfaCapable, isMfaRegistered, and a per-row timestamp; none of them
+    # changed what anybody did with the file, and the evidence age is still reported once,
+    # as OldestReportRowUtc in the summary. PreferredMethod is the one addition to that
+    # list: what the sign-in prompt actually defaults to, a different question from what
+    # is merely registered, and the field a real tenant showed users still defaulting to
+    # SMS on even after registering something stronger.
     #
     # PerUserMfaState is always written, even on a run that did not ask for it. A column
     # that appears and disappears between runs breaks Compare-EntraSmsVoiceAssessment and
@@ -2650,6 +2708,7 @@ $rows = foreach ($user in $enabledUsers) {
         DaysSinceLastSignIn   = $signInAge
         PhoneMethodsRegistered = $phoneMethodList
         AllMethodsRegistered  = $allMethods
+        PreferredMethod       = $preferredMethod
         IsPasswordlessCapable = $isPasswordlessCapable
         UserId                = $id
     }
@@ -2772,6 +2831,16 @@ $summary = [PSCustomObject][ordered]@{
     # than the risk bands, and the one to drive to zero before the date.
     BlockedAtRetirement        = @($candidateRows | Where-Object BlockedAtRetirement).Count
     BlockedAdminsAtRetirement  = @($candidateRows | Where-Object { $_.BlockedAtRetirement -and $_.IsAdmin }).Count
+    # A different signal from BlockedAtRetirement: not locked out -- a stronger method is
+    # registered -- but the sign-in prompt they are used to seeing is still SMS or voice
+    # today, and nothing changes that before it stops working. Computed across every
+    # assessed user, not just the actionable bands: this is common among people who look
+    # perfectly safe otherwise, including users already marked Low because they hold a
+    # passwordless method they simply are not being prompted with.
+    UsersDefaultingToPhonePrompt = @($rows | Where-Object {
+            $_.Risk -ne 'Excluded' -and -not $_.BlockedAtRetirement -and
+            $_.PreferredMethod -in @('Phone', 'Alt phone', 'Office phone')
+        }).Count
     UnrecognisedMethods        = (@($script:UnrecognisedMethods | Sort-Object) -join '; ')
     UsersExcludedByPattern     = @($rows | Where-Object Risk -eq 'Excluded').Count
     ExcludeUpnPattern          = (@($ExcludeUpnPattern) -join ' | ')
@@ -2873,6 +2942,13 @@ if ($summary.BlockedAtRetirement -gt 0) {
 }
 else {
     Write-Host 'Nobody loses their sign-in on 2027-02-01: no user holds a phone as their only method that satisfies MFA.' -ForegroundColor Green
+}
+
+# A softer number than BlockedAtRetirement, but the one that explains support calls on the
+# day itself: these people are not locked out, but the prompt they are used to seeing
+# disappears with no warning unless somebody changes their default first.
+if ($summary.UsersDefaultingToPhonePrompt -gt 0) {
+    Write-Host "$($summary.UsersDefaultingToPhonePrompt) user(s) are not locked out but still default to SMS or voice as their preferred sign-in prompt, even though a stronger method is registered. Have them set a different default in Security Info before 2027-02-01, or expect a confused support call that day instead of a lockout." -ForegroundColor Yellow
 }
 
 # Immediately after, because it changes how long the queue really is.

@@ -164,24 +164,36 @@ function Invoke-MgGraphRequest {
         return [PSCustomObject]@{ value = @(
             [PSCustomObject]@{ id='u-admin';  isAdmin=$true;  isMfaCapable=$true; isMfaRegistered=$true; isPasswordlessCapable=$false
                                methodsRegistered=@('mobilePhone','email'); systemPreferredAuthenticationMethods=@('sms')
+                               isSystemPreferredAuthenticationMethodEnabled=$true
                                lastUpdatedDateTime='2026-08-15T03:12:44Z' }
+            # System-preferred MFA is OFF for Marcus, and his own choice was never updated
+            # after he registered Authenticator: he is not blocked (push survives), but his
+            # sign-in prompt still defaults to SMS today. This is the case a real tenant
+            # surfaced -- systemPreferredAuthenticationMethods says push, but nothing reads
+            # it while isSystemPreferredAuthenticationMethodEnabled is false.
             [PSCustomObject]@{ id='u-member'; isAdmin=$false; isMfaCapable=$true; isMfaRegistered=$true; isPasswordlessCapable=$false
                                methodsRegistered=@('mobilePhone','microsoftAuthenticatorPush'); systemPreferredAuthenticationMethods=@('push')
+                               isSystemPreferredAuthenticationMethodEnabled=$false; userPreferredMethodForSecondaryAuthentication='sms'
                                lastUpdatedDateTime='2026-08-16T03:12:44Z' }
             [PSCustomObject]@{ id='u-safe';   isAdmin=$false; isMfaCapable=$true; isMfaRegistered=$true; isPasswordlessCapable=$true
                                methodsRegistered=@('passKeyDeviceBound'); systemPreferredAuthenticationMethods=@()
+                               isSystemPreferredAuthenticationMethodEnabled=$true
                                lastUpdatedDateTime='2026-08-17T03:12:44Z' }
             [PSCustomObject]@{ id='u-legacy'; isAdmin=$false; isMfaCapable=$true; isMfaRegistered=$true; isPasswordlessCapable=$false
                                methodsRegistered=@('officePhone'); systemPreferredAuthenticationMethods=@('voiceOffice')
+                               isSystemPreferredAuthenticationMethodEnabled=$true
                                lastUpdatedDateTime='2026-08-16T03:12:44Z' }
             [PSCustomObject]@{ id='u-clear';  isAdmin=$false; isMfaCapable=$true; isMfaRegistered=$true; isPasswordlessCapable=$true
                                methodsRegistered=@('fido2SecurityKey'); systemPreferredAuthenticationMethods=@()
+                               isSystemPreferredAuthenticationMethodEnabled=$true
                                lastUpdatedDateTime='2026-08-17T03:12:44Z' }
             [PSCustomObject]@{ id='u-fine';   isAdmin=$false; isMfaCapable=$true; isMfaRegistered=$true; isPasswordlessCapable=$true
                                methodsRegistered=@('passKeyDeviceBound'); systemPreferredAuthenticationMethods=@()
+                               isSystemPreferredAuthenticationMethodEnabled=$true
                                lastUpdatedDateTime='2026-08-17T03:12:44Z' }
             [PSCustomObject]@{ id='u-svc';    isAdmin=$false; isMfaCapable=$true; isMfaRegistered=$true; isPasswordlessCapable=$false
                                methodsRegistered=@('alternateMobilePhone'); systemPreferredAuthenticationMethods=@('sms')
+                               isSystemPreferredAuthenticationMethodEnabled=$true
                                lastUpdatedDateTime='2026-08-16T03:12:44Z' }
         )}
     }
@@ -250,12 +262,12 @@ Describe 'A default run against a stubbed tenant' {
         (Join-Path $script:OutDir 'assessment.html') | Should -Not -Exist
     }
 
-    It 'writes the trimmed sixteen-column schema' {
+    It 'writes the trimmed seventeen-column schema' {
         $columns = (Import-Csv -LiteralPath $script:CsvPath)[0].PSObject.Properties.Name
         $columns | Should -Be @(
             'Risk', 'Reason', 'NextStep', 'BlockedAtRetirement', 'DisplayName', 'UserPrincipalName',
             'UserType', 'IsAdmin', 'InSmsPolicyScope', 'InVoicePolicyScope', 'PerUserMfaState',
-            'DaysSinceLastSignIn', 'PhoneMethodsRegistered', 'AllMethodsRegistered',
+            'DaysSinceLastSignIn', 'PhoneMethodsRegistered', 'AllMethodsRegistered', 'PreferredMethod',
             'IsPasswordlessCapable', 'UserId'
         )
     }
@@ -388,6 +400,40 @@ Describe 'A default run against a stubbed tenant' {
         $marcus = $rows | Where-Object UserPrincipalName -eq 'marcus@fabrikam-example.com'
         $marcus.Risk | Should -Be 'High'
         $marcus.BlockedAtRetirement | Should -Be 'False'
+    }
+
+    It 'reports what the sign-in prompt actually defaults to, separately from what is registered' {
+        $rows = @(Import-Csv -LiteralPath $script:CsvPath)
+
+        # Marcus: not blocked, but system-preferred MFA is off and his own stale choice of
+        # SMS was never updated after he registered Authenticator. This is the population
+        # BlockedAtRetirement cannot see -- he looks perfectly safe by that column alone.
+        $marcus = $rows | Where-Object UserPrincipalName -eq 'marcus@fabrikam-example.com'
+        $marcus.PreferredMethod | Should -Be 'Phone'
+
+        # Dale: system-preferred is on and correctly says SMS -- but he is already caught
+        # by BlockedAtRetirement, so he must not be double-counted in the new metric.
+        ($rows | Where-Object UserPrincipalName -eq 'dale@fabrikam-example.com').PreferredMethod | Should -Be 'Phone'
+
+        # Rosalind: system-preferred on, computed live from her one registered method.
+        ($rows | Where-Object UserPrincipalName -eq 'rosalind@fabrikam-example.com').PreferredMethod | Should -Be 'Office phone'
+
+        # Nadia/passKeyDeviceBound-only users: system-preferred on, nothing in the classic
+        # enum applies, Graph reports 'none'.
+        ($rows | Where-Object UserPrincipalName -eq 'nadia@fabrikam-example.com').PreferredMethod | Should -Be 'None set'
+
+        # Ghost: no registration-report row at all, so no preference can be read -- must
+        # read as unknown, never blank.
+        ($rows | Where-Object UserPrincipalName -eq 'ghost@fabrikam-example.com').PreferredMethod |
+            Should -Be 'Unknown - not in the registration report'
+    }
+
+    It 'counts only the population BlockedAtRetirement cannot already see' {
+        # Marcus is the one user whose default is phone-shaped and who is not blocked.
+        # Dale and svc-scanner also default to a phone prompt, but both are already
+        # BlockedAtRetirement and must not inflate this separate count.
+        $script:Summary.UsersDefaultingToPhonePrompt | Should -Be 1
+        $script:StdOut | Should -Match 'not locked out but still default to SMS or voice'
     }
 
     It 'names the files from the customer when -OutputPath is not given' {

@@ -554,12 +554,22 @@ Accepts and passes through `-IncludeUnaffected`, `-SkipLegacyPerUserMfa`, `-Excl
 | `PerUserMfaState` | string | `disabled`, `enabled`, or `enforced` from legacy per-user MFA; `(not checked)` if `-SkipLegacyPerUserMfa` was set; `(unreadable)` if Graph would not answer. Always written, so the column never appears and disappears between runs. |
 | `PhoneMethodsRegistered` | string | Semicolon-delimited subset: `mobilePhone`, `alternateMobilePhone`, `officePhone`, `smsSignIn`. |
 | `AllMethodsRegistered` | string | Every method reported for the user, or `(no row in registration report)` when the report had no data for them. |
+| `PreferredMethod` | string | What the sign-in prompt actually defaults to today -- a different question from what is merely registered. `(no row in registration report)` mirrors `AllMethodsRegistered`; `None set` means nothing in the classic second-factor list applies (a passkey-only user, typically). See [below](#preferred-method-vs-registered-methods). |
 | `IsPasswordlessCapable` | bool | Reports a passwordless method. This is the mitigating control. |
 | `UserId` | guid | Object ID. Kept last because it is a join key, not something you read. |
 
-Sixteen columns, sorted highest risk first, then admins ahead of standard users, then display name.
+Seventeen columns, sorted highest risk first, then admins ahead of standard users, then display name.
 
-The registration report also returns `isMfaCapable`, `isMfaRegistered`, `systemPreferredAuthenticationMethods`, and a per-row timestamp. None of them changed what anybody did with the file, so they are not written. Evidence age is still reported once, as `OldestReportRowUtc` in the summary, and a user with no report row is called out in `AllMethodsRegistered` rather than needing a column of its own.
+The registration report also returns `isMfaCapable`, `isMfaRegistered`, and a per-row timestamp. None of them changed what anybody did with the file, so they are not written. Evidence age is still reported once, as `OldestReportRowUtc` in the summary, and a user with no report row is called out in `AllMethodsRegistered` and `PreferredMethod` rather than needing a column of its own.
+
+### Preferred method vs. registered methods
+
+`BlockedAtRetirement` answers "does this user have anything left to sign in with." It does not answer a different question a real tenant surfaced: a user can hold Microsoft Authenticator -- so they are not blocked -- and still be shown a text message every time they sign in, because Entra decides the default sign-in prompt from one of two unrelated fields:
+
+- **System-preferred MFA is on** (`isSystemPreferredAuthenticationMethodEnabled`): Entra recalculates the strongest registered method live. This cannot get stuck on SMS once a better method exists.
+- **System-preferred MFA is off**: the user's own choice, made once and never revisited. Somebody who registered Authenticator last year can still default to SMS today, and nothing prompts them to change it before the method disappears on 2027-02-01.
+
+`PreferredMethod` reads whichever of the two applies. `UsersDefaultingToPhonePrompt` in the summary counts everyone whose default is SMS or voice **and** who is not already caught by `BlockedAtRetirement` -- the population that will not be locked out, but will hit a confusing, unexplained sign-in prompt on the retirement date instead. Have them set a different default in **Security Info** before then.
 
 ---
 

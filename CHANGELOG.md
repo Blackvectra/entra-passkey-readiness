@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+- **`PreferredMethod`**, a new assessment CSV column answering a question `BlockedAtRetirement` cannot: what does this user's sign-in prompt actually default to today. A real tenant showed users who are not locked out -- they hold Authenticator or another surviving method -- but are still shown a text message every time they sign in, because Entra decides the default from one of two unrelated fields: `isSystemPreferredAuthenticationMethodEnabled` on recalculates the strongest registered method live and can never get stuck on SMS; off, it falls back to the user's own choice from whenever they last set it, which nothing updates automatically. `Get-PreferredAuthenticationMethod` reads whichever applies; `Get-FriendlyMethodName` renders it in words, extended with the `userDefaultAuthenticationMethod` enum's own spellings (`push`, `oath`, `voiceMobile`, `voiceAlternateMobile`, `voiceOffice`, `none`) since it differs from the `usageAuthMethod` enum used everywhere else in the file.
+
+  The summary gains `UsersDefaultingToPhonePrompt`: everyone whose default is SMS or voice **and** who is not already counted in `BlockedAtRetirement`, so the two numbers never double up. Printed on the console as its own line, and in the HTML report's summary block. No new Graph permission or endpoint -- both source fields are already returned by the `userRegistrationDetails` read this script makes on every run; only the parsing is new.
+
 ### Changed
 - **The action list is now plain language, and no longer carries object IDs.** Real multi-tenant runs surfaced two things worth fixing at once: the file a technician actually opens still read like a diagnostic export (raw `True`/`False`, a GUID column nobody used, `mobilePhone; microsoftAuthenticatorPush` instead of words), and the default filename was a timestamp indistinguishable from four others after a busy afternoon.
 
