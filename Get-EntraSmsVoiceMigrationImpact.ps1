@@ -253,8 +253,16 @@ $script:StaleSignInDays = 90
 # methodsRegistered's usageAuthMethod: a preferred voice call is spelled voiceMobile here,
 # not mobileCall. Declared once so the phone test below and the tenant-wide count in the
 # summary cannot drift apart as Microsoft extends the enum.
+# Both generations of spellings, for the same reason $phoneMethods carries both. A live
+# tenant returned 'PhoneAppNotification' and 'Fido2' here rather than the documented 'push'
+# and a passkey value -- these are the old StrongAuthenticationMethod names, and Graph
+# still hands them back. Matching only the documented set means a user whose default is
+# 'OneWaySMS' is not counted as defaulting to SMS, which is the exact question this signal
+# was added to answer.
 $script:PreferredMethodValues = @(
     'push', 'oath', 'voiceMobile', 'voiceAlternateMobile', 'voiceOffice', 'sms', 'none'
+    'PhoneAppNotification', 'PhoneAppOTP', 'OneWaySMS'
+    'TwoWayVoiceMobile', 'TwoWayVoiceAlternateMobile', 'TwoWayVoiceOffice'
 )
 
 # Group display names are resolved once and reused; the same exclusion group is commonly
@@ -1062,7 +1070,12 @@ function Test-PreferredMethodIsPhone {
     # The four userDefaultAuthenticationMethod values that deliver over Microsoft-provided
     # telephony, out of the seven in $script:PreferredMethodValues.
     param([string]$Raw)
-    return [bool]($Raw -and ($Raw -in @('sms', 'voiceMobile', 'voiceAlternateMobile', 'voiceOffice')))
+    return [bool]($Raw -and ($Raw -in @(
+                'sms', 'voiceMobile', 'voiceAlternateMobile', 'voiceOffice'
+                # Older StrongAuthenticationMethod spellings for the same four. Seen in a
+                # live tenant alongside PhoneAppNotification, so they are not hypothetical.
+                'OneWaySMS', 'TwoWayVoiceMobile', 'TwoWayVoiceAlternateMobile', 'TwoWayVoiceOffice'
+            )))
 }
 
 function Get-RemediationStep {
@@ -1120,7 +1133,20 @@ function Get-RemediationStep {
             if ($PerUserMfaState -eq 'disabled') {
                 return "No legacy per-user MFA exposure: this run read the per-user MFA state and it is disabled, so the phone registration is stale rather than a live sign-in path. Confirm a phishing-resistant method is registered, then remove $methods."
             }
-            return "Check this user in the legacy per-user MFA service settings. If they are enabled for SMS or voice there, convert them to the modern authentication methods policy so the exposure becomes measurable, then remediate as High. If the registration is simply stale, remove $methods once a phishing-resistant method is confirmed. This run did not read that state; drop -SkipLegacyPerUserMfa to have it answered automatically."
+            # Three different reasons the state is unknown, and they need different
+            # instructions. Telling somebody to drop a switch they did not set sends them
+            # to re-run a command that will fail exactly the same way, and buries the real
+            # cause -- Graph refused the read for this specific user.
+            $checkStep = "Check this user in the legacy per-user MFA service settings. If they are enabled for SMS or voice there, convert them to the modern authentication methods policy so the exposure becomes measurable, then remediate as High. If the registration is simply stale, remove $methods once a phishing-resistant method is confirmed."
+            if ($PerUserMfaState -eq $script:PerUserMfaUnreadable) {
+                return "$checkStep This run tried to read that state and Graph would not answer for this user, so it has to be confirmed by hand rather than re-run."
+            }
+            # Empty as well as the marker: the parameter documents empty as "not read", and
+            # a caller that leaves it off means the same thing as the run that skipped it.
+            if ([string]::IsNullOrWhiteSpace($PerUserMfaState) -or $PerUserMfaState -eq $script:PerUserMfaNotChecked) {
+                return "$checkStep This run did not read that state; drop -SkipLegacyPerUserMfa to have it answered automatically."
+            }
+            return $checkStep
         }
         'Low' {
             if ($HasPhoneMethodRegistered) {
@@ -1742,6 +1768,18 @@ function Get-FriendlyMethodName {
         'voiceAlternateMobile'            = 'Alt phone'
         'voiceOffice'                     = 'Office phone'
         'none'                            = 'None set'
+        # The older StrongAuthenticationMethod spellings for the same values. A live tenant
+        # returned these rather than the documented ones, so without them the column shows
+        # a reader raw enum names like 'PhoneAppNotification' where every other cell in the
+        # file is in words. Case-insensitive lookup already covers WindowsHelloForBusiness
+        # and the x509 names above; these have no lowercase twin to fall back on.
+        'PhoneAppNotification'            = 'Authenticator'
+        'PhoneAppOTP'                     = 'App code'
+        'OneWaySMS'                       = 'Phone'
+        'TwoWayVoiceMobile'               = 'Phone'
+        'TwoWayVoiceAlternateMobile'      = 'Alt phone'
+        'TwoWayVoiceOffice'               = 'Office phone'
+        'Fido2'                           = 'FIDO2 key'
     }
 
     $raw = @($Methods -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
@@ -2702,7 +2740,19 @@ $rows = foreach ($user in $enabledUsers) {
     # is registered -- but still shown a text message by default today, with nothing
     # scheduled to change that before it stops working. The summary aggregates this from
     # the finished rows below, the same way every other tenant-wide count in this script does.
-    $preferredMethod = Get-FriendlyMethodName ([string](Get-PreferredAuthenticationMethod -Registration $registration))
+    $rawPreferred = [string](Get-PreferredAuthenticationMethod -Registration $registration)
+    $preferredMethod = Get-FriendlyMethodName $rawPreferred
+
+    # The same tracking the registered methods get, and for the same reason. A live tenant
+    # returned two spellings this script had never heard of, and because an unknown value
+    # passes through Get-FriendlyMethodName untranslated, the only symptom was a raw enum
+    # name sitting in a column of plain English -- easy to miss, and silently wrong in the
+    # count if the value happened to be an SMS one. An unrecognised value now names itself
+    # in the summary rather than waiting to be noticed.
+    if ($rawPreferred -and $rawPreferred -ne $script:NoReportRowMarker -and
+        $rawPreferred -notin $script:PreferredMethodValues) {
+        [void]$script:UnrecognisedMethods.Add($rawPreferred)
+    }
 
     $upn = [string](Get-PropertyValue $user 'userPrincipalName')
 

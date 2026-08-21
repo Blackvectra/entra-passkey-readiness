@@ -85,8 +85,19 @@ Describe 'Test-PreferredMethodIsPhone' {
         }
     }
 
+    It 'treats the older spelling of each one as phone too' {
+        # Not hypothetical. A live tenant returned 'PhoneAppNotification' and 'Fido2' in
+        # this field rather than the documented 'push' and a passkey value -- Graph still
+        # hands back the old StrongAuthenticationMethod names. Matching only the documented
+        # set means a user whose default is 'OneWaySMS' is not counted as defaulting to
+        # SMS, which is the single question this signal exists to answer.
+        foreach ($value in @('OneWaySMS', 'TwoWayVoiceMobile', 'TwoWayVoiceAlternateMobile', 'TwoWayVoiceOffice')) {
+            Test-PreferredMethodIsPhone -Raw $value | Should -BeTrue -Because "$value is the older spelling of a retiring method"
+        }
+    }
+
     It 'does not treat a surviving method as phone' {
-        foreach ($value in @('push', 'oath')) {
+        foreach ($value in @('push', 'oath', 'PhoneAppNotification', 'PhoneAppOTP', 'Fido2')) {
             Test-PreferredMethodIsPhone -Raw $value | Should -BeFalse
         }
     }
@@ -96,5 +107,31 @@ Describe 'Test-PreferredMethodIsPhone' {
         Test-PreferredMethodIsPhone -Raw '' | Should -BeFalse
         Test-PreferredMethodIsPhone -Raw $null | Should -BeFalse
         Test-PreferredMethodIsPhone -Raw $script:NoReportRowMarker | Should -BeFalse
+    }
+}
+
+Describe 'Rendering a preferred method for a reader' {
+    BeforeAll {
+        . (Import-ScriptFunction -Path (Get-AssessmentScriptPath) -Name @('Get-FriendlyMethodName'))
+    }
+
+    It 'puts the older spellings into words like every other cell in the file' {
+        # An unknown name passes through untranslated, which is the right default -- hiding
+        # a method somebody holds is worse than an awkward word. But it meant a real export
+        # showed 'PhoneAppNotification' and 'Fido2' sitting in a column that is otherwise
+        # plain English, and nothing flagged it.
+        Get-FriendlyMethodName 'PhoneAppNotification' | Should -Be 'Authenticator'
+        Get-FriendlyMethodName 'PhoneAppOTP' | Should -Be 'App code'
+        Get-FriendlyMethodName 'OneWaySMS' | Should -Be 'Phone'
+        Get-FriendlyMethodName 'TwoWayVoiceMobile' | Should -Be 'Phone'
+        Get-FriendlyMethodName 'TwoWayVoiceAlternateMobile' | Should -Be 'Alt phone'
+        Get-FriendlyMethodName 'TwoWayVoiceOffice' | Should -Be 'Office phone'
+        Get-FriendlyMethodName 'Fido2' | Should -Be 'FIDO2 key'
+    }
+
+    It 'already handled the names that differ only by case' {
+        # Guards the assumption the fix above rests on: the lookup is case-insensitive, so
+        # only the values with no lowercase twin needed adding.
+        Get-FriendlyMethodName 'WindowsHelloForBusiness' | Should -Be 'Windows Hello'
     }
 }

@@ -61,6 +61,10 @@ $examplesDir = $PSScriptRoot
 # real script sets them once before any row is built, which this standalone lift never
 # runs far enough to reach.
 $script:NoReportRowMarker = '(no row in registration report)'
+# Get-RemediationStep distinguishes "not read" from "Graph would not answer", because the
+# two need different instructions, so the lifted function needs both markers in scope.
+$script:PerUserMfaNotChecked = '(not checked)'
+$script:PerUserMfaUnreadable = '(unreadable)'
 $script:SignInAgeNever = '(none recorded)'
 $script:SignInAgeUnavailable = '(not available)'
 $script:StaleSignInDays = 90
