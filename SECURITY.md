@@ -4,7 +4,9 @@
 
 `Get-EntraSmsVoiceMigrationImpact.ps1` performs **HTTP GET requests only** against Microsoft Graph. It does not create, update, or delete any object. It does not modify users, groups, authentication methods, the Authentication Methods Policy, the registration campaign, or any other tenant setting.
 
-The only artefact it writes is a CSV file at the path you specify.
+Every run writes two spreadsheets: the full assessment CSV at the path you specify, and an action list CSV beside it. `-HtmlReport`, `-ExportTickets`, and `-ExportFixScript` add further files in the same folder. All of them are written locally. Nothing is uploaded anywhere.
+
+The generated remediation script is the one output that contains write commands. It is written to disk for you to read and run yourself; this tool never executes it.
 
 Every Graph endpoint the script contacts is declared against a single `$script:GraphBase` constant, so the network surface is auditable by reading the script. If you are running this in a client tenant for the first time, read it before you run it. That is the intended workflow.
 
@@ -18,8 +20,10 @@ A generated CSV contains, per user:
 - Object IDs
 - Administrative status (`IsAdmin`)
 - Every registered authentication method
-- Whether the user is MFA-capable, MFA-registered, and passwordless-capable
-- System-preferred authentication methods
+- Whether the user is passwordless-capable
+- The method their sign-in prompt defaults to today
+- Legacy per-user MFA state
+- Days since their last successful sign-in
 - A risk band that explicitly identifies which accounts are weakest
 
 Taken together, this is a targeting list. It tells a reader exactly which privileged accounts rely on phone-based authentication and lack a phishing-resistant method. In the hands of an attacker running a SIM-swap or MFA-fatigue campaign (MITRE ATT&CK `T1451`, `T1621`, `T1111`), it removes the reconnaissance step entirely.
@@ -59,7 +63,7 @@ The script requests four delegated, read-only Graph scopes:
 
 Recommended Entra role for the operator: **Global Reader** or **Security Reader**. Do not run this as Global Administrator. There is no capability in the script that requires it, and doing so needlessly places a privileged session on the workstation performing the assessment.
 
-The script deliberately does not read legacy per-user MFA state, because doing so would require beta endpoints and broader scopes. That limitation is documented rather than engineered around.
+Legacy per-user MFA state is read on every run. It is the one value that comes from a beta Graph endpoint, and it needs no permission beyond the `Policy.Read.All` already listed above. `-SkipLegacyPerUserMfa` opts out of the beta surface entirely, at the cost of leaving that exposure unmeasured.
 
 ## Credentials
 

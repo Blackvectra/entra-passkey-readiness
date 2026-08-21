@@ -249,6 +249,14 @@ $script:SignInAgeUnavailable = '(not available)'
 # chase. Not a hard rule and not used to drop anybody -- it only annotates and counts.
 $script:StaleSignInDays = 90
 
+# Every value userDefaultAuthenticationMethod can hold, which is a different enum from
+# methodsRegistered's usageAuthMethod: a preferred voice call is spelled voiceMobile here,
+# not mobileCall. Declared once so the phone test below and the tenant-wide count in the
+# summary cannot drift apart as Microsoft extends the enum.
+$script:PreferredMethodValues = @(
+    'push', 'oath', 'voiceMobile', 'voiceAlternateMobile', 'voiceOffice', 'sms', 'none'
+)
+
 # Group display names are resolved once and reused; the same exclusion group is commonly
 # referenced by both the SMS and voice method configurations.
 $script:GroupNameCache = @{}
@@ -635,7 +643,7 @@ function Get-LegacyPerUserMfaState {
             $response = Invoke-GraphBatch -Uri "$script:GraphBeta/`$batch" -Request $requests.ToArray()
             $answered = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
-            foreach ($item in @($response.responses)) {
+            foreach ($item in @(Get-PropertyValue $response 'responses')) {
                 $requestId = [string](Get-PropertyValue $item 'id')
                 if (-not $byRequestId.ContainsKey($requestId)) { continue }
                 $subjectId = $byRequestId[$requestId]
@@ -1047,9 +1055,7 @@ function Get-PreferredAuthenticationMethod {
 
 function Test-PreferredMethodIsPhone {
     # The four userDefaultAuthenticationMethod values that deliver over Microsoft-provided
-    # telephony. A different enum from methodsRegistered's usageAuthMethod -- Graph spells
-    # a preferred voice call as voiceMobile/voiceAlternateMobile/voiceOffice here, not
-    # mobileCall/alternateMobileCall -- so this cannot reuse $phoneMethods.
+    # telephony, out of the seven in $script:PreferredMethodValues.
     param([string]$Raw)
     return [bool]($Raw -and ($Raw -in @('sms', 'voiceMobile', 'voiceAlternateMobile', 'voiceOffice')))
 }
@@ -2770,6 +2776,14 @@ $reportTimestamps = @($registrations |
 # Include and exclude targets neither scope resolution could turn into users.
 $unresolvedTargets = @($smsScope.UnresolvedTargets) + @($voiceScope.UnresolvedTargets)
 
+# PreferredMethod reaches the rows already translated for a reader, so the tenant-wide
+# count below has to match on display names. Deriving them from the enum through the same
+# two functions the rows went through means a change to either -- a new Graph value, a
+# reworded label -- cannot leave the count matching on a string nothing produces any more.
+$phonePreferredLabels = @($script:PreferredMethodValues |
+    Where-Object { Test-PreferredMethodIsPhone -Raw $_ } |
+    ForEach-Object { Get-FriendlyMethodName $_ })
+
 $summary = [PSCustomObject][ordered]@{
     TenantId                   = $graphContext.TenantId
     AssessmentTimeUtc          = $assessmentStartUtc.ToString('o')
@@ -2839,7 +2853,7 @@ $summary = [PSCustomObject][ordered]@{
     # passwordless method they simply are not being prompted with.
     UsersDefaultingToPhonePrompt = @($rows | Where-Object {
             $_.Risk -ne 'Excluded' -and -not $_.BlockedAtRetirement -and
-            $_.PreferredMethod -in @('Phone', 'Alt phone', 'Office phone')
+            $_.PreferredMethod -in $phonePreferredLabels
         }).Count
     UnrecognisedMethods        = (@($script:UnrecognisedMethods | Sort-Object) -join '; ')
     UsersExcludedByPattern     = @($rows | Where-Object Risk -eq 'Excluded').Count

@@ -174,6 +174,18 @@ begin {
     Set-StrictMode -Version Latest
     $ErrorActionPreference = 'Stop'
 
+    function ConvertTo-SafeLabel {
+        # Filesystem-safe folder name. Customer labels come from an operator-supplied CSV,
+        # but that CSV may be generated from a PSA export, so treat it as untrusted input:
+        # a label of "..\..\Windows\System32" would otherwise write outside ReportRoot.
+        # Replace path characters, strip leading/trailing dots to kill traversal, then take
+        # the leaf only.
+        param([string]$Label)
+
+        $safe = ($Label -replace '[\\/:*?"<>|]', '_').Trim().Trim('.')
+        return [System.IO.Path]::GetFileName($safe)
+    }
+
     if (-not (Test-Path -LiteralPath $AssessmentScriptPath -PathType Leaf)) {
         throw "Assessment script not found at $AssessmentScriptPath. Supply -AssessmentScriptPath."
     }
@@ -218,6 +230,24 @@ process {
 
 end {
     if ($targets.Count -eq 0) { throw 'No tenants to assess.' }
+
+    # The customer label is the only thing identifying a tenant in the output folder name,
+    # the summary row, and the -Resume match. Two tenants sharing one label is therefore
+    # not a cosmetic problem: the second run overwrites the first tenant's evidence, and a
+    # resumed sweep marks one tenant complete on the other's results. Two labels that
+    # differ only in characters the sanitiser strips collide the same way, so the check is
+    # on the sanitised form. Fail here, before any tenant is contacted.
+    $labelOwners = @{}
+    foreach ($target in $targets) {
+        $safe = ConvertTo-SafeLabel -Label ([string]$target.Label)
+        if ([string]::IsNullOrWhiteSpace($safe)) { continue }
+        if ($labelOwners.ContainsKey($safe)) {
+            throw ("Two tenants share the customer label '$safe': $($labelOwners[$safe]) and $($target.TenantId). " +
+                'Labels name the output folder and drive -Resume matching, so duplicates overwrite one tenant with another. ' +
+                'Give each tenant a distinct CustomerName in the tenant list.')
+        }
+        $labelOwners[$safe] = [string]$target.TenantId
+    }
 
     function New-SweepResultRow {
         # One shape for every result, so the sequential path, the parallel path, and the
@@ -299,13 +329,9 @@ end {
     foreach ($target in $targets) {
         $index++
 
-        # Filesystem-safe folder name. Customer labels come from an operator-supplied CSV,
-        # but that CSV may be generated from a PSA export, so treat it as untrusted input:
-        # a label of "..\..\Windows\System32" would otherwise write outside ReportRoot.
-        # Replace path characters, strip leading/trailing dots to kill traversal, then take
-        # the leaf only.
-        $safeLabel = ($target.Label -replace '[\\/:*?"<>|]', '_').Trim().Trim('.')
-        $safeLabel = [System.IO.Path]::GetFileName($safeLabel)
+        # A label that sanitises away to nothing still needs a folder, and the run index
+        # makes that fallback unique where the label could not.
+        $safeLabel = ConvertTo-SafeLabel -Label ([string]$target.Label)
         if ([string]::IsNullOrWhiteSpace($safeLabel)) { $safeLabel = "tenant_$index" }
         $tenantDir = Join-Path $ReportRoot $safeLabel
         $csvPath = Join-Path $tenantDir "EntraSmsVoiceMigrationImpact_$runStamp.csv"

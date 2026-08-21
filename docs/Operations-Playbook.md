@@ -239,7 +239,7 @@ Gaps worth knowing about, roughly in order of how much time each would save an e
 |---|---|
 | Estate-wide HTML report | Reports are per-tenant today. A single roll-up ranking customers by Critical count is what an account manager actually wants. |
 | Trend series rather than pairwise diff | The diff compares two runs. Ten runs plotted would show whether a campaign is decelerating, which is the thing you want to catch early. |
-| Reading Conditional Access policies | The largest remaining gap, and it is not a small feature: evaluating whether a policy set actually enforces MFA means modelling grant-control combinations, exclusion groups, and workload identities. Manual checklist in [MFA-Enforcement.md](MFA-Enforcement.md) until then. |
+| Evaluating Conditional Access per user | Policies that require MFA are already inventoried by name and state, and so are the ones granting through an authentication strength that still allows SMS or voice. What is not answered is whether a given user is actually covered: that means modelling grant-control combinations, exclusion groups, and workload identities. It is the largest remaining gap and it is not a small feature. Manual checklist in [MFA-Enforcement.md](MFA-Enforcement.md) until then. |
 
 ---
 
@@ -247,6 +247,6 @@ Gaps worth knowing about, roughly in order of how much time each would save an e
 
 - [README](../README.md) — installation, parameters, output schema
 - [MFA-Enforcement.md](MFA-Enforcement.md) — why a Conditional Access policy is not the same as MFA being enforced
-- [Risk-Classification.md](Risk-Classification.md) — how the five bands are derived
-- [Microsoft-Migration-Background.md](Microsoft-Migration-Background.md) — the timeline and framework mapping
+- [Risk-Classification.md](Risk-Classification.md) — how the five bands are derived, and the control-framework mapping
+- [Microsoft-Migration-Background.md](Microsoft-Migration-Background.md) — Microsoft's timeline, and where SMS and voice can hide in a tenant
 - [SECURITY.md](../SECURITY.md) — handling exports

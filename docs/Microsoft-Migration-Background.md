@@ -58,7 +58,7 @@ There is no per-user attribute that says "this user uses SMS." Any tool claiming
 
 Users enabled for SMS or voice through **legacy per-user MFA service settings** are in scope for the retirement even if the modern Authentication Methods Policy has both methods disabled.
 
-This script deliberately does not read that state. Doing so requires beta Graph endpoints and broader delegated scopes, which would break the least-privilege model the tool is built around. Instead, the `Moderate` risk band exists to surface the symptom: a phone method registered on a user who does not resolve into modern AMP scope. A significant Moderate population is a prompt to check legacy per-user MFA settings manually.
+This script reads that state on every run and reports it per user in the `PerUserMfaState` column. The read uses a beta Graph endpoint but no permission beyond the `Policy.Read.All` the run already requests, so the least-privilege model holds. `-SkipLegacyPerUserMfa` opts out of the beta surface; on a run that skips it, the `Moderate` risk band is what surfaces the symptom instead — a phone method registered on a user who does not resolve into modern AMP scope — and a significant Moderate population is a prompt to check the legacy settings by hand.
 
 Converting from legacy per-user MFA to the Authentication Methods Policy is worth doing on its own merits before this deadline, because it makes the exposure measurable.
 
