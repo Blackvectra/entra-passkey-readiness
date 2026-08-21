@@ -11,84 +11,43 @@ It answers a question the Entra portal does not answer directly: **which specifi
 
 Every Microsoft Graph call is a GET. It does not modify users, groups, policies, authentication methods, or registration campaigns, which is what makes it safe to run against a customer tenant during business hours without a change window.
 
-## Quick start
+---
 
-```powershell
-Install-Module Microsoft.Graph.Authentication -Scope CurrentUser
+## Table of contents
 
-.\Get-EntraSmsVoiceMigrationImpact.ps1
-```
-
-That is the whole thing. A browser opens, you sign in as Global Reader or Security Reader, and you get two spreadsheets in a folder named for the tenant:
-
-```
-reports\Contoso\Contoso_2026-08-18.csv
-reports\Contoso\Contoso_2026-08-18_ActionList.csv
-```
-
-| File | What it is |
+| Section | What it covers |
 |---|---|
-| `<tenant>_<date>.csv` | The full assessment: one risk-ranked row per exposed user, highest risk first |
-| `..._ActionList.csv` | The work list: affected users only, what they have, what to do, in plain language — no IDs. Attach it to a ticket ([sample](examples/Example-ActionList.csv)) |
+| [Overview](#overview) | The retirement timeline, and the two populations people conflate |
+| [Components](#components) | The three scripts and what each one is for |
+| [Prerequisites](#prerequisites) | Modules, roles, and Graph permissions |
+| [Installation](#installation) | Getting the scripts onto a workstation that will run them |
+| [Get started](#get-started) | The first run against one tenant |
+| [Usage](#usage) | Estate sweeps, progress tracking, client reports, ticket queues |
+| [Parameter reference](#parameter-reference) | Every parameter on all three scripts |
+| [Output reference](#output-reference) | Console summary and CSV schema |
+| [Risk classifications](#risk-classifications) | How the five bands are derived |
+| [Who actually gets stopped](#who-actually-gets-stopped) | The lockout population, which is not the same as the risk bands |
+| [Coverage](#coverage-who-this-actually-finds) | Exactly who this finds, and who it does not |
+| [Legacy per-user MFA](#legacy-per-user-mfa) | The exposure the modern policy cannot see |
+| [Service accounts](#service-accounts-and-shared-mailboxes) | Keeping non-human accounts out of the work queue |
+| [Fixing what it finds](#fixing-what-it-finds) | A reviewed script, never an automatic write |
+| [Troubleshooting](#troubleshooting) | Common failures and what they mean |
+| [Known limitations](#known-limitations) | Read before presenting results to a client |
+| [Contributing](#contributing) | Tests, linting, and the read-only contract |
+| [Security](#security) | Handling tenant evidence |
 
-Both open straight into Excel. Values that would otherwise be read as formulas are neutralised on the way out, so a display name beginning `=` cannot execute when somebody opens the file.
+Further reading, all in [docs/](docs):
 
-The folder name comes from `-CustomerName` when you pass it, otherwise from the domain of the account you signed in with, otherwise from the tenant's GUID as a last resort — so running five clients back to back produces five folders you can tell apart at a glance, not five files distinguishable only by a timestamp. A re-run the same day overwrites that day's files; different days sit side by side. Pass `-CustomerName "Contoso Manufacturing"` when the sign-in domain does not read as the client's name:
-
-```powershell
-.\Get-EntraSmsVoiceMigrationImpact.ps1 -CustomerName "Contoso Manufacturing"
-```
-
-Use `-OutputPath` if you want the files somewhere else entirely; everything else is named from it.
-
-Two optional extras: `-HtmlReport` adds a self-contained HTML report to hand a client directly ([sample](examples/Example-Report.html)), and `-ExportTickets` adds a CSV shaped for bulk PSA import ([sample](examples/Example-Tickets.csv)). Neither is needed for the normal run, and nothing is created in any external system by any of it — every output is a file on disk.
-
-### Signing in
-
-For a single customer, **omit `-TenantId` and just sign in.** The run reports whichever tenant you authenticated to, so it cannot be wrong about which customer it assessed.
-
-`-TenantId` exists for the case where a leftover Graph session from a previous customer would otherwise be reused silently — so pass it whenever you work across several tenants in one sitting. It takes a **tenant GUID or a verified domain**, not the account you sign in with:
-
-```powershell
-.\Get-EntraSmsVoiceMigrationImpact.ps1 -TenantId contoso.org                # verified domain
-.\Get-EntraSmsVoiceMigrationImpact.ps1 -TenantId contoso.onmicrosoft.com    # or the initial domain
-```
-
-Passing a sign-in name — `-TenantId administrator@contoso.org` — is the obvious thing to try and the parameter takes it: the domain is used as the tenant and the run says so. Anything that is neither a GUID nor a domain is rejected before the sign-in prompt rather than after it.
-
-**Passwords are not a parameter, and will not be.** Interactive sign-in for one-off runs; certificate-based app-only for anything scheduled or estate-wide ([below](#unattended-authentication)). Both work with MFA and Conditional Access, which a password in a script does not.
-
-## The three scripts
-
-| Script | Use it to |
+| Document | What it covers |
 |---|---|
-| `Get-EntraSmsVoiceMigrationImpact.ps1` | Assess one tenant. This is the core of the project. |
-| `Invoke-EntraSmsVoiceSweep.ps1` | Assess many tenants, with optional concurrency and resume. |
-| `Compare-EntraSmsVoiceAssessment.ps1` | Diff two assessments to see whether the campaign is moving anybody. Reads files only; no Graph, no permissions. |
-
-## Contents
-
-- [Why this exists](#why-this-exists) — the timeline, and the two populations people conflate
-- [Prerequisites](#prerequisites) — modules, roles, Graph scopes
-- [Usage](#usage) — single tenant, estate sweeps, progress tracking, reports, tickets
-- [Output](#output) — console summary and CSV schema
-- [Service accounts](#service-accounts-and-shared-mailboxes) — keeping non-human accounts out of the work queue
-- [Legacy per-user MFA](#legacy-per-user-mfa) — the one exposure that needs a beta endpoint
-- [Fixing what it finds](#fixing-what-it-finds) — a reviewed script, never an automatic write
-- [Who actually gets stopped](#who-actually-gets-stopped) — the lockout population, which is not the same as the risk bands
-- [Risk classifications](#risk-classifications) — the five bands
-- [Coverage](#coverage-who-this-actually-finds) — exactly who this finds, and who it does not
-- [Limitations](#limitations) — read before presenting results to a client
-- [Is MFA even enforced?](docs/MFA-Enforcement.md) — why a Conditional Access policy is not the same as MFA being enforced
-- [Troubleshooting](#troubleshooting)
-- [Development](#development) — tests, linting, contributing
-- [Security](#security)
-
-Running this across an estate? Start with the [Operations Playbook](docs/Operations-Playbook.md): where the time actually goes, what to automate first, and the recurring loop.
+| [Operations Playbook](docs/Operations-Playbook.md) | Running this across an estate: where the time goes, what to automate first, and the recurring loop |
+| [Risk Classification](docs/Risk-Classification.md) | The full derivation of the five bands, and the control-framework mapping |
+| [MFA Enforcement](docs/MFA-Enforcement.md) | Why a Conditional Access policy is not the same as MFA being enforced |
+| [Microsoft Migration Background](docs/Microsoft-Migration-Background.md) | Microsoft's own timeline, and where SMS and voice can hide in a tenant |
 
 ---
 
-## Why this exists
+## Overview
 
 Microsoft announced on July 13, 2026 that Microsoft-provided SMS and voice authentication in Entra ID is being retired, with passkeys becoming the default authentication experience.
 
@@ -104,7 +63,7 @@ A temporary opt-out exists for the 2026-09-01 through 2027-02-01 changes. There 
 Two distinct populations matter, and conflating them is the most common planning error:
 
 1. **Policy scope** — users targeted by the SMS or voice method in AMP. This set drives the September 1 auto-enablement and nudge, and it is usually the larger set.
-2. **Method registration** — users who actually have a phone number registered as an authentication method. This set drives who gets blocked on February 1.
+2. **Method registration** — users who have a phone number registered as an authentication method. This set drives who gets blocked on February 1.
 
 This tool reports both, per user, in one pass, and classifies the intersection.
 
@@ -116,7 +75,7 @@ The per-user rows are most of the picture, but not all of it. A run also checks 
 |---|---|
 | SMS / voice authentication method policies (nested groups, exclusions) | ✅ Per-user scope resolution |
 | SMS enabled as a **first-factor sign-in** method | ✅ Flagged per target — the portal enables this by default when SMS is switched on |
-| What each user has actually registered | ✅ Per-user, including guests |
+| What each user has registered | ✅ Per-user, including guests |
 | Legacy per-user MFA (enabled/enforced) | ✅ Per-user, on every run |
 | Legacy MFA **service settings** page and legacy **SSPR methods** page | ⚠️ No API exists. The run reads the policy migration state instead: anything short of `migrationComplete` means both pages still apply, and the console prints the exact portal paths to check |
 | Authentication strengths permitting SMS/voice combinations | ✅ Named in the summary, with strengths that have *nothing else left* flagged as unsatisfiable |
@@ -149,6 +108,16 @@ Treat `Jan 28, 2027` as an artefact of Microsoft's analyzer rather than a publis
 
 ---
 
+## Components
+
+| Script | Use it to |
+|---|---|
+| `Get-EntraSmsVoiceMigrationImpact.ps1` | Assess one tenant. This is the core of the project. |
+| `Invoke-EntraSmsVoiceSweep.ps1` | Assess many tenants, with optional concurrency and resume. |
+| `Compare-EntraSmsVoiceAssessment.ps1` | Diff two assessments to see whether the campaign is moving anybody. Reads files only; no Graph, no permissions. |
+
+---
+
 ## Prerequisites
 
 | Requirement | Detail |
@@ -158,9 +127,8 @@ Treat `Jan 28, 2027` as an artefact of Microsoft's analyzer rather than a publis
 | Entra role | Global Reader or Security Reader |
 | Network | Access to `graph.microsoft.com` |
 
-```powershell
-Install-Module Microsoft.Graph.Authentication -Scope CurrentUser
-```
+> [!IMPORTANT]
+> Run this as Global Reader or Security Reader, not Global Administrator. Nothing in the script needs a privileged role, and running it as one puts a privileged session on the workstation performing the assessment for no benefit.
 
 ### Delegated Graph permissions
 
@@ -185,7 +153,11 @@ cd entra-passkey-readiness
 
 # Only needed if downloaded as a zip rather than cloned
 Get-ChildItem *.ps1 | Unblock-File
+
+Install-Module Microsoft.Graph.Authentication -Scope CurrentUser
 ```
+
+`Microsoft.Graph.Authentication` is the only module required. The scripts call Graph over REST rather than through the resource-specific SDK modules, so there is nothing else to install and nothing to keep in version step.
 
 ### "cannot be loaded … is not digitally signed"
 
@@ -241,6 +213,53 @@ nothing is wrong with the script or your account. You downloaded the repository 
 If step 5 shows a policy set at `MachinePolicy` or `UserPolicy` scope (Group Policy), `Set-ExecutionPolicy` cannot override it — that is your organisation's endpoint policy doing its job. Options, in order of preference: clone with `git clone` instead of downloading a zip (cloned files carry no Mark of the Web, so `RemoteSigned` machines run them as local scripts); ask your endpoint team to allow the script; or run it from a machine not under that policy.
 
 **Do not use `-ExecutionPolicy Bypass` as a habit.** It works, but it teaches you to disable a control instead of satisfying it, and this is a tool you may run on customer-facing machines.
+
+---
+
+## Get started
+
+```powershell
+.\Get-EntraSmsVoiceMigrationImpact.ps1
+```
+
+That is the whole thing. A browser opens, you sign in as Global Reader or Security Reader, and you get two spreadsheets in a folder named for the tenant:
+
+```
+reports\Contoso\Contoso_2026-08-18.csv
+reports\Contoso\Contoso_2026-08-18_ActionList.csv
+```
+
+| File | What it is |
+|---|---|
+| `<tenant>_<date>.csv` | The full assessment: one risk-ranked row per exposed user, highest risk first |
+| `..._ActionList.csv` | The work list: affected users only, what they have, what to do, in plain language — no IDs. Attach it to a ticket ([sample](examples/Example-ActionList.csv)) |
+
+Both open straight into Excel. Values that would otherwise be read as formulas are neutralised on the way out, so a display name beginning `=` cannot execute when somebody opens the file.
+
+The folder name comes from `-CustomerName` when you pass it, the domain of the account you signed in with if you don't, and the tenant's GUID as a last resort. Running five clients back to back produces five folders you can tell apart at a glance, not five files distinguishable only by a timestamp. A re-run the same day overwrites that day's files; different days sit side by side. Pass `-CustomerName "Contoso Manufacturing"` when the sign-in domain does not read as the client's name:
+
+```powershell
+.\Get-EntraSmsVoiceMigrationImpact.ps1 -CustomerName "Contoso Manufacturing"
+```
+
+Use `-OutputPath` if you want the files somewhere else entirely; everything else is named from it.
+
+Two optional extras: `-HtmlReport` adds a self-contained HTML report to hand a client directly ([sample](examples/Example-Report.html)), and `-ExportTickets` adds a CSV shaped for bulk PSA import ([sample](examples/Example-Tickets.csv)). Neither is needed for the normal run, and nothing is created in any external system by any of it — every output is a file on disk.
+
+### Signing in
+
+For a single customer, **omit `-TenantId` and just sign in.** The run reports whichever tenant you authenticated to, so it cannot be wrong about which customer it assessed.
+
+`-TenantId` exists for the case where a leftover Graph session from a previous customer would otherwise be reused silently — so pass it whenever you work across several tenants in one sitting. It takes a **tenant GUID or a verified domain**, not the account you sign in with:
+
+```powershell
+.\Get-EntraSmsVoiceMigrationImpact.ps1 -TenantId contoso.org                # verified domain
+.\Get-EntraSmsVoiceMigrationImpact.ps1 -TenantId contoso.onmicrosoft.com    # or the initial domain
+```
+
+Passing a sign-in name — `-TenantId administrator@contoso.org` — is the obvious thing to try and the parameter takes it: the domain is used as the tenant and the run says so. Anything that is neither a GUID nor a domain is rejected before the sign-in prompt rather than after it.
+
+**Passwords are not a parameter, and will not be.** Interactive sign-in for one-off runs; certificate-based app-only for anything scheduled or estate-wide ([below](#unattended-authentication)). Both work with MFA and Conditional Access, which a password in a script does not.
 
 ---
 
@@ -421,7 +440,7 @@ Ticket volume is managed deliberately:
 | Moderate | One investigation ticket for the whole population. The finding is about tenant configuration, not any individual. |
 | Low / Informational | No ticket. |
 
-A tenant with `All users` targeting can produce hundreds of High findings. Ticketing each one creates a backlog nobody works, so the overflow becomes a campaign ticket that points at the remediation group CSV.
+A tenant with `All users` targeting can produce hundreds of High findings. Ticketing each one creates a backlog nobody works, so the overflow becomes a campaign ticket that points at the action list CSV.
 
 Each `Description` is self-contained: the user, their registered methods, why the ticket exists, a **Next step** line, and numbered remediation steps. A tech can work it without opening the report.
 
@@ -446,9 +465,9 @@ Ticket queue (3 tickets): D:\ClientEvidence\contoso_Tickets.csv
   14 user(s) already ticketed by an earlier run and not raised again. History: D:\ClientEvidence\contoso_TicketHistory.json
 ```
 
-The history file holds object IDs and risk bands only — no names, no UPNs — so it can sit wherever is convenient without carrying identifying data.
+The history file holds object IDs and risk bands only, no names and no UPNs, so it can sit wherever is convenient without carrying identifying data.
 
-**One thing to get right.** The history defaults to a file beside the ticket CSV. If you write to dated output folders — which the [playbook](docs/Operations-Playbook.md) recommends — each run lands somewhere new and finds no history, so every run looks like a first run. Point `-TicketHistoryPath` at a stable path per customer:
+**One thing to get right.** The history defaults to a file beside the ticket CSV. If you write to dated output folders, which the [playbook](docs/Operations-Playbook.md) recommends, each run lands somewhere new and finds no history, so every run looks like a first run. Point `-TicketHistoryPath` at a stable path per customer:
 
 ```powershell
 .\Get-EntraSmsVoiceMigrationImpact.ps1 -TenantId contoso.onmicrosoft.com `
@@ -460,14 +479,16 @@ The sweep does this for you: history lives in the per-tenant folder rather than 
 
 `-IgnoreTicketHistory` raises tickets for everyone regardless, for rebuilding a queue that was lost. `TicketsSuppressedAsAlreadyRaised` in the summary tells you how many were held back, so a near-empty queue reads as "already ticketed" rather than "assessment found nothing".
 
-### Parameters
+---
 
-#### `Get-EntraSmsVoiceMigrationImpact.ps1`
+## Parameter reference
+
+### `Get-EntraSmsVoiceMigrationImpact.ps1`
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `-TenantId` | string | current Graph context | Tenant GUID or verified domain — **not** a sign-in name, though a UPN is accepted and its domain used. Omit it to sign in interactively. Forces re-auth if it does not match the live session. Mandatory for app-only. |
-| `-ClientId` | guid | none | App registration ID for unattended app-only auth. Requires `-CertificateThumbprint`. |
+| `-ClientId` | string | none | App registration ID for unattended app-only auth, validated as a GUID. Requires `-CertificateThumbprint`. |
 | `-CertificateThumbprint` | string | none | Certificate thumbprint for app-only auth. |
 | `-OutputPath` | string | timestamped CSV beside the script, with `-CustomerName` folded in | Destination CSV path. The report and action list are named from it. Parent directory is created if missing. |
 | `-IncludeUnaffected` | switch | off | Include every enabled user, not just migration candidates. |
@@ -475,7 +496,7 @@ The sweep does this for you: history lives in the per-tenant folder rather than 
 | `-SkipLegacyPerUserMfa` | switch | off | **Skips** the legacy per-user MFA read, which every run otherwise performs. Only worth setting to avoid the beta endpoint entirely; it costs you the assessment's one real blind spot. See [Legacy per-user MFA](#legacy-per-user-mfa). |
 | `-ExcludeUpnPattern` | string[] | none | Regex patterns matched against the UPN. Matching users are marked `Excluded` and left out of every count and work queue. See [Service accounts](#service-accounts-and-shared-mailboxes). |
 | `-HtmlReport` | switch | off | Also write a self-contained HTML client report beside the CSVs. |
-| `-CustomerName` | string | none | Heading used on the HTML report. |
+| `-CustomerName` | string | sign-in domain | The client's name. Sets the output folder name, the heading on the HTML report, and the `Company` field on every exported ticket, so five clients assessed back to back produce five folders you can tell apart. |
 | `-ExportTickets` | switch | off | Also write a PSA-importable ticket queue. |
 | `-MaxIndividualTickets` | int | 50 | Cap on individual tickets before High findings batch into a campaign ticket. |
 | `-TicketHistoryPath` | string | beside the ticket CSV | Users already ticketed, so a re-run does not raise duplicates. See [Re-running without duplicating tickets](#re-running-without-duplicating-tickets). |
@@ -483,7 +504,7 @@ The sweep does this for you: history lives in the per-tenant folder rather than 
 | `-SkipAclHardening` | switch | off | Skip restricting output file permissions. Use only where the filesystem rejects ACL changes. |
 | `-PassThru` | switch | off | Emit per-user objects to the pipeline in addition to the summary. |
 
-#### `Invoke-EntraSmsVoiceSweep.ps1`
+### `Invoke-EntraSmsVoiceSweep.ps1`
 
 Accepts and passes through `-IncludeUnaffected`, `-SkipLegacyPerUserMfa`, `-ExcludeUpnPattern`, `-HtmlReport`, `-ExportTickets`, `-MaxIndividualTickets`, and `-SkipAclHardening`. Its own parameters:
 
@@ -497,7 +518,7 @@ Accepts and passes through `-IncludeUnaffected`, `-SkipLegacyPerUserMfa`, `-Excl
 | `-ThrottleLimit` | int | 1 | Tenants assessed concurrently, 1 to 16. Above 1 requires app-only auth. |
 | `-Resume` | switch | off | Skip tenants already recorded as `Success` in the newest sweep summary under `-ReportRoot`. |
 
-#### `Compare-EntraSmsVoiceAssessment.ps1`
+### `Compare-EntraSmsVoiceAssessment.ps1`
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -510,7 +531,7 @@ Accepts and passes through `-IncludeUnaffected`, `-SkipLegacyPerUserMfa`, `-Excl
 
 ---
 
-## Output
+## Output reference
 
 ### Console summary
 
@@ -518,7 +539,7 @@ Accepts and passes through `-IncludeUnaffected`, `-SkipLegacyPerUserMfa`, `-Excl
 |---|---|
 | `TenantId` | Tenant the assessment actually ran against |
 | `DirectoryUsersReturned` / `EnabledUsersAssessed` / `UsersSkippedNotEnabled` | The assessment's own arithmetic. The last two must sum to the first — that is what makes a silently dropped user visible instead of invisible. |
-| `RegistrationCampaignState` | `enabled`, `disabled`, or `default (Microsoft managed)` |
+| `RegistrationCampaignState` | `enabled`, `disabled`, `default (Microsoft managed)`, or `unknown` when the policy read returned no state |
 | `SmsPolicyState` / `VoicePolicyState` | AMP state of each method |
 | `SmsPolicyInclude` / `SmsPolicyExclude` | Resolved include and exclude targets, with transitive member counts |
 | `InSmsPolicyScope` / `InVoicePolicyScope` | Enabled users resolved into each method's scope |
@@ -550,11 +571,11 @@ Accepts and passes through `-IncludeUnaffected`, `-SkipLegacyPerUserMfa`, `-Excl
 | `IsAdmin` | bool | Reported by the registration report as holding a privileged role. |
 | `InSmsPolicyScope` | bool | Resolved into the SMS method's AMP scope after exclusions. |
 | `InVoicePolicyScope` | bool | Resolved into the voice method's AMP scope after exclusions. |
-| `DaysSinceLastSignIn` | int or marker | Whole days since the last successful sign-in. `(none recorded)` means never, or not since April 2020 -- Microsoft keeps no history before then. `(not available)` means the tenant is not licensed to report sign-in activity (Entra ID P1/P2). **A name on a work queue that has not signed in for a year is a deprovisioning ticket, not a passkey one.** |
+| `DaysSinceLastSignIn` | int or marker | Whole days since the last successful sign-in. `(none recorded)` means never, or not since April 2020 — Microsoft keeps no history before then. `(not available)` means the tenant is not licensed to report sign-in activity (Entra ID P1/P2). **A name on a work queue that has not signed in for a year is a deprovisioning ticket, not a passkey one.** |
 | `PerUserMfaState` | string | `disabled`, `enabled`, or `enforced` from legacy per-user MFA; `(not checked)` if `-SkipLegacyPerUserMfa` was set; `(unreadable)` if Graph would not answer. Always written, so the column never appears and disappears between runs. |
-| `PhoneMethodsRegistered` | string | Semicolon-delimited subset: `mobilePhone`, `alternateMobilePhone`, `officePhone`, `smsSignIn`. |
+| `PhoneMethodsRegistered` | string | Semicolon-delimited subset of the retiring methods: `mobilePhone`, `alternateMobilePhone`, `officePhone`, `smsSignIn`, plus the older enum spellings `sms`, `mobileSMS`, `mobileCall`, and `alternateMobileCall`. Both generations are matched, because which one a tenant's report returns is not something to discover on the day. |
 | `AllMethodsRegistered` | string | Every method reported for the user, or `(no row in registration report)` when the report had no data for them. |
-| `PreferredMethod` | string | What the sign-in prompt actually defaults to today -- a different question from what is merely registered. `(no row in registration report)` mirrors `AllMethodsRegistered`; `None set` means nothing in the classic second-factor list applies (a passkey-only user, typically). See [below](#preferred-method-vs-registered-methods). |
+| `PreferredMethod` | string | What the sign-in prompt defaults to today — a different question from what is merely registered. `(no row in registration report)` mirrors `AllMethodsRegistered`; `None set` means nothing in the classic second-factor list applies (a passkey-only user, typically). See [below](#preferred-method-vs-registered-methods). |
 | `IsPasswordlessCapable` | bool | Reports a passwordless method. This is the mitigating control. |
 | `UserId` | guid | Object ID. Kept last because it is a join key, not something you read. |
 
@@ -564,79 +585,29 @@ The registration report also returns `isMfaCapable`, `isMfaRegistered`, and a pe
 
 ### Preferred method vs. registered methods
 
-`BlockedAtRetirement` answers "does this user have anything left to sign in with." It does not answer a different question a real tenant surfaced: a user can hold Microsoft Authenticator -- so they are not blocked -- and still be shown a text message every time they sign in, because Entra decides the default sign-in prompt from one of two unrelated fields:
+`BlockedAtRetirement` answers "does this user have anything left to sign in with." It does not answer a different question a real tenant surfaced: a user can hold Microsoft Authenticator, so they are not blocked, and still be shown a text message every time they sign in, because Entra decides the default sign-in prompt from one of two unrelated fields:
 
 - **System-preferred MFA is on** (`isSystemPreferredAuthenticationMethodEnabled`): Entra recalculates the strongest registered method live. This cannot get stuck on SMS once a better method exists.
 - **System-preferred MFA is off**: the user's own choice, made once and never revisited. Somebody who registered Authenticator last year can still default to SMS today, and nothing prompts them to change it before the method disappears on 2027-02-01.
 
-`PreferredMethod` reads whichever of the two applies. `UsersDefaultingToPhonePrompt` in the summary counts everyone whose default is SMS or voice **and** who is not already caught by `BlockedAtRetirement` -- the population that will not be locked out, but will hit a confusing, unexplained sign-in prompt on the retirement date instead. Have them set a different default in **Security Info** before then.
+`PreferredMethod` reads whichever of the two applies. `UsersDefaultingToPhonePrompt` in the summary counts everyone whose default is SMS or voice **and** who is not already caught by `BlockedAtRetirement` — the population that will not be locked out, but will hit a confusing, unexplained sign-in prompt on the retirement date instead. Have them set a different default in **Security Info** before then.
 
 ---
 
-## Service accounts and shared mailboxes
+## Risk classifications
 
-A tenant targeting `All users` surfaces every shared mailbox, sync account, and service account as a migration candidate. They are technically in scope, nobody signs into them interactively, and ticketing them wastes a technician's afternoon.
+Summarised here; full logic and remediation guidance in [docs/Risk-Classification.md](docs/Risk-Classification.md).
 
-```powershell
-.\Get-EntraSmsVoiceMigrationImpact.ps1 -TenantId contoso.onmicrosoft.com `
-    -ExcludeUpnPattern '^svc-', '^shared-', '^noreply@'
-```
-
-Patterns are regular expressions matched case-insensitively against the UPN. Anchor them yourself: `^svc-` catches `svc-backup@contoso.com` and leaves `marc.svc-jones@contoso.com` alone, while `svc-` catches both. An invalid pattern fails at parameter binding, before the tenant is contacted.
-
-**Matching users are marked, not deleted.** Their row stays in the assessment CSV with `Risk = Excluded`, and they are left out of every count, the action list, the tickets, and the report. That distinction matters: a filter that silently removes people from a security assessment is how a real account disappears behind a careless pattern, and nothing about the output would look unusual. The summary reports `UsersExcludedByPattern` and the patterns used, and the console says how many were removed.
-
-Check that number on the first run for a new customer. If it is larger than the count of non-human accounts you expect, the pattern is too broad.
-
-The sweep accepts the same parameter, since one naming convention usually covers a whole estate.
+| Band | Condition |
+|---|---|
+| **Critical** | Privileged user, in policy scope, phone method registered, not passwordless-capable |
+| **High** | In policy scope with a registered phone method and no passwordless method, or in policy scope and not passwordless-capable |
+| **Moderate** | Phone method registered, no passwordless method, but outside resolved modern policy scope — usually legacy per-user MFA exposure |
+| **Low** | Exposed to the change but already passwordless-capable |
+| **Informational** | No resolved exposure |
+| **Excluded** | Not a risk level. The user matched `-ExcludeUpnPattern` and was left out of every count. |
 
 ---
-
-## Legacy per-user MFA
-
-The one exposure this assessment can otherwise miss entirely.
-
-Legacy per-user MFA is a separate enforcement layer that predates the Authentication Methods Policy and is not replaced by it. A user `enabled` or `enforced` there is in scope for the SMS and voice retirement whatever the modern policy says — and the modern registration campaign does not reach them, so a passkey push aimed at that user lands nowhere and the run after this one reports them unchanged.
-
-```powershell
-.\Get-EntraSmsVoiceMigrationImpact.ps1 -TenantId contoso.onmicrosoft.com
-```
-
-Every run reads this state by default. Opting out with `-SkipLegacyPerUserMfa` leaves those users surfacing as `Moderate` with an instruction to go and check a portal by hand. Across an estate that is one manual check per tenant that does not happen, and a tenant still running on legacy per-user MFA assesses as unremarkable.
-
-**It needs no extra access.** The state is readable at `GET /beta/users/{id}/authentication/requirements` with `Policy.Read.All` — which every run already requests — and Global Reader is a supported role. The only reason to skip it is to avoid the beta endpoint entirely, not permission. The cost is one batched Graph call per twenty users.
-
-What the check changes:
-
-| | With `-SkipLegacyPerUserMfa` | Default run |
-|---|---|---|
-| `PerUserMfaState` | `(not checked)` on every row | `disabled`, `enabled`, `enforced`, or `(unreadable)` |
-| A user held in legacy MFA | `Moderate`, "go and check a portal" | The band their real exposure earns, up to `Critical`, with a next step that starts by converting them to the modern policy |
-| A `Moderate` user who is genuinely clear | Indistinguishable from the above | Confirmed stale registration, no portal visit |
-| Summary | — | `LegacyPerUserMfaChecked`, `LegacyPerUserMfaInForce`, `LegacyPerUserMfaUnreadable` |
-
-**Not knowing never looks like knowing.** A denied read, a request Graph left unanswered, and a `200` with no state in the body all land as `(unreadable)`, counted in `LegacyPerUserMfaUnreadable`. None of them is ever treated as "no legacy MFA", because that reading is indistinguishable from a genuine all-clear and it is exactly the one that leaves somebody locked out with a clean report on file. A throttled request inside a batch — which returns `200` at the envelope level, so nothing above would retry it — is retried across rounds before being given up on.
-
-A non-zero `LegacyPerUserMfaInForce` is also an MFA enforcement finding in its own right: per-user MFA sitting underneath a Conditional Access policy has its own trusted-IP bypass and its own remembered-device setting, neither of which Conditional Access knows about. See [docs/MFA-Enforcement.md](docs/MFA-Enforcement.md).
-
-## Fixing what it finds
-
-The assessment writes nothing to any tenant, and that does not change. What `-ExportFixScript` adds is a **file**:
-
-```powershell
-.\Get-EntraSmsVoiceMigrationImpact.ps1 -TenantId contoso.org -ExportFixScript
-```
-
-You get `..._Remediation.ps1` beside the CSVs: one commented block per actionable user, with the exact Graph calls. Nothing in it has run, and it opens with a `throw` so running it unread does nothing at all. Every command that would change the tenant is commented out.
-
-**The central remediation cannot be automated, by anyone.** There is no Graph call that registers a passkey on somebody's behalf — registration requires the user present with their device. That is the point of a passkey. What the script automates is the supporting cast, and the order is the whole value:
-
-1. **Issue a Temporary Access Pass.** This is what lets somebody register a passkey *without* the phone they are about to lose. Skip it and you strand exactly the people you were trying to help.
-2. **The user registers.** A human step. The script says so and stops.
-3. **Verify the new method exists.**
-4. **Only then remove the phone method.** This line is commented out and it is last, because removing a phone before a replacement is confirmed working is precisely the lockout this whole tool exists to prevent.
-
-The commands need `UserAuthenticationMethod.ReadWrite.All` and `Policy.ReadWrite.AuthenticationMethod` — write permissions, well beyond the read-only set the assessment ran with. That escalation is yours to make deliberately.
 
 ## Who actually gets stopped
 
@@ -662,19 +633,6 @@ Two honest caveats:
 - `email` and `securityQuestion` satisfy self-service password reset, not MFA, so they do not count as surviving. A temporary access pass expires by design and does not count either.
 - A method this tool does not recognise is treated as **not** surviving, so an unfamiliar name makes a user look more exposed rather than less. Any such names are listed in `UnrecognisedMethods` in the summary. Over-warning costs a review; under-warning costs somebody their morning.
 
-## Risk classifications
-
-Summarised here; full logic and remediation guidance in [docs/Risk-Classification.md](docs/Risk-Classification.md).
-
-| Band | Condition |
-|---|---|
-| **Critical** | Privileged user, in policy scope, phone method registered, not passwordless-capable |
-| **High** | In policy scope with a registered phone method and no passwordless method, or in policy scope and not passwordless-capable |
-| **Moderate** | Phone method registered, no passwordless method, but outside resolved modern policy scope — usually legacy per-user MFA exposure |
-| **Low** | Exposed to the change but already passwordless-capable |
-| **Informational** | No resolved exposure |
-| **Excluded** | Not a risk level. The user matched `-ExcludeUpnPattern` and was left out of every count. |
-
 ---
 
 ## Coverage: who this actually finds
@@ -694,21 +652,78 @@ The claim is "every user in the tenant who is exposed." Here is exactly what tha
 | Disabled users | `userRegistrationDetails` does not return them | Re-run after any bulk re-enablement |
 | Users enabled for SMS/voice only via legacy per-user MFA | Read on every run, from a beta endpoint | Covered by default. `-SkipLegacyPerUserMfa` turns it off, and then the `Moderate` band surfaces the symptom with nothing to confirm it. |
 | Effective Conditional Access outcome | Not read | Policy scope is not the same as being challenged at sign-in |
-| Non-human accounts | Shared mailboxes, sync accounts, and service accounts appear as ordinary users | Filter by your naming convention or exclude them from the remediation group after review |
+| Non-human accounts | Shared mailboxes, sync accounts, and service accounts appear as ordinary users | Filter by your naming convention with `-ExcludeUpnPattern`, or drop them from the action list after review |
 
 That last one matters operationally. A tenant with `All users` targeting will surface shared mailbox and service account objects as migration candidates. They are technically in scope but nobody signs into them interactively, so review before they become tickets.
 
-## Limitations
+---
 
-These are properties of the data sources, not defects. Read them before presenting results to a client.
+## Legacy per-user MFA
 
-- **Disabled users are excluded.** `userRegistrationDetails` does not return disabled users. The script reads `accountEnabled` separately and assesses enabled users only. Disabled accounts that get re-enabled after the assessment are not represented.
-- **Reporting latency.** The registration report is not real-time. `OldestReportRowUtc` in the summary is the age of the oldest row behind the assessment, so the confidence in a run is visible. Do not treat a run as a live directory query.
-- **SMS and voice are not separately registered.** Entra stores a phone number with a type, not an "SMS registration" and a "voice registration." `mobilePhone` can satisfy both; `officePhone` is voice-only. There is no clean per-user SMS-versus-voice split available, so the script reports phone-method capability and leaves policy scope to distinguish intent.
-- **Legacy per-user MFA is read from a beta endpoint.** Users enabled for SMS or voice through legacy per-user MFA service settings are in scope for the retirement, and that state has no Graph v1.0 equivalent -- it exists only at `/beta/users/{id}/authentication/requirements`. Every run reads it, using the `Policy.Read.All` the script already requests. `-SkipLegacyPerUserMfa` opts out, and then `PerUserMfaState` reads `(not checked)` on every row and that exposure is unassessed.
-- **Conditional Access is not evaluated.** A user may be in AMP scope but never actually challenged, or may be blocked by a Conditional Access grant this script does not read. Policy scope is not the same as effective sign-in behaviour. It is also not the same as MFA being enforced at all -- see [docs/MFA-Enforcement.md](docs/MFA-Enforcement.md) for the ten common reasons a tenant with a Require-MFA policy is not actually requiring MFA.
-- **Guest and B2B readiness.** Guests are assessed, but passkey support for B2B and internal guest users is on a separate Microsoft timeline. Treat guest findings as requiring independent validation.
-- **Nested groups are resolved transitively; dynamic groups are point-in-time.** A dynamic group's membership can change between the assessment and September 1.
+The one exposure this assessment can otherwise miss entirely.
+
+Legacy per-user MFA is a separate enforcement layer that predates the Authentication Methods Policy and is not replaced by it. A user `enabled` or `enforced` there is in scope for the SMS and voice retirement whatever the modern policy says — and the modern registration campaign does not reach them, so a passkey push aimed at that user lands nowhere and the run after this one reports them unchanged.
+
+```powershell
+.\Get-EntraSmsVoiceMigrationImpact.ps1 -TenantId contoso.onmicrosoft.com
+```
+
+Every run reads this state by default. Opting out with `-SkipLegacyPerUserMfa` leaves those users surfacing as `Moderate` with an instruction to go and check a portal by hand. Across an estate that is one manual check per tenant that does not happen, and a tenant still running on legacy per-user MFA assesses as unremarkable.
+
+**It needs no extra access.** The state is readable at `GET /beta/users/{id}/authentication/requirements` with `Policy.Read.All`, which every run already requests, and Global Reader is a supported role. The only reason to skip it is to avoid the beta endpoint entirely, not permission. The cost is one batched Graph call per twenty users.
+
+What the check changes:
+
+| | With `-SkipLegacyPerUserMfa` | Default run |
+|---|---|---|
+| `PerUserMfaState` | `(not checked)` on every row | `disabled`, `enabled`, `enforced`, or `(unreadable)` |
+| A user held in legacy MFA | `Moderate`, "go and check a portal" | The band their real exposure earns, up to `Critical`, with a next step that starts by converting them to the modern policy |
+| A `Moderate` user who is genuinely clear | Indistinguishable from the above | Confirmed stale registration, no portal visit |
+| Summary | — | `LegacyPerUserMfaChecked`, `LegacyPerUserMfaInForce`, `LegacyPerUserMfaUnreadable` |
+
+**Not knowing never looks like knowing.** A denied read, a request Graph left unanswered, and a `200` with no state in the body all land as `(unreadable)`, counted in `LegacyPerUserMfaUnreadable`. None of them is ever treated as "no legacy MFA," because that reading is indistinguishable from a genuine all-clear, and it is exactly the one that leaves somebody locked out with a clean report on file. A throttled request inside a batch returns `200` at the envelope level, so nothing above the per-request loop would retry it on its own; the script retries it across rounds instead of giving up.
+
+A non-zero `LegacyPerUserMfaInForce` is also an MFA enforcement finding in its own right: per-user MFA sitting underneath a Conditional Access policy has its own trusted-IP bypass and its own remembered-device setting, neither of which Conditional Access knows about. See [docs/MFA-Enforcement.md](docs/MFA-Enforcement.md).
+
+---
+
+## Service accounts and shared mailboxes
+
+A tenant targeting `All users` surfaces every shared mailbox, sync account, and service account as a migration candidate. They are technically in scope, nobody signs into them interactively, and ticketing them wastes a technician's afternoon.
+
+```powershell
+.\Get-EntraSmsVoiceMigrationImpact.ps1 -TenantId contoso.onmicrosoft.com `
+    -ExcludeUpnPattern '^svc-', '^shared-', '^noreply@'
+```
+
+Patterns are regular expressions matched case-insensitively against the UPN. Anchor them yourself: `^svc-` catches `svc-backup@contoso.com` and leaves `marc.svc-jones@contoso.com` alone, while `svc-` catches both. An invalid pattern fails at parameter binding, before the tenant is contacted.
+
+**Matching users are marked, not deleted.** Their row stays in the assessment CSV with `Risk = Excluded`, and they are left out of every count, the action list, the tickets, and the report. That distinction matters: a filter that silently removes people from a security assessment is how a real account disappears behind a careless pattern, and nothing about the output would look unusual. The summary reports `UsersExcludedByPattern` and the patterns used, and the console says how many were removed.
+
+Check that number on the first run for a new customer. If it is larger than the count of non-human accounts you expect, the pattern is too broad.
+
+The sweep accepts the same parameter, since one naming convention usually covers a whole estate.
+
+---
+
+## Fixing what it finds
+
+The assessment writes nothing to any tenant, and that does not change. What `-ExportFixScript` adds is a **file**:
+
+```powershell
+.\Get-EntraSmsVoiceMigrationImpact.ps1 -TenantId contoso.org -ExportFixScript
+```
+
+You get `..._Remediation.ps1` beside the CSVs: one commented block per actionable user, with the exact Graph calls. Nothing in it has run, and it opens with a `throw` so running it unread does nothing at all. Every command that would change the tenant is commented out.
+
+**The central remediation cannot be automated, by anyone.** No Graph call registers a passkey on somebody's behalf; registration requires the user present with their device. That is the point of a passkey. What the script automates is the supporting cast, and the order is the whole value:
+
+1. **Issue a Temporary Access Pass.** This is what lets somebody register a passkey *without* the phone they are about to lose. Skip it and you strand exactly the people you were trying to help.
+2. **The user registers.** A human step. The script says so and stops.
+3. **Verify the new method exists.**
+4. **Only then remove the phone method.** This line is commented out and it is last, because removing a phone before a replacement is confirmed working is precisely the lockout this whole tool exists to prevent.
+
+The commands need `UserAuthenticationMethod.ReadWrite.All` and `Policy.ReadWrite.AuthenticationMethod` — write permissions, well beyond the read-only set the assessment ran with. That escalation is yours to make deliberately.
 
 ---
 
@@ -728,7 +743,21 @@ These are properties of the data sources, not defects. Read them before presenti
 
 ---
 
-## Development
+## Known limitations
+
+These are properties of the data sources, not defects. Read them before presenting results to a client.
+
+- **Disabled users are excluded.** `userRegistrationDetails` does not return disabled users. The script reads `accountEnabled` separately and assesses enabled users only. Disabled accounts that get re-enabled after the assessment are not represented.
+- **Reporting latency.** The registration report is not real-time. `OldestReportRowUtc` in the summary is the age of the oldest row behind the assessment, so the confidence in a run is visible. Do not treat a run as a live directory query.
+- **SMS and voice are not separately registered.** Entra stores a phone number with a type, not an "SMS registration" and a "voice registration." `mobilePhone` can satisfy both; `officePhone` is voice-only. There is no clean per-user SMS-versus-voice split available, so the script reports phone-method capability and leaves policy scope to distinguish intent.
+- **Legacy per-user MFA is read from a beta endpoint.** Users enabled for SMS or voice through legacy per-user MFA service settings are in scope for the retirement, and that state has no Graph v1.0 equivalent — it exists only at `/beta/users/{id}/authentication/requirements`. Every run reads it, using the `Policy.Read.All` the script already requests. `-SkipLegacyPerUserMfa` opts out, and then `PerUserMfaState` reads `(not checked)` on every row and that exposure is unassessed.
+- **Conditional Access is not evaluated.** A user may be in AMP scope but never challenged, or may be blocked by a Conditional Access grant this script does not read. Policy scope is not the same as effective sign-in behaviour, and it is not the same as MFA being enforced at all — see [docs/MFA-Enforcement.md](docs/MFA-Enforcement.md) for the ten common reasons a tenant with a Require-MFA policy is not actually requiring MFA.
+- **Guest and B2B readiness.** Guests are assessed, but passkey support for B2B and internal guest users is on a separate Microsoft timeline. Treat guest findings as requiring independent validation.
+- **Nested groups are resolved transitively; dynamic groups are point-in-time.** A dynamic group's membership can change between the assessment and September 1.
+
+---
+
+## Contributing
 
 ```powershell
 Install-Module Pester -MinimumVersion 5.5.0 -Scope CurrentUser -SkipPublisherCheck
@@ -744,6 +773,8 @@ The suite covers the risk model, AMP include/exclude resolution against a mocked
 
 The assessment is a script rather than a module, so the tests parse it and lift out individual function definitions by name instead of dot-sourcing it, which would execute the Execution section and reach for Graph. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+---
+
 ## Security
 
 This tool processes identity-security metadata. See [SECURITY.md](SECURITY.md).
@@ -752,7 +783,7 @@ This tool processes identity-security metadata. See [SECURITY.md](SECURITY.md).
 
 ---
 
-## References
+## Related resources
 
 - [Passkeys by default and retirement of Microsoft-provided SMS and voice authentication](https://learn.microsoft.com/en-us/entra/identity/authentication/concept-sms-voice-retirement)
 - [FAQ for Microsoft-provided SMS and voice retirement](https://learn.microsoft.com/en-us/entra/identity/authentication/concept-sms-voice-retirement-faq)
@@ -761,7 +792,9 @@ This tool processes identity-security metadata. See [SECURITY.md](SECURITY.md).
 - [Graph API: list userRegistrationDetails](https://learn.microsoft.com/en-us/graph/api/authenticationmethodsroot-list-userregistrationdetails?view=graph-rest-1.0)
 - [Authentication methods activity](https://learn.microsoft.com/en-us/entra/identity/authentication/howto-authentication-methods-activity)
 
-Background and framework mapping: [docs/Microsoft-Migration-Background.md](docs/Microsoft-Migration-Background.md).
+Microsoft's timeline and where SMS and voice hide in a tenant: [docs/Microsoft-Migration-Background.md](docs/Microsoft-Migration-Background.md).
+
+Control-framework mapping (NIST CSF 2.0, SP 800-53, SP 800-63B, CIS v8): [docs/Risk-Classification.md](docs/Risk-Classification.md#framework-mapping).
 
 Running this at estate scale: [docs/Operations-Playbook.md](docs/Operations-Playbook.md).
 

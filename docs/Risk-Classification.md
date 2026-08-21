@@ -7,7 +7,7 @@ Risk is derived from three booleans and two attributes, evaluated in a fixed ord
 | Input | Source | Meaning |
 |---|---|---|
 | `InPolicyScope` | Resolved AMP include/exclude targets for `sms` or `voice` | User is targeted by the policy that drives the 2026-09-01 auto-enablement and nudge |
-| `HasPhoneMethodRegistered` | `methodsRegistered` contains `mobilePhone`, `alternateMobilePhone`, `officePhone`, or `smsSignIn` | User has a method that stops working on 2027-02-01 |
+| `HasPhoneMethodRegistered` | `methodsRegistered` contains any of `mobilePhone`, `alternateMobilePhone`, `officePhone`, `smsSignIn`, `sms`, `mobileSMS`, `mobileCall`, or `alternateMobileCall` | User has a method that stops working on 2027-02-01. Both generations of Microsoft's enum spellings are matched, because which one a tenant's report returns is not something to discover on the day. |
 | `IsPasswordlessCapable` | `isPasswordlessCapable` from the registration report | User already holds a method that survives the retirement. This is the mitigating control. |
 | `PerUserMfaState` | `/beta/users/{id}/authentication/requirements`, read on every run | Legacy per-user MFA. `enabled` or `enforced` is a scope of its own, and counts as in-scope below. Empty, `(not checked)`, or `(unreadable)` changes nothing. |
 | `IsAdmin` / `UserType` | Registration report and directory | Blast-radius modifiers |

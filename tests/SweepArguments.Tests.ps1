@@ -77,3 +77,61 @@ Describe 'Sweep parameters reach the assessment' {
         $unknown -join ', ' | Should -BeNullOrEmpty
     }
 }
+
+Describe 'Customer labels must be unique' {
+    # The label is the only thing naming a tenant in the output folder, the summary row,
+    # and the -Resume match. Two tenants sharing one silently overwrite each other's
+    # evidence, and a resumed sweep marks one tenant complete using the other's results.
+    # Neither failure announces itself, so the sweep has to refuse the list up front.
+
+    BeforeAll {
+        function Invoke-SweepWithList {
+            param([string]$Csv)
+
+            $root = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('n'))
+            New-Item -ItemType Directory -Path $root -Force | Out-Null
+            $listPath = Join-Path $root 'tenants.csv'
+            Set-Content -LiteralPath $listPath -Value $Csv -Encoding utf8
+
+            try {
+                & (Get-SweepScriptPath) -TenantListPath $listPath -ReportRoot (Join-Path $root 'out')
+                return ''
+            }
+            catch { return [string]$_.Exception.Message }
+            finally { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
+        }
+    }
+
+    It 'refuses two tenants sharing a customer name, before contacting either' {
+        $message = Invoke-SweepWithList -Csv @'
+TenantId,CustomerName
+11111111-1111-1111-1111-111111111111,Contoso
+22222222-2222-2222-2222-222222222222,Contoso
+'@
+        $message | Should -Match 'share the customer label'
+        $message | Should -Match '11111111-1111-1111-1111-111111111111'
+        $message | Should -Match '22222222-2222-2222-2222-222222222222'
+    }
+
+    It 'refuses labels that differ only in characters the folder name cannot keep' {
+        # "Contoso/UK" and "Contoso:UK" both become Contoso_UK. The collision is in the
+        # filesystem, so the check has to be on the sanitised form rather than the raw one.
+        $message = Invoke-SweepWithList -Csv @'
+TenantId,CustomerName
+11111111-1111-1111-1111-111111111111,Contoso/UK
+22222222-2222-2222-2222-222222222222,Contoso:UK
+'@
+        $message | Should -Match 'share the customer label'
+    }
+
+    It 'accepts distinct labels' {
+        # Guards against the check rejecting every list: it must fail on the duplicate
+        # rather than on the sign-in that follows, so the message has to be absent here.
+        $message = Invoke-SweepWithList -Csv @'
+TenantId,CustomerName
+11111111-1111-1111-1111-111111111111,Contoso
+22222222-2222-2222-2222-222222222222,Fabrikam
+'@
+        $message | Should -Not -Match 'share the customer label'
+    }
+}

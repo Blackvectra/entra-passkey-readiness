@@ -20,8 +20,9 @@ Everything in `examples/` is fictional and was built by hand. Keep it that way.
 product, not an implementation detail — it is what makes the tool safe to run against a
 customer tenant during business hours without a change window.
 
-Several design decisions exist only to preserve it. `-ExportRemediationGroup` writes a
-CSV of who should be in the migration security group rather than creating the group.
+Several design decisions exist only to preserve it. The action list writes a CSV of who
+belongs in the migration security group rather than creating the group. `-ExportFixScript`
+writes a remediation script to disk for a human to read and run, rather than running it.
 Legacy per-user MFA state is the one thing this tool reads from a beta endpoint. It is
 read on every run, needs no permission beyond the `Policy.Read.All` every run already
 requests, and `-SkipLegacyPerUserMfa` exists to opt out of the beta surface entirely. If you have a change that needs a write,

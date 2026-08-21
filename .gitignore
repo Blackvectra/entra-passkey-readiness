@@ -44,7 +44,6 @@ coverage*.xml
 
 # Editors and OS
 .vscode/
-!.vscode/extensions.json
 .idea/
 *.swp
 *~
@@ -70,3 +69,9 @@ TicketHistory.json
 !examples/Example-Report.html
 *_Tickets.csv
 !examples/Example-Tickets.csv
+
+# -ExportFixScript writes a remediation script naming real users, and
+# Compare-EntraSmsVoiceAssessment writes its diff beside the exports it compared.
+# Both land wherever -OutputPath points, which is not always under reports/.
+*_Remediation.ps1
+EntraSmsVoiceChange_*.csv
