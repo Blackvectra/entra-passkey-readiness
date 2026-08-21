@@ -18,7 +18,7 @@ Every Microsoft Graph call is a GET. It does not modify users, groups, policies,
 | Section | What it covers |
 |---|---|
 | [Overview](#overview) | The retirement timeline, and the two populations people conflate |
-| [Components](#components) | The three scripts and what each one is for |
+| [Components](#components) | The five scripts and what each one is for |
 | [Prerequisites](#prerequisites) | Modules, roles, and Graph permissions |
 | [Installation](#installation) | Getting the scripts onto a workstation that will run them |
 | [Get started](#get-started) | The first run against one tenant |
@@ -26,6 +26,8 @@ Every Microsoft Graph call is a GET. It does not modify users, groups, policies,
 | [Parameter reference](#parameter-reference) | Every parameter on all three scripts |
 | [Output reference](#output-reference) | Console summary and CSV schema |
 | [Risk classifications](#risk-classifications) | How the five bands are derived |
+| [The window](#the-window) | Entering many tenants without hand-editing a CSV |
+| [Estate roll-up](#estate-roll-up) | One page across every customer in a sweep |
 | [Can they actually move?](#can-they-actually-move) | Whether the destination method is even enabled and in scope for the people being told to move |
 | [Who actually gets stopped](#who-actually-gets-stopped) | The lockout population, which is not the same as the risk bands |
 | [Coverage](#coverage-who-this-actually-finds) | Exactly who this finds, and who it does not |
@@ -130,6 +132,8 @@ Treat `Jan 28, 2027` as an artefact of Microsoft's analyzer rather than a publis
 | `Get-EntraSmsVoiceMigrationImpact.ps1` | Assess one tenant. This is the core of the project. |
 | `Invoke-EntraSmsVoiceSweep.ps1` | Assess many tenants, with optional concurrency and resume. |
 | `Compare-EntraSmsVoiceAssessment.ps1` | Diff two assessments to see whether the campaign is moving anybody. Reads files only; no Graph, no permissions. |
+| `New-EntraSmsVoiceEstateReport.ps1` | Roll a sweep up into one page ranking every customer. Reads files only. See [Estate roll-up](#estate-roll-up). |
+| `Show-EntraSmsVoiceSweepGui.ps1` | Windows window over the sweep: type in tenants, press Run, get a folder per customer. See [The window](#the-window). |
 
 ---
 
@@ -630,6 +634,61 @@ Summarised here; full logic and remediation guidance in [docs/Risk-Classificatio
 | **Low** | Exposed to the change but already passwordless-capable |
 | **Informational** | No resolved exposure |
 | **Excluded** | Not a risk level. The user matched `-ExcludeUpnPattern` and was left out of every count. |
+
+---
+
+## The window
+
+`Show-EntraSmsVoiceSweepGui.ps1` is a Windows window over the sweep, for the one thing the command line is worst at: entering a dozen tenants and their customer names without hand-editing a CSV, then watching a long run and finding the output afterwards.
+
+```powershell
+.\Show-EntraSmsVoiceSweepGui.ps1
+```
+
+Type the tenants into the grid, choose an output folder, press **Run sweep**. Each tenant gets its own folder named from its customer name:
+
+```
+D:\ClientEvidence\Contoso Manufacturing\EntraSmsVoiceMigrationImpact_20260821_143000.csv
+D:\ClientEvidence\Contoso Manufacturing\..._ActionList.csv
+D:\ClientEvidence\Fabrikam Legal\...
+D:\ClientEvidence\SweepSummary_20260821_143000.csv
+D:\ClientEvidence\EstateReadiness_20260821_143512.html
+```
+
+It contains **no assessment logic.** Every tenant is assessed by the same script the command line calls, with the same arguments, so the window cannot report something the command line would not. What it adds:
+
+- **Validation before anything connects.** A typo in row nine of a ninety-tenant list is a message while you are still looking at the grid, not an error forty minutes in after eight customers have been assessed. It checks tenant identifiers, customer names that cannot be folder names, and two customers whose names would collide into one output folder.
+- **The equivalent command line, printed before the run starts.** Copy it out and schedule it. A window whose actions cannot be reproduced on the command line is a window you cannot automate, and an estate sweep is exactly the thing worth running nightly.
+- **Live progress**, rather than a frozen window for forty minutes.
+- **Import and save the tenant list**, so an estate is typed once.
+
+> [!NOTE]
+> Windows only — it is built on WPF. Everything it does is available on any platform through `Invoke-EntraSmsVoiceSweep.ps1 -TenantListPath <csv> -ReportRoot <folder>`, and on Linux or macOS the script says so rather than failing with a type-load error.
+
+Parallel runs and unattended runs need app-only authentication, exactly as they do on the command line: fill in both the client ID and the certificate thumbprint, or neither.
+
+---
+
+## Estate roll-up
+
+Ninety per-tenant reports do not answer the question that decides the week: across all of them, which results can I believe, and who do I work first.
+
+```powershell
+.\New-EntraSmsVoiceEstateReport.ps1 -ReportRoot D:\ClientEvidence\EntraMigration
+```
+
+Reads the newest `SweepSummary_*.csv` and writes one self-contained HTML page ([sample](examples/Example-EstateReport.html)). No Graph calls, no permissions, no network — it is safe to run on a machine that has never connected to a tenant.
+
+Customers are ranked the way the estate should be worked, which is **not** by finding count:
+
+1. **Tenants that did not report**, named with their error. A tenant with no data is not a tenant with no findings.
+2. **Tenants that reported nothing on a result that cannot be trusted.** Their policy migration is incomplete, so the legacy per-user MFA and SSPR pages still govern them and this assessment cannot read either. A zero there means *not measured*. Left at the bottom of a spreadsheet these get skipped, because they look exactly like a genuinely clean tenant.
+3. **Then by how many users are stranded** at the retirement, then by risk band.
+
+The first two get their own callout bands above the table, because their rows look unremarkable and a reader scanning for large numbers misses them.
+
+> [!IMPORTANT]
+> This page names every customer in the estate alongside how many of their privileged accounts are about to lose MFA. It is the single highest-value file this project produces and the least suitable for sending anywhere. `.gitignore` covers `EstateReadiness_*.html`, but that is a safety net, not a control.
 
 ---
 

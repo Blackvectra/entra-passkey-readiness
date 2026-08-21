@@ -275,8 +275,47 @@ $null = New-TicketExport -Rows $rows -Path $ticketPath -Customer $customer -MaxI
 $reportPath = Join-Path $examplesDir 'Example-Report.html'
 $null = New-HtmlReport -Summary $summary -Rows $rows -Path $reportPath -Customer $customer -SkipAclHardening
 
+# The estate roll-up covers a different question from everything above: not one tenant, but
+# which of ninety results can be believed. Its sample needs several tenants rather than the
+# single fictional one the rest of this file builds, including the three shapes that look
+# identical in a spreadsheet and are not -- a failure, a lower bound reporting nothing, and
+# a genuinely clean tenant.
+. (Import-ScriptFunction -Path (Join-Path $repoRoot 'New-EntraSmsVoiceEstateReport.ps1') -Name @(
+        'Get-Column'
+        'ConvertTo-Count'
+        'Get-EstateRollup'
+        'New-EstateReportHtml'
+    ))
+
+$estateRows = @(
+    [PSCustomObject]@{ Customer = 'Contoso Manufacturing'; Status = 'Success'; AssessmentConfidence = 'Complete'
+        PolicyMigrationState = 'migrationComplete'; BlockedAtRetirement = 14; BlockedAdminsAtRetirement = 2
+        Critical = 3; High = 41; MigrationCandidates = 96; EnabledUsersAssessed = 420; Error = '' }
+    [PSCustomObject]@{ Customer = 'Fabrikam Legal'; Status = 'Success'; AssessmentConfidence = 'LowerBound'
+        PolicyMigrationState = 'preMigration'; BlockedAtRetirement = 0; BlockedAdminsAtRetirement = 0
+        Critical = 0; High = 0; MigrationCandidates = 0; EnabledUsersAssessed = 88; Error = '' }
+    [PSCustomObject]@{ Customer = 'Northwind Health'; Status = 'Success'; AssessmentConfidence = 'Complete'
+        PolicyMigrationState = 'migrationComplete'; BlockedAtRetirement = 5; BlockedAdminsAtRetirement = 1
+        Critical = 1; High = 12; MigrationCandidates = 310; EnabledUsersAssessed = 1210; Error = '' }
+    [PSCustomObject]@{ Customer = 'Tailspin Freight'; Status = 'Failed'; AssessmentConfidence = 'NotAssessed'
+        PolicyMigrationState = 'not-assessed'; BlockedAtRetirement = ''; BlockedAdminsAtRetirement = ''
+        Critical = ''; High = ''; MigrationCandidates = ''; EnabledUsersAssessed = ''
+        Error = 'Consent required: the administrator has not consented to use the application.' }
+    [PSCustomObject]@{ Customer = 'Adventure Works'; Status = 'Success'; AssessmentConfidence = 'LowerBound'
+        PolicyMigrationState = 'preMigration'; BlockedAtRetirement = 2; BlockedAdminsAtRetirement = 0
+        Critical = 0; High = 9; MigrationCandidates = 22; EnabledUsersAssessed = 64; Error = '' }
+)
+
+# Fixed date for the same reason the per-tenant report uses the assessment time: the
+# countdowns have to be reproducible, or regenerating the sample produces a diff every day
+# and people learn to skip regenerating it.
+$estatePath = Join-Path $examplesDir 'Example-EstateReport.html'
+New-EstateReportHtml -Rollup (Get-EstateRollup -Rows $estateRows) -Heading 'Managed estate' `
+    -GeneratedAt ([datetime]'2026-08-18T09:00:00') -SourceName 'SweepSummary_20260818_090000.csv' |
+    Out-File -LiteralPath $estatePath -Encoding utf8 -Force
+
 Write-Host 'Regenerated:' -ForegroundColor Green
-foreach ($path in @($assessmentPath, $actionListPath, $ticketPath, $reportPath)) {
+foreach ($path in @($assessmentPath, $actionListPath, $ticketPath, $reportPath, $estatePath)) {
     Write-Host "  $path"
 }
 $rows | Format-Table Risk, DisplayName, PerUserMfaState, BlockedAtRetirement -AutoSize

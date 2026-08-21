@@ -96,13 +96,52 @@ Describe 'Every script hardens its output the same way' {
     # applied to one copy and not the others is how the compare tool ends up writing
     # world-readable output long after the assessment stopped doing so.
 
-    $scripts = @(
-        @{ Name = 'assessment'; Path = (Join-Path (Split-Path -Parent $PSScriptRoot) 'Get-EntraSmsVoiceMigrationImpact.ps1') }
-        @{ Name = 'sweep'; Path = (Join-Path (Split-Path -Parent $PSScriptRoot) 'Invoke-EntraSmsVoiceSweep.ps1') }
-        @{ Name = 'compare'; Path = (Join-Path (Split-Path -Parent $PSScriptRoot) 'Compare-EntraSmsVoiceAssessment.ps1') }
+    # Discovered rather than listed. A hardcoded list silently stops covering the next
+    # script somebody adds, which is precisely the divergence this guards against -- and
+    # it happened: the estate report arrived with a fourth copy nothing was checking.
+    #
+    # Two separate lists, because they answer different questions. Every script that
+    # writes anything hardens its permissions; only the ones that write a CSV need the
+    # formula guard, and requiring it of the estate report -- which writes HTML -- would
+    # be a test failing for a control that does not apply.
+    $root = Split-Path -Parent $PSScriptRoot
+    $allScripts = @(Get-ChildItem -LiteralPath $root -Filter '*.ps1' -File)
+
+    $hardening = @(
+        $allScripts |
+            Where-Object { (Get-Content -LiteralPath $_.FullName -Raw) -match '(?m)^\s*function Protect-OutputFile\b' } |
+            ForEach-Object { @{ Name = $_.BaseName; Path = $_.FullName } }
     )
 
-    It 'defines an identical Protect-OutputFile in <Name>' -TestCases $scripts {
+    # Show-EntraSmsVoiceSweepGui.ps1 writes a CSV and is deliberately absent. Its CSV is
+    # the tenant list, which is an input the sweep reads back rather than a report anybody
+    # opens for findings -- prefixing a quote would make '=Contoso the output folder name.
+    # It rejects formula-leading customer names at entry instead, which the GUI tests
+    # cover. Every other CSV here is a report and gets the guard.
+    $csvWriters = @(
+        $allScripts |
+            Where-Object {
+                $_.Name -ne 'Show-EntraSmsVoiceSweepGui.ps1' -and
+                (Get-Content -LiteralPath $_.FullName -Raw) -match 'Export-Csv'
+            } |
+            ForEach-Object { @{ Name = $_.BaseName; Path = $_.FullName } }
+    )
+
+    # Passed through as test cases rather than read from the Describe body inside an It:
+    # Pester evaluates the Describe body during discovery and the It bodies during the run,
+    # so a variable set here is gone by the time an It reads it.
+    It 'found <Expected> or more scripts hardening their own output' -TestCases @(
+        @{ Expected = 4; Actual = $hardening.Count; What = 'hardening its output' }
+        @{ Expected = 3; Actual = $csvWriters.Count; What = 'guarding a report CSV' }
+    ) {
+        param($Expected, $Actual, $What)
+        # If this drops, the per-script tests below stop covering anything rather than
+        # failing. Four hardening today: the assessment, the sweep, the compare tool, and
+        # the estate report.
+        $Actual | Should -BeGreaterOrEqual $Expected -Because "the discovery for scripts $What must still find them"
+    }
+
+    It 'defines an identical Protect-OutputFile in <Name>' -TestCases $hardening {
         param($Name, $Path)
 
         $reference = Get-FunctionText -Path (Get-AssessmentScriptPath) -Name 'Protect-OutputFile'
@@ -114,7 +153,7 @@ Describe 'Every script hardens its output the same way' {
         (& $normalise $actual) | Should -Be (& $normalise $reference) -Because "$Name must harden output identically to the assessment"
     }
 
-    It 'guards against the same CSV formula characters in <Name>' -TestCases $scripts {
+    It 'guards against the same CSV formula characters in <Name>' -TestCases $csvWriters {
         param($Name, $Path)
 
         # The set is OWASP's: the four formula leaders, plus tab and carriage return,
