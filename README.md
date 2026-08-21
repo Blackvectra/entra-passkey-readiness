@@ -297,7 +297,10 @@ $rows | Where-Object Risk -eq 'Critical' | Format-Table DisplayName, UserPrincip
 
 The tenant list is a CSV with a `TenantId` column and an optional `CustomerName` column used to name the output folder. See [examples/tenants.sample.csv](examples/tenants.sample.csv).
 
-Results sort failures first, then by Critical count descending, so the estate triage order is the read order.
+Results sort failures first, then tenants whose result is a lower bound and shows nothing, then by how many users are blocked at the retirement, then by risk band. The estate triage order is the read order.
+
+> [!IMPORTANT]
+> `AssessmentConfidence` says whether a tenant's zeroes can be read as "nothing found". `Complete` means the authentication methods policy is fully migrated, so the modern policy read is the whole answer. `LowerBound` means it is not, and the legacy per-user MFA service settings and legacy SSPR methods pages still govern that tenant — both can hand out SMS and voice through settings no API exposes. A `LowerBound` tenant reporting zero has been partially measured, not measured clean, so those tenants are lifted above the genuinely clean ones and named on the console rather than left at the bottom of the file where the usual "open the non-zero rows" habit skips them.
 
 **Point `-ReportRoot` at your protected client documentation store, never at a git working directory.**
 
@@ -335,6 +338,8 @@ A ninety-tenant sweep that dies at tenant sixty should not restart at tenant one
 `-Resume` reads the most recent `SweepSummary_*.csv` under `-ReportRoot` and skips every tenant already recorded as `Success`. Skipped tenants are **carried into the new summary** rather than dropped, so the summary still describes the whole tenant list and a second resume does not redo the first run's work.
 
 Matching is on the customer label rather than the tenant ID, because a successful row records the tenant GUID Graph reported, which will not equal the verified domain you supplied.
+
+Every row is written against one fixed column list, whichever run produced it. `Export-Csv` takes its header from the first object it receives, so a carried-forward row from an older build sorting to the top would otherwise drop the newer columns from every row in the file — and since that truncated file then becomes the newest summary, the next resume would read the short schema and truncate again. Columns a row does not carry are written empty, which reads correctly as "this tenant was never assessed on that field".
 
 ### Tracking progress between runs
 

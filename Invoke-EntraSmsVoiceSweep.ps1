@@ -323,6 +323,19 @@ end {
             TenantId                   = if ($Summary) { & $get 'TenantId' } else { $TenantId }
             Status                     = $Status
             RegistrationCampaignState  = if ($Summary) { & $get 'RegistrationCampaignState' } else { '' }
+            PolicyMigrationState       = if ($Summary) { & $get 'PolicyMigrationState' } else { 'not-assessed' }
+            # Whether this tenant's zeroes can be read as "not exposed".
+            #
+            # Anything short of migrationComplete means the legacy per-user MFA service
+            # settings page still governs the tenant, and that page can hand out SMS and
+            # voice through settings no API exposes. A preMigration tenant with no findings
+            # has not been measured clean; it has been partially measured. Left undeclared,
+            # it reads identically to a tenant that genuinely has nothing -- and the
+            # documented estate workflow of opening only the non-zero rows skips it, which
+            # is how it comes back as a February lockout ticket.
+            AssessmentConfidence       = if (-not $Summary) { 'NotAssessed' }
+                                         elseif (([string](& $get 'PolicyMigrationState')) -eq 'migrationComplete') { 'Complete' }
+                                         else { 'LowerBound' }
             SmsPolicyState             = if ($Summary) { & $get 'SmsPolicyState' } else { '' }
             VoicePolicyState           = if ($Summary) { & $get 'VoicePolicyState' } else { '' }
             EnabledUsersAssessed       = & $get 'EnabledUsersAssessed'
@@ -331,6 +344,13 @@ end {
             High                       = & $get 'High'
             Moderate                   = & $get 'Moderate'
             Low                        = & $get 'Low'
+            # The headline operational number, and the one that decides which tenants get
+            # worked first: users holding a phone as their only method that satisfies MFA.
+            # The assessment has computed it all along; it was never carried into the estate
+            # view, so a sweep could not rank tenants by how many people actually get
+            # stranded -- only by risk band, which counts a different population.
+            BlockedAtRetirement        = & $get 'BlockedAtRetirement'
+            BlockedAdminsAtRetirement  = & $get 'BlockedAdminsAtRetirement'
             PasswordlessCapableInScope = & $get 'PasswordlessCapableInScope'
             OldestReportRowUtc         = & $get 'OldestReportRowUtc'
             ReportPath                 = if ($Summary) { & $get 'OutputPath' } else { '' }
@@ -553,22 +573,62 @@ end {
         return -1
     }
 
-    # Triage order for the estate: the tenants with the most locked-out privileged
-    # accounts get worked first, failures surface at the top so they are not lost.
+    # Reading a row's own property is not enough. Rows carried forward by -Resume come back
+    # through Import-Csv from a summary an older build wrote, so they carry whatever columns
+    # that build emitted and nothing else. Asking one of them for a column added since
+    # throws under StrictMode.
+    $readColumn = {
+        param($row, [string]$name)
+        $property = $row.PSObject.Properties[$name]
+        if ($property) { return $property.Value }
+        return ''
+    }
+
+    # Triage order for the estate. Four keys, in this order:
+    #   1. Failures first. A tenant that did not report is not a tenant with no findings.
+    #   2. Then tenants whose results are a lower bound AND show nothing. This is the whole
+    #      point of reading the policy migration state: their zeroes mean "not measured",
+    #      not "not exposed". At the bottom they get skipped by the usual workflow of
+    #      opening only the non-zero rows. Lower-bound tenants that do have findings are
+    #      already ranked by those findings below, so this only lifts the silent ones.
+    #   3. Then the count of people actually stranded at the retirement.
+    #   4. Then the risk bands.
     $sorted = $results | Sort-Object `
-        @{ Expression = { if ($_.Status -eq 'Failed') { 0 } else { 1 } }; Ascending = $true }, `
-        @{ Expression = { & $asCount $_.Critical }; Descending = $true }, `
-        @{ Expression = { & $asCount $_.High }; Descending = $true }
+        @{ Expression = { if ((& $readColumn $_ 'Status') -eq 'Failed') { 0 } else { 1 } }; Ascending = $true }, `
+        @{ Expression = {
+                $confidence = [string](& $readColumn $_ 'AssessmentConfidence')
+                $findings = (& $asCount (& $readColumn $_ 'Critical')) + (& $asCount (& $readColumn $_ 'High'))
+                if ($confidence -ne 'Complete' -and $findings -le 0) { 0 } else { 1 }
+            }; Ascending = $true }, `
+        @{ Expression = { & $asCount (& $readColumn $_ 'BlockedAtRetirement') }; Descending = $true }, `
+        @{ Expression = { & $asCount (& $readColumn $_ 'Critical') }; Descending = $true }, `
+        @{ Expression = { & $asCount (& $readColumn $_ 'High') }; Descending = $true }
 
     $summaryPath = Join-Path $ReportRoot "SweepSummary_$runStamp.csv"
+
+    # Every row is projected onto one canonical column list before export. Export-Csv takes
+    # its header from the FIRST object it receives, so without this a single carried-forward
+    # row from an older build sorting to the top silently drops the newer columns from all
+    # ninety rows -- and because that truncated file then becomes the newest
+    # SweepSummary_*.csv, the next -Resume reads the short schema and truncates again.
+    # A value the row does not carry exports empty, which reads correctly as "this tenant
+    # was never assessed on that field".
+    $columns = @(
+        'Customer', 'TenantId', 'Status', 'AssessmentConfidence', 'RegistrationCampaignState',
+        'PolicyMigrationState', 'SmsPolicyState', 'VoicePolicyState', 'EnabledUsersAssessed',
+        'MigrationCandidates', 'Critical', 'High', 'Moderate', 'Low', 'BlockedAtRetirement',
+        'BlockedAdminsAtRetirement', 'PasswordlessCapableInScope', 'OldestReportRowUtc',
+        'ReportPath', 'Error'
+    )
+
     # Same injection guard as the per-tenant exports: customer labels reach this file too.
     $guarded = foreach ($row in $sorted) {
         $clone = [ordered]@{}
-        foreach ($property in $row.PSObject.Properties) {
-            $value = $property.Value
+        foreach ($name in $columns) {
+            $value = & $readColumn $row $name
             if ($value -is [string] -and $value.Length -gt 0 -and
                 $value[0] -in @('=', '+', '-', '@', [char]9, [char]13)) { $value = "'" + $value }
-            $clone[$property.Name] = $value
+            $clone[$name] = $value
         }
         [PSCustomObject]$clone
     }
@@ -579,13 +639,26 @@ end {
     if (-not $SkipAclHardening) { Protect-OutputFile -Path $summaryPath }
 
     Write-Host "`n===== CROSS-TENANT SWEEP SUMMARY =====" -ForegroundColor Magenta
-    $sorted | Format-Table Customer, Status, SmsPolicyState, VoicePolicyState,
-        MigrationCandidates, Critical, High, Moderate -AutoSize | Out-Host
+    $sorted | Format-Table Customer, Status, AssessmentConfidence, MigrationCandidates,
+        BlockedAtRetirement, Critical, High, Moderate -AutoSize | Out-Host
 
-    $failed = @($results | Where-Object Status -eq 'Failed').Count
-    $succeeded = @($results | Where-Object Status -eq 'Success')
-    $totalCritical = ($succeeded | ForEach-Object { & $asCount $_.Critical } | Measure-Object -Sum).Sum
-    $totalCandidates = ($succeeded | ForEach-Object { & $asCount $_.MigrationCandidates } | Measure-Object -Sum).Sum
+    # Through $readColumn, like the sort and the export: a carried-forward row carries only
+    # the columns the build that wrote it emitted, and asking it for a newer one throws
+    # under StrictMode -- after every tenant has already been assessed.
+    $failed = @($results | Where-Object { (& $readColumn $_ 'Status') -eq 'Failed' }).Count
+    $succeeded = @($results | Where-Object { (& $readColumn $_ 'Status') -eq 'Success' })
+    # Not $asCount: that returns -1 for a value it cannot read, which is deliberate as a
+    # sort key -- it drops unknowns to the bottom -- and wrong as a summand. A carried-
+    # forward row from a build that never wrote the column would otherwise subtract one
+    # from the estate total and report fewer candidates than were actually found.
+    $asTotal = {
+        param($value)
+        $parsed = 0
+        if ([int]::TryParse([string]$value, [ref]$parsed)) { return $parsed }
+        return 0
+    }
+    $totalCritical = ($succeeded | ForEach-Object { & $asTotal (& $readColumn $_ 'Critical') } | Measure-Object -Sum).Sum
+    $totalCandidates = ($succeeded | ForEach-Object { & $asTotal (& $readColumn $_ 'MigrationCandidates') } | Measure-Object -Sum).Sum
 
     Write-Host "Tenants assessed: $($results.Count - $failed) of $($results.Count)" -ForegroundColor Cyan
     if ($carriedForward.Count -gt 0) {
@@ -595,6 +668,21 @@ end {
     Write-Host "Migration candidates across estate: $totalCandidates" -ForegroundColor Yellow
     Write-Host "Critical findings across estate:    $totalCritical" -ForegroundColor $(if ($totalCritical -gt 0) { 'Red' } else { 'Green' })
     Write-Host "Summary written to: $summaryPath" -ForegroundColor Green
+
+    # Named individually rather than counted, because the action is per tenant: someone has
+    # to open two portal pages in that specific tenant. A count tells nobody where to go.
+    $lowerBound = @($succeeded | Where-Object { (& $readColumn $_ 'AssessmentConfidence') -eq 'LowerBound' })
+    if ($lowerBound.Count -gt 0) {
+        Write-Host "`n$($lowerBound.Count) tenant(s) reported a LOWER BOUND, not a clean bill of health." -ForegroundColor Yellow
+        Write-Host 'Their authentication methods policy is not fully migrated, so the legacy per-user MFA service settings and legacy SSPR methods pages still govern them. Both can hand out SMS and voice through settings no API exposes, and the retirement covers SSPR too.' -ForegroundColor Yellow
+        foreach ($row in $lowerBound) {
+            $state = & $readColumn $row 'PolicyMigrationState'
+            $blocked = & $readColumn $row 'BlockedAtRetirement'
+            Write-Host "    - $(& $readColumn $row 'Customer') [$state] reported $blocked blocked at retirement" -ForegroundColor Yellow
+        }
+        Write-Host 'Check each one by hand in Entra admin center > Protection > Multifactor authentication > Additional cloud-based MFA settings, and Password reset > Authentication methods.' -ForegroundColor Yellow
+    }
+
     Write-Host '2026-09-01 is the auto-enablement date. Move users out of SMS/voice AMP scope before then to prevent it.' -ForegroundColor Yellow
     Write-Host 'No tenant settings were changed.' -ForegroundColor Green
 
