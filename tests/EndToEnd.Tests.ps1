@@ -124,6 +124,21 @@ function Invoke-MgGraphRequest {
     if ($Uri -match '/authenticationMethodConfigurations/voice$') {
         return [PSCustomObject]@{ state='disabled'; includeTargets=@(); excludeTargets=@() }
     }
+    # The destination. Passkeys enabled but scoped to a pilot group that does NOT contain
+    # the blocked users, which is the shape that produces a correct work queue nobody can
+    # act on: the tenant looks migration-ready and the people who need to move cannot.
+    if ($Uri -match '/authenticationMethodConfigurations/fido2$') {
+        return [PSCustomObject]@{ state='enabled'
+            includeTargets=@([PSCustomObject]@{ id='g-passkey-pilot'; targetType='group' })
+            excludeTargets=@() }
+    }
+    if ($Uri -match '/groups/g-passkey-pilot/transitiveMembers') {
+        # Only the already-safe user. None of the blocked population.
+        return [PSCustomObject]@{ value = @([PSCustomObject]@{ id='u-safe' }) }
+    }
+    if ($Uri -match '/authenticationMethodConfigurations/microsoftAuthenticator$') {
+        return [PSCustomObject]@{ state='disabled'; includeTargets=@(); excludeTargets=@() }
+    }
     if ($Uri -match '/policies/authenticationMethodsPolicy$') {
         # premigration: the legacy MFA and SSPR portal pages still apply, which is the
         # state that has to produce the manual-check warning.
@@ -468,6 +483,32 @@ Describe 'A default run against a stubbed tenant' {
         $rows = @(Import-Csv -LiteralPath $script:CsvPath)
         ($rows | Where-Object UserPrincipalName -eq 'rosalind@fabrikam-example.com').Risk | Should -Be 'High'
         ($rows | Where-Object UserPrincipalName -eq 'marcus@fabrikam-example.com').BlockedAtRetirement | Should -Be 'False'
+    }
+
+    It 'reports whether the users being told to move can actually move' {
+        # The fixture is deliberately the shape that looks migration-ready and is not:
+        # passkeys are enabled, but scoped to a pilot group containing only the user who
+        # was already safe, and Authenticator is disabled outright. Every blocked user is
+        # therefore outside the scope of everything that survives the retirement.
+        #
+        # Without this the run produces a correct work queue, correct tickets, and correct
+        # per-user instructions telling people to register a method the policy will not let
+        # them register. That is a worse outcome than finding nothing, because it consumes
+        # a technician's week before anybody notices.
+        $script:Summary.PasskeyPolicyState | Should -Be 'enabled'
+        $script:Summary.AuthenticatorPolicyState | Should -Be 'disabled'
+        $script:Summary.UsersInPasskeyScope | Should -Be 1
+        $script:Summary.UsersInAuthenticatorScope | Should -Be 0
+
+        $script:Summary.BlockedWithNoDestination | Should -Be $script:Summary.BlockedAtRetirement `
+            -Because 'no blocked user is in scope for a method that survives 2027-02-01'
+    }
+
+    It 'says so on the console, in the same breath as the lockout count' {
+        # A number that only reaches the summary JSON is a number nobody reads. This has to
+        # interrupt the operator on the run that discovers it.
+        $script:StdOut | Should -Match 'in scope for neither passkeys nor Microsoft Authenticator'
+        $script:StdOut | Should -Match 'cannot register the method they are about to be told to register'
     }
 
     It 'reports no unrecognised authentication methods for known input' {
