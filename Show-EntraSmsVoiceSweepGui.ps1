@@ -406,8 +406,10 @@ function Add-TenantRow {
     $rows.Add($row)
 }
 
-function Write-Log {
-    param([string]$Text, [string]$Colour = '#D6E2EE')
+function Add-ProgressLine {
+    # Not Write-Log: PowerShell ships a cmdlet by that name on Windows, and shadowing a
+    # built-in inside a script somebody may dot-source is a trap for whoever comes next.
+    param([string]$Text)
     $controls.TxtLog.AppendText("$Text`r`n")
     $controls.TxtLog.ScrollToEnd()
     [System.Windows.Forms.Application]::DoEvents()
@@ -538,31 +540,31 @@ $controls.BtnRun.Add_Click({
 
         $controls.BtnRun.IsEnabled = $false
         $controls.TxtLog.Clear()
-        Write-Log "Assessing $($validation.Entries.Count) tenant(s). Read-only; nothing is changed in any tenant."
-        Write-Log "Equivalent command line:"
-        Write-Log "  $(Get-EquivalentCommandLine -Arguments $arguments)"
-        Write-Log ''
+        Add-ProgressLine "Assessing $($validation.Entries.Count) tenant(s). Read-only; nothing is changed in any tenant."
+        Add-ProgressLine "Equivalent command line:"
+        Add-ProgressLine "  $(Get-EquivalentCommandLine -Arguments $arguments)"
+        Add-ProgressLine ''
         Set-Status 'Running...'
 
         try {
             # Streamed rather than captured, so a ninety-tenant run shows progress instead
             # of a frozen window. Graph's interactive sign-in still opens its own browser.
             & $sweepScript @arguments 2>&1 | ForEach-Object {
-                Write-Log ([string]$_)
+                Add-ProgressLine ([string]$_)
             }
 
             if ($controls.ChkEstate.IsChecked -and (Test-Path -LiteralPath $estateScript -PathType Leaf)) {
-                Write-Log ''
-                Write-Log 'Building the estate roll-up...'
-                & $estateScript -ReportRoot $reportRootValue 2>&1 | ForEach-Object { Write-Log ([string]$_) }
+                Add-ProgressLine ''
+                Add-ProgressLine 'Building the estate roll-up...'
+                & $estateScript -ReportRoot $reportRootValue 2>&1 | ForEach-Object { Add-ProgressLine ([string]$_) }
             }
 
             Set-Status 'Finished.'
             $controls.BtnOpenFolder.IsEnabled = $true
         }
         catch {
-            Write-Log ''
-            Write-Log "RUN FAILED: $($_.Exception.Message)"
+            Add-ProgressLine ''
+            Add-ProgressLine "RUN FAILED: $($_.Exception.Message)"
             Set-Status 'Failed. See the progress pane.'
         }
         finally {
