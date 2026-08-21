@@ -47,3 +47,7 @@ function Get-AssessmentScriptPath {
 function Get-SweepScriptPath {
     Join-Path (Split-Path -Parent $PSScriptRoot) 'Invoke-EntraSmsVoiceSweep.ps1'
 }
+
+function Get-CompareScriptPath {
+    Join-Path (Split-Path -Parent $PSScriptRoot) 'Compare-EntraSmsVoiceAssessment.ps1'
+}

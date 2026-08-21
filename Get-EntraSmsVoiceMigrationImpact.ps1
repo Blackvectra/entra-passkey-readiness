@@ -817,8 +817,13 @@ function Get-ConditionalAccessMfaReport {
 function Get-MethodPolicyScope {
     # Resolves AMP include/exclude targets to a concrete user-id set. Exclusions are applied
     # after all inclusions because Entra evaluates exclude as an override, not an ordered filter.
+    #
+    # Used for both halves of the question. sms and voice are what people are leaving;
+    # fido2 and microsoftAuthenticator are what they are supposed to arrive at, and a
+    # destination that is disabled or scoped to a pilot group is the reason a migration
+    # stalls with everybody correctly identified and nobody able to move.
     param(
-        [Parameter(Mandatory)][ValidateSet('sms', 'voice')][string]$Method,
+        [Parameter(Mandatory)][ValidateSet('sms', 'voice', 'fido2', 'microsoftAuthenticator')][string]$Method,
         [Parameter(Mandatory)][hashtable]$EnabledUserIndex
     )
 
@@ -2368,31 +2373,56 @@ function Protect-CsvInjection {
 
 function Protect-OutputFile {
     # Every artefact this script writes is a targeting list: it names privileged accounts
-    # and states which of them lack a phishing-resistant method. Files inherit the parent
-    # directory ACL by default, which on a shared reports folder can mean everyone.
-    # Restrict to the file owner and local Administrators.
-    param([Parameter(Mandatory)][string]$Path)
-
-    if (-not $IsWindows) { return }   # POSIX ACLs are out of scope; document instead
+    # and states which of them lack a phishing-resistant method. A new file takes its
+    # permissions from where it lands -- on a shared reports folder that can mean everyone,
+    # and on Linux or macOS it means whatever the umask allows, which on most distributions
+    # leaves the file world-readable.
+    #
+    # Windows: break inheritance, then grant the file owner and local Administrators only.
+    # Linux and macOS: 0600 for a file, 0700 for a directory. The API that sets it arrived
+    # in .NET 7, so PowerShell 7.0 to 7.2 cannot call it; there the operator is told what
+    # to run instead of being left believing a control applied when it did not.
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [switch]$Directory
+    )
 
     try {
-        $acl = Get-Acl -LiteralPath $Path
-        $acl.SetAccessRuleProtection($true, $false)   # break inheritance, drop inherited rules
-        foreach ($existing in @($acl.Access)) { [void]$acl.RemoveAccessRule($existing) }
+        if ($IsWindows) {
+            $acl = Get-Acl -LiteralPath $Path
+            $acl.SetAccessRuleProtection($true, $false)   # break inheritance, drop inherited rules
+            foreach ($existing in @($acl.Access)) { [void]$acl.RemoveAccessRule($existing) }
 
-        $identities = @(
-            [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-            (New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544')  # BUILTIN\Administrators
-        )
-        foreach ($identity in $identities) {
-            $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
-                $identity, 'FullControl', 'Allow')))
+            $identities = @(
+                [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+                (New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544')  # BUILTIN\Administrators
+            )
+            foreach ($identity in $identities) {
+                $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+                    $identity, 'FullControl', 'Allow')))
+            }
+            Set-Acl -LiteralPath $Path -AclObject $acl
+            return
         }
-        Set-Acl -LiteralPath $Path -AclObject $acl
+
+        # Resolved at run time, so this parses on a PowerShell that has never heard of it.
+        $modeType = 'System.IO.UnixFileMode' -as [type]
+        if (-not $modeType) {
+            $octal = if ($Directory) { '700' } else { '600' }
+            Write-Warning "Cannot restrict permissions on $Path. Setting them needs PowerShell 7.3 or later; this is $($PSVersionTable.PSVersion). Run: chmod $octal '$Path'"
+            return
+        }
+
+        # 0600 (384) for a file, 0700 (448) for a directory: a directory needs the execute
+        # bit or its owner cannot open it, which would break the sweep rather than protect
+        # it. File::SetUnixFileMode is the setter for both; there is no Directory:: form.
+        $mode = [Enum]::ToObject($modeType, $(if ($Directory) { 448 } else { 384 }))
+        [System.IO.File]::SetUnixFileMode($Path, $mode)
     }
     catch {
-        # Network shares and some filesystems reject ACL changes. Warn rather than fail:
-        # losing the report is worse than losing the hardening, but the operator must know.
+        # Network shares, FAT volumes, and some container filesystems reject permission
+        # changes outright. Warn rather than fail: losing the report is worse than losing
+        # the hardening, but the operator has to know which of the two they got.
         Write-Warning "Could not restrict permissions on $Path. Verify access controls manually. $($_.Exception.Message)"
     }
 }
@@ -2482,6 +2512,20 @@ $policyInfo = Get-AuthenticationMethodsPolicyInfo
 Write-Host 'Resolving SMS and voice policy scope (nested groups and exclusions)...' -ForegroundColor Cyan
 $smsScope = Get-MethodPolicyScope -Method sms -EnabledUserIndex $enabledUserIndex
 $voiceScope = Get-MethodPolicyScope -Method voice -EnabledUserIndex $enabledUserIndex
+
+# The other half of the question, and the one nothing else asks: is the destination open?
+#
+# Every recommendation this tool makes ends in "register a passkey or Authenticator". That
+# is only actionable if the method is enabled in the policy AND the user is inside its
+# scope. Microsoft states the prerequisite plainly -- before running a registration
+# campaign, passkeys must be enabled and the SMS/voice population must be inside a
+# passkey-enabled policy -- and a tenant that skipped it produces the worst kind of
+# migration: the work queue is correct, the tickets go out, and the users cannot comply.
+# Read here rather than inferred from registrations, because a user with nothing
+# registered looks identical whether the method is available to them or not.
+Write-Host 'Resolving passkey and Authenticator policy scope (can these users actually move?)...' -ForegroundColor Cyan
+$passkeyScope = Get-MethodPolicyScope -Method fido2 -EnabledUserIndex $enabledUserIndex
+$authenticatorScope = Get-MethodPolicyScope -Method microsoftAuthenticator -EnabledUserIndex $enabledUserIndex
 
 # The two tenant-wide reads that close the remaining API-readable blind spots: a custom
 # authentication strength quietly permitting SMS or voice, and the question of whether any
@@ -2774,7 +2818,21 @@ $reportTimestamps = @($registrations |
     Where-Object { $_ })
 
 # Include and exclude targets neither scope resolution could turn into users.
-$unresolvedTargets = @($smsScope.UnresolvedTargets) + @($voiceScope.UnresolvedTargets)
+$unresolvedTargets = @($smsScope.UnresolvedTargets) + @($voiceScope.UnresolvedTargets) +
+    @($passkeyScope.UnresolvedTargets) + @($authenticatorScope.UnresolvedTargets)
+
+# Users the retirement strands who have no enabled method to move to. Counted from the
+# rows rather than the policy alone, because "passkeys are enabled" and "passkeys are
+# enabled for the people who need them" are different statements and only the second one
+# ends the migration. A blocked user outside both scopes cannot act on any instruction
+# this tool gives them, so this number gates the campaign rather than following it.
+$blockedRows = @($rows | Where-Object { $_.BlockedAtRetirement })
+$blockedOutsidePasskey = @($blockedRows | Where-Object { -not $passkeyScope.UserIds.Contains([string]$_.UserId) })
+$blockedOutsideAuthenticator = @($blockedRows | Where-Object { -not $authenticatorScope.UserIds.Contains([string]$_.UserId) })
+$blockedWithNoDestination = @($blockedRows | Where-Object {
+        -not $passkeyScope.UserIds.Contains([string]$_.UserId) -and
+        -not $authenticatorScope.UserIds.Contains([string]$_.UserId)
+    })
 
 # PreferredMethod reaches the rows already translated for a reader, so the tenant-wide
 # count below has to match on display names. Deriving them from the enum through the same
@@ -2845,6 +2903,19 @@ $summary = [PSCustomObject][ordered]@{
     # than the risk bands, and the one to drive to zero before the date.
     BlockedAtRetirement        = @($candidateRows | Where-Object BlockedAtRetirement).Count
     BlockedAdminsAtRetirement  = @($candidateRows | Where-Object { $_.BlockedAtRetirement -and $_.IsAdmin }).Count
+    # Whether the destination is open. Every instruction this tool issues ends in "register
+    # a passkey or Authenticator", which is only actionable if the method is enabled and
+    # the user is inside its scope. A tenant can have a perfect work queue and move nobody.
+    PasskeyPolicyState         = $passkeyScope.State
+    AuthenticatorPolicyState   = $authenticatorScope.State
+    UsersInPasskeyScope        = $passkeyScope.UserIds.Count
+    UsersInAuthenticatorScope  = $authenticatorScope.UserIds.Count
+    BlockedOutsidePasskeyScope = $blockedOutsidePasskey.Count
+    BlockedOutsideAuthenticatorScope = $blockedOutsideAuthenticator.Count
+    # The one to read first. These users lose their only working method on 2027-02-01 and
+    # are inside the scope of nothing that survives it, so no campaign, nudge, or ticket
+    # can move them until the policy changes. Fix this before sending anybody an email.
+    BlockedWithNoDestination   = $blockedWithNoDestination.Count
     # A different signal from BlockedAtRetirement: not locked out -- a stronger method is
     # registered -- but the sign-in prompt they are used to seeing is still SMS or voice
     # today, and nothing changes that before it stops working. Computed across every
@@ -2956,6 +3027,22 @@ if ($summary.BlockedAtRetirement -gt 0) {
 }
 else {
     Write-Host 'Nobody loses their sign-in on 2027-02-01: no user holds a phone as their only method that satisfies MFA.' -ForegroundColor Green
+}
+
+# Whether the exit exists. Printed immediately after the lockout number because it changes
+# what that number means: users who cannot reach a surviving method are not a campaign
+# problem, they are a policy problem, and no amount of chasing moves them.
+if ($summary.PasskeyPolicyState -ne 'enabled' -and $summary.AuthenticatorPolicyState -ne 'enabled') {
+    Write-Host "`nNeither passkeys (fido2: $($summary.PasskeyPolicyState)) nor Microsoft Authenticator ($($summary.AuthenticatorPolicyState)) is enabled in the authentication methods policy." -ForegroundColor Red
+    Write-Host 'There is nowhere for these users to go. Enable a surviving method before sending anybody a ticket, or the whole queue is unactionable.' -ForegroundColor Red
+}
+elseif ($summary.BlockedWithNoDestination -gt 0) {
+    Write-Host "`n$($summary.BlockedWithNoDestination) of the blocked user(s) are in scope for neither passkeys nor Microsoft Authenticator." -ForegroundColor Red
+    Write-Host 'They cannot register the method they are about to be told to register. Widen the policy scope to include them, then run the campaign.' -ForegroundColor Red
+    Write-Host "Passkey scope covers $($summary.UsersInPasskeyScope) enabled user(s); Authenticator scope covers $($summary.UsersInAuthenticatorScope)." -ForegroundColor Yellow
+}
+elseif ($summary.BlockedAtRetirement -gt 0) {
+    Write-Host "Every blocked user is in scope for passkeys or Microsoft Authenticator, so the campaign can reach all of them." -ForegroundColor Green
 }
 
 # A softer number than BlockedAtRetirement, but the one that explains support calls on the

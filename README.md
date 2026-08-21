@@ -26,6 +26,7 @@ Every Microsoft Graph call is a GET. It does not modify users, groups, policies,
 | [Parameter reference](#parameter-reference) | Every parameter on all three scripts |
 | [Output reference](#output-reference) | Console summary and CSV schema |
 | [Risk classifications](#risk-classifications) | How the five bands are derived |
+| [Can they actually move?](#can-they-actually-move) | Whether the destination method is even enabled and in scope for the people being told to move |
 | [Who actually gets stopped](#who-actually-gets-stopped) | The lockout population, which is not the same as the risk bands |
 | [Coverage](#coverage-who-this-actually-finds) | Exactly who this finds, and who it does not |
 | [Legacy per-user MFA](#legacy-per-user-mfa) | The exposure the modern policy cannot see |
@@ -93,11 +94,25 @@ Microsoft publishes [entra-sms-voice-usage-analyzer](https://github.com/microsof
 | Modules required | 3 | 1 |
 | Resolves group targets to users | No | Yes, transitively |
 | Reads registration report | No | Yes |
+| Reads legacy per-user MFA | No | Yes |
 | Output | Policy include/exclude targets | One risk-ranked row per exposed user |
 | Answers "is my tenant in scope?" | Yes | Yes |
 | Answers "which users get blocked?" | No | Yes |
+| Answers "can those users actually register a surviving method?" | No | Yes |
 
 Run Microsoft's script for the authoritative tenant-level policy and campaign view. Run this one to build the remediation work queue.
+
+**The legacy per-user MFA row is the one that bites.** Microsoft's analyzer reads the modern Authentication Methods Policy. A tenant whose migration state is still `preMigration` is also governed by the legacy per-user MFA service settings page, which has no API — so SMS can be live for a large population while the modern policy reads `disabled`. That tenant gets:
+
+```
+Registration campaign: disabled
+SMS state: disabled
+Voice state: disabled
+===== IMPACT SUMMARY =====
+  SMS/Voice disabled - no action required.
+```
+
+…while its administrator reports "a lot of users use SMS as MFA/SSPR method" ([Microsoft Q&A](https://learn.microsoft.com/answers/a/12890397)). Microsoft's own guidance for that tenant is to finish the migration to the modern policy first. Until it is finished, this tool reads legacy per-user MFA per user and reports `PerUserMfaState`, and the sweep marks the tenant `LowerBound` rather than letting its zeroes read as a clean result.
 
 **Date discrepancy worth knowing.** Microsoft's script prints `Jan 28, 2027` as the retirement date in its impact summary. Microsoft Learn does not use that date anywhere. What Learn states is:
 
@@ -297,7 +312,10 @@ $rows | Where-Object Risk -eq 'Critical' | Format-Table DisplayName, UserPrincip
 
 The tenant list is a CSV with a `TenantId` column and an optional `CustomerName` column used to name the output folder. See [examples/tenants.sample.csv](examples/tenants.sample.csv).
 
-Results sort failures first, then by Critical count descending, so the estate triage order is the read order.
+Results sort failures first, then tenants whose result is a lower bound and shows nothing, then by how many users are blocked at the retirement, then by risk band. The estate triage order is the read order.
+
+> [!IMPORTANT]
+> `AssessmentConfidence` says whether a tenant's zeroes can be read as "nothing found". `Complete` means the authentication methods policy is fully migrated, so the modern policy read is the whole answer. `LowerBound` means it is not, and the legacy per-user MFA service settings and legacy SSPR methods pages still govern that tenant — both can hand out SMS and voice through settings no API exposes. A `LowerBound` tenant reporting zero has been partially measured, not measured clean, so those tenants are lifted above the genuinely clean ones and named on the console rather than left at the bottom of the file where the usual "open the non-zero rows" habit skips them.
 
 **Point `-ReportRoot` at your protected client documentation store, never at a git working directory.**
 
@@ -335,6 +353,8 @@ A ninety-tenant sweep that dies at tenant sixty should not restart at tenant one
 `-Resume` reads the most recent `SweepSummary_*.csv` under `-ReportRoot` and skips every tenant already recorded as `Success`. Skipped tenants are **carried into the new summary** rather than dropped, so the summary still describes the whole tenant list and a second resume does not redo the first run's work.
 
 Matching is on the customer label rather than the tenant ID, because a successful row records the tenant GUID Graph reported, which will not equal the verified domain you supplied.
+
+Every row is written against one fixed column list, whichever run produced it. `Export-Csv` takes its header from the first object it receives, so a carried-forward row from an older build sorting to the top would otherwise drop the newer columns from every row in the file — and since that truncated file then becomes the newest summary, the next resume would read the short schema and truncate again. Columns a row does not carry are written empty, which reads correctly as "this tenant was never assessed on that field".
 
 ### Tracking progress between runs
 
@@ -540,7 +560,11 @@ Accepts and passes through `-IncludeUnaffected`, `-SkipLegacyPerUserMfa`, `-Excl
 | `TenantId` | Tenant the assessment actually ran against |
 | `DirectoryUsersReturned` / `EnabledUsersAssessed` / `UsersSkippedNotEnabled` | The assessment's own arithmetic. The last two must sum to the first — that is what makes a silently dropped user visible instead of invisible. |
 | `RegistrationCampaignState` | `enabled`, `disabled`, `default (Microsoft managed)`, or `unknown` when the policy read returned no state |
-| `SmsPolicyState` / `VoicePolicyState` | AMP state of each method |
+| `SmsPolicyState` / `VoicePolicyState` | AMP state of each method — what users are leaving |
+| `PasskeyPolicyState` / `AuthenticatorPolicyState` | AMP state of `fido2` and `microsoftAuthenticator` — what users are supposed to arrive at. See [Can they actually move?](#can-they-actually-move) |
+| `UsersInPasskeyScope` / `UsersInAuthenticatorScope` | Enabled users resolved into each destination method's scope |
+| `BlockedOutsidePasskeyScope` / `BlockedOutsideAuthenticatorScope` | Blocked users outside each destination's scope |
+| `BlockedWithNoDestination` | **Blocked users in scope for neither.** No campaign, nudge, or ticket can move these people until the policy changes. |
 | `SmsPolicyInclude` / `SmsPolicyExclude` | Resolved include and exclude targets, with transitive member counts |
 | `InSmsPolicyScope` / `InVoicePolicyScope` | Enabled users resolved into each method's scope |
 | `UnresolvedPolicyTargets` | **Above zero means the two counts above are a floor, not a total.** The policy targets somebody this run could not resolve to users, so the tenant is at least as exposed as reported. Empty on a clean run. |
@@ -606,6 +630,30 @@ Summarised here; full logic and remediation guidance in [docs/Risk-Classificatio
 | **Low** | Exposed to the change but already passwordless-capable |
 | **Informational** | No resolved exposure |
 | **Excluded** | Not a risk level. The user matched `-ExcludeUpnPattern` and was left out of every count. |
+
+---
+
+## Can they actually move?
+
+Every instruction this tool produces ends in some form of "register a passkey or Microsoft Authenticator". That is only actionable if the method is **enabled** in the Authentication Methods Policy **and** the user is **inside its scope**. Microsoft states the prerequisite directly: before running a registration campaign, ensure Passkey (FIDO2) is enabled and that your SMS and voice users are included in a passkey-enabled policy.
+
+A tenant that skipped it produces the worst outcome available here — not a missed finding, but a correct one nobody can act on. The work queue is right, the tickets go out, the emails land, and every user who follows the instruction hits a policy that will not let them register. That burns a technician's week before anyone works out why.
+
+So the assessment reads both destinations as well as both sources:
+
+| Reported | What it tells you |
+|---|---|
+| `PasskeyPolicyState`, `AuthenticatorPolicyState` | Whether the destination is enabled at all |
+| `UsersInPasskeyScope`, `UsersInAuthenticatorScope` | How many enabled users each destination actually covers |
+| `BlockedWithNoDestination` | Blocked users in scope for neither. **Read this before sending anybody a ticket.** |
+
+Three outcomes, each stated on the console next to the lockout count rather than left in the summary file:
+
+- **Neither method enabled.** There is nowhere to go. Fix the policy before the campaign; the queue is unactionable until you do.
+- **Enabled, but blocked users are outside the scope.** Common when passkeys were switched on for a pilot group and never widened. Widen the scope, then run the campaign.
+- **Every blocked user is in scope.** The campaign can reach all of them, and the numbers below are a work queue rather than a policy problem.
+
+This is read from the policy rather than inferred from what users have registered, because a user with nothing registered looks identical whether the method was available to them or not.
 
 ---
 

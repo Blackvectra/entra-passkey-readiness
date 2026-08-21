@@ -249,6 +249,62 @@ end {
         $labelOwners[$safe] = [string]$target.TenantId
     }
 
+    function Protect-OutputFile {
+        # Every artefact this script writes is a targeting list: it names privileged accounts
+        # and states which of them lack a phishing-resistant method. A new file takes its
+        # permissions from where it lands -- on a shared reports folder that can mean everyone,
+        # and on Linux or macOS it means whatever the umask allows, which on most distributions
+        # leaves the file world-readable.
+        #
+        # Windows: break inheritance, then grant the file owner and local Administrators only.
+        # Linux and macOS: 0600 for a file, 0700 for a directory. The API that sets it arrived
+        # in .NET 7, so PowerShell 7.0 to 7.2 cannot call it; there the operator is told what
+        # to run instead of being left believing a control applied when it did not.
+        param(
+            [Parameter(Mandatory)][string]$Path,
+            [switch]$Directory
+        )
+
+        try {
+            if ($IsWindows) {
+                $acl = Get-Acl -LiteralPath $Path
+                $acl.SetAccessRuleProtection($true, $false)   # break inheritance, drop inherited rules
+                foreach ($existing in @($acl.Access)) { [void]$acl.RemoveAccessRule($existing) }
+
+                $identities = @(
+                    [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+                    (New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544')  # BUILTIN\Administrators
+                )
+                foreach ($identity in $identities) {
+                    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+                        $identity, 'FullControl', 'Allow')))
+                }
+                Set-Acl -LiteralPath $Path -AclObject $acl
+                return
+            }
+
+            # Resolved at run time, so this parses on a PowerShell that has never heard of it.
+            $modeType = 'System.IO.UnixFileMode' -as [type]
+            if (-not $modeType) {
+                $octal = if ($Directory) { '700' } else { '600' }
+                Write-Warning "Cannot restrict permissions on $Path. Setting them needs PowerShell 7.3 or later; this is $($PSVersionTable.PSVersion). Run: chmod $octal '$Path'"
+                return
+            }
+
+            # 0600 (384) for a file, 0700 (448) for a directory: a directory needs the execute
+            # bit or its owner cannot open it, which would break the sweep rather than protect
+            # it. File::SetUnixFileMode is the setter for both; there is no Directory:: form.
+            $mode = [Enum]::ToObject($modeType, $(if ($Directory) { 448 } else { 384 }))
+            [System.IO.File]::SetUnixFileMode($Path, $mode)
+        }
+        catch {
+            # Network shares, FAT volumes, and some container filesystems reject permission
+            # changes outright. Warn rather than fail: losing the report is worse than losing
+            # the hardening, but the operator has to know which of the two they got.
+            Write-Warning "Could not restrict permissions on $Path. Verify access controls manually. $($_.Exception.Message)"
+        }
+    }
+
     function New-SweepResultRow {
         # One shape for every result, so the sequential path, the parallel path, and the
         # failure path cannot drift into producing different columns.
@@ -267,6 +323,19 @@ end {
             TenantId                   = if ($Summary) { & $get 'TenantId' } else { $TenantId }
             Status                     = $Status
             RegistrationCampaignState  = if ($Summary) { & $get 'RegistrationCampaignState' } else { '' }
+            PolicyMigrationState       = if ($Summary) { & $get 'PolicyMigrationState' } else { 'not-assessed' }
+            # Whether this tenant's zeroes can be read as "not exposed".
+            #
+            # Anything short of migrationComplete means the legacy per-user MFA service
+            # settings page still governs the tenant, and that page can hand out SMS and
+            # voice through settings no API exposes. A preMigration tenant with no findings
+            # has not been measured clean; it has been partially measured. Left undeclared,
+            # it reads identically to a tenant that genuinely has nothing -- and the
+            # documented estate workflow of opening only the non-zero rows skips it, which
+            # is how it comes back as a February lockout ticket.
+            AssessmentConfidence       = if (-not $Summary) { 'NotAssessed' }
+                                         elseif (([string](& $get 'PolicyMigrationState')) -eq 'migrationComplete') { 'Complete' }
+                                         else { 'LowerBound' }
             SmsPolicyState             = if ($Summary) { & $get 'SmsPolicyState' } else { '' }
             VoicePolicyState           = if ($Summary) { & $get 'VoicePolicyState' } else { '' }
             EnabledUsersAssessed       = & $get 'EnabledUsersAssessed'
@@ -275,6 +344,13 @@ end {
             High                       = & $get 'High'
             Moderate                   = & $get 'Moderate'
             Low                        = & $get 'Low'
+            # The headline operational number, and the one that decides which tenants get
+            # worked first: users holding a phone as their only method that satisfies MFA.
+            # The assessment has computed it all along; it was never carried into the estate
+            # view, so a sweep could not rank tenants by how many people actually get
+            # stranded -- only by risk band, which counts a different population.
+            BlockedAtRetirement        = & $get 'BlockedAtRetirement'
+            BlockedAdminsAtRetirement  = & $get 'BlockedAdminsAtRetirement'
             PasswordlessCapableInScope = & $get 'PasswordlessCapableInScope'
             OldestReportRowUtc         = & $get 'OldestReportRowUtc'
             ReportPath                 = if ($Summary) { & $get 'OutputPath' } else { '' }
@@ -405,8 +481,15 @@ end {
         $pwshPath = if ($IsWindows) { Join-Path $PSHOME 'pwsh.exe' } else { Join-Path $PSHOME 'pwsh' }
         if (-not (Test-Path -LiteralPath $pwshPath)) { $pwshPath = 'pwsh' }
 
+        # The handoff directory sits in the shared temp directory, so on a multi-user host
+        # every local account can read it for as long as the sweep runs. What it holds is
+        # not user rows, but it does name every customer being assessed, where their
+        # evidence is being written, and which app registration is reading their tenant.
+        # Lock it to the owner before anything is written into it -- the files inside
+        # inherit that, and the directory is removed in the finally below either way.
         $handoffRoot = Join-Path ([System.IO.Path]::GetTempPath()) "EntraSweep_$runStamp"
         New-Item -ItemType Directory -Path $handoffRoot -Force | Out-Null
+        if (-not $SkipAclHardening) { Protect-OutputFile -Path $handoffRoot -Directory }
 
         $rowFunction = ${function:New-SweepResultRow}.ToString()
         $assessmentPath = (Resolve-Path -LiteralPath $AssessmentScriptPath).Path
@@ -490,22 +573,62 @@ end {
         return -1
     }
 
-    # Triage order for the estate: the tenants with the most locked-out privileged
-    # accounts get worked first, failures surface at the top so they are not lost.
+    # Reading a row's own property is not enough. Rows carried forward by -Resume come back
+    # through Import-Csv from a summary an older build wrote, so they carry whatever columns
+    # that build emitted and nothing else. Asking one of them for a column added since
+    # throws under StrictMode.
+    $readColumn = {
+        param($row, [string]$name)
+        $property = $row.PSObject.Properties[$name]
+        if ($property) { return $property.Value }
+        return ''
+    }
+
+    # Triage order for the estate. Four keys, in this order:
+    #   1. Failures first. A tenant that did not report is not a tenant with no findings.
+    #   2. Then tenants whose results are a lower bound AND show nothing. This is the whole
+    #      point of reading the policy migration state: their zeroes mean "not measured",
+    #      not "not exposed". At the bottom they get skipped by the usual workflow of
+    #      opening only the non-zero rows. Lower-bound tenants that do have findings are
+    #      already ranked by those findings below, so this only lifts the silent ones.
+    #   3. Then the count of people actually stranded at the retirement.
+    #   4. Then the risk bands.
     $sorted = $results | Sort-Object `
-        @{ Expression = { if ($_.Status -eq 'Failed') { 0 } else { 1 } }; Ascending = $true }, `
-        @{ Expression = { & $asCount $_.Critical }; Descending = $true }, `
-        @{ Expression = { & $asCount $_.High }; Descending = $true }
+        @{ Expression = { if ((& $readColumn $_ 'Status') -eq 'Failed') { 0 } else { 1 } }; Ascending = $true }, `
+        @{ Expression = {
+                $confidence = [string](& $readColumn $_ 'AssessmentConfidence')
+                $findings = (& $asCount (& $readColumn $_ 'Critical')) + (& $asCount (& $readColumn $_ 'High'))
+                if ($confidence -ne 'Complete' -and $findings -le 0) { 0 } else { 1 }
+            }; Ascending = $true }, `
+        @{ Expression = { & $asCount (& $readColumn $_ 'BlockedAtRetirement') }; Descending = $true }, `
+        @{ Expression = { & $asCount (& $readColumn $_ 'Critical') }; Descending = $true }, `
+        @{ Expression = { & $asCount (& $readColumn $_ 'High') }; Descending = $true }
 
     $summaryPath = Join-Path $ReportRoot "SweepSummary_$runStamp.csv"
+
+    # Every row is projected onto one canonical column list before export. Export-Csv takes
+    # its header from the FIRST object it receives, so without this a single carried-forward
+    # row from an older build sorting to the top silently drops the newer columns from all
+    # ninety rows -- and because that truncated file then becomes the newest
+    # SweepSummary_*.csv, the next -Resume reads the short schema and truncates again.
+    # A value the row does not carry exports empty, which reads correctly as "this tenant
+    # was never assessed on that field".
+    $columns = @(
+        'Customer', 'TenantId', 'Status', 'AssessmentConfidence', 'RegistrationCampaignState',
+        'PolicyMigrationState', 'SmsPolicyState', 'VoicePolicyState', 'EnabledUsersAssessed',
+        'MigrationCandidates', 'Critical', 'High', 'Moderate', 'Low', 'BlockedAtRetirement',
+        'BlockedAdminsAtRetirement', 'PasswordlessCapableInScope', 'OldestReportRowUtc',
+        'ReportPath', 'Error'
+    )
+
     # Same injection guard as the per-tenant exports: customer labels reach this file too.
     $guarded = foreach ($row in $sorted) {
         $clone = [ordered]@{}
-        foreach ($property in $row.PSObject.Properties) {
-            $value = $property.Value
+        foreach ($name in $columns) {
+            $value = & $readColumn $row $name
             if ($value -is [string] -and $value.Length -gt 0 -and
                 $value[0] -in @('=', '+', '-', '@', [char]9, [char]13)) { $value = "'" + $value }
-            $clone[$property.Name] = $value
+            $clone[$name] = $value
         }
         [PSCustomObject]$clone
     }
@@ -513,29 +636,29 @@ end {
 
     # The estate summary is the single highest-value file here: it ranks every managed
     # customer by how many privileged accounts are about to lose MFA.
-    if (-not $SkipAclHardening -and $IsWindows) {
-        try {
-            $acl = Get-Acl -LiteralPath $summaryPath
-            $acl.SetAccessRuleProtection($true, $false)
-            foreach ($existing in @($acl.Access)) { [void]$acl.RemoveAccessRule($existing) }
-            foreach ($identity in @([System.Security.Principal.WindowsIdentity]::GetCurrent().User,
-                    (New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544'))) {
-                $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
-                    $identity, 'FullControl', 'Allow')))
-            }
-            Set-Acl -LiteralPath $summaryPath -AclObject $acl
-        }
-        catch { Write-Warning "Could not restrict permissions on $summaryPath. Verify access controls manually." }
-    }
+    if (-not $SkipAclHardening) { Protect-OutputFile -Path $summaryPath }
 
     Write-Host "`n===== CROSS-TENANT SWEEP SUMMARY =====" -ForegroundColor Magenta
-    $sorted | Format-Table Customer, Status, SmsPolicyState, VoicePolicyState,
-        MigrationCandidates, Critical, High, Moderate -AutoSize | Out-Host
+    $sorted | Format-Table Customer, Status, AssessmentConfidence, MigrationCandidates,
+        BlockedAtRetirement, Critical, High, Moderate -AutoSize | Out-Host
 
-    $failed = @($results | Where-Object Status -eq 'Failed').Count
-    $succeeded = @($results | Where-Object Status -eq 'Success')
-    $totalCritical = ($succeeded | ForEach-Object { & $asCount $_.Critical } | Measure-Object -Sum).Sum
-    $totalCandidates = ($succeeded | ForEach-Object { & $asCount $_.MigrationCandidates } | Measure-Object -Sum).Sum
+    # Through $readColumn, like the sort and the export: a carried-forward row carries only
+    # the columns the build that wrote it emitted, and asking it for a newer one throws
+    # under StrictMode -- after every tenant has already been assessed.
+    $failed = @($results | Where-Object { (& $readColumn $_ 'Status') -eq 'Failed' }).Count
+    $succeeded = @($results | Where-Object { (& $readColumn $_ 'Status') -eq 'Success' })
+    # Not $asCount: that returns -1 for a value it cannot read, which is deliberate as a
+    # sort key -- it drops unknowns to the bottom -- and wrong as a summand. A carried-
+    # forward row from a build that never wrote the column would otherwise subtract one
+    # from the estate total and report fewer candidates than were actually found.
+    $asTotal = {
+        param($value)
+        $parsed = 0
+        if ([int]::TryParse([string]$value, [ref]$parsed)) { return $parsed }
+        return 0
+    }
+    $totalCritical = ($succeeded | ForEach-Object { & $asTotal (& $readColumn $_ 'Critical') } | Measure-Object -Sum).Sum
+    $totalCandidates = ($succeeded | ForEach-Object { & $asTotal (& $readColumn $_ 'MigrationCandidates') } | Measure-Object -Sum).Sum
 
     Write-Host "Tenants assessed: $($results.Count - $failed) of $($results.Count)" -ForegroundColor Cyan
     if ($carriedForward.Count -gt 0) {
@@ -545,6 +668,21 @@ end {
     Write-Host "Migration candidates across estate: $totalCandidates" -ForegroundColor Yellow
     Write-Host "Critical findings across estate:    $totalCritical" -ForegroundColor $(if ($totalCritical -gt 0) { 'Red' } else { 'Green' })
     Write-Host "Summary written to: $summaryPath" -ForegroundColor Green
+
+    # Named individually rather than counted, because the action is per tenant: someone has
+    # to open two portal pages in that specific tenant. A count tells nobody where to go.
+    $lowerBound = @($succeeded | Where-Object { (& $readColumn $_ 'AssessmentConfidence') -eq 'LowerBound' })
+    if ($lowerBound.Count -gt 0) {
+        Write-Host "`n$($lowerBound.Count) tenant(s) reported a LOWER BOUND, not a clean bill of health." -ForegroundColor Yellow
+        Write-Host 'Their authentication methods policy is not fully migrated, so the legacy per-user MFA service settings and legacy SSPR methods pages still govern them. Both can hand out SMS and voice through settings no API exposes, and the retirement covers SSPR too.' -ForegroundColor Yellow
+        foreach ($row in $lowerBound) {
+            $state = & $readColumn $row 'PolicyMigrationState'
+            $blocked = & $readColumn $row 'BlockedAtRetirement'
+            Write-Host "    - $(& $readColumn $row 'Customer') [$state] reported $blocked blocked at retirement" -ForegroundColor Yellow
+        }
+        Write-Host 'Check each one by hand in Entra admin center > Protection > Multifactor authentication > Additional cloud-based MFA settings, and Password reset > Authentication methods.' -ForegroundColor Yellow
+    }
+
     Write-Host '2026-09-01 is the auto-enablement date. Move users out of SMS/voice AMP scope before then to prevent it.' -ForegroundColor Yellow
     Write-Host 'No tenant settings were changed.' -ForegroundColor Green
 

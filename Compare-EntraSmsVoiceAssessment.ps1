@@ -213,25 +213,57 @@ function Protect-CsvInjection {
 }
 
 function Protect-OutputFile {
-    param([Parameter(Mandatory)][string]$Path)
-
-    if (-not $IsWindows) { return }
+    # Every artefact this script writes is a targeting list: it names privileged accounts
+    # and states which of them lack a phishing-resistant method. A new file takes its
+    # permissions from where it lands -- on a shared reports folder that can mean everyone,
+    # and on Linux or macOS it means whatever the umask allows, which on most distributions
+    # leaves the file world-readable.
+    #
+    # Windows: break inheritance, then grant the file owner and local Administrators only.
+    # Linux and macOS: 0600 for a file, 0700 for a directory. The API that sets it arrived
+    # in .NET 7, so PowerShell 7.0 to 7.2 cannot call it; there the operator is told what
+    # to run instead of being left believing a control applied when it did not.
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [switch]$Directory
+    )
 
     try {
-        $acl = Get-Acl -LiteralPath $Path
-        $acl.SetAccessRuleProtection($true, $false)
-        foreach ($existing in @($acl.Access)) { [void]$acl.RemoveAccessRule($existing) }
-        $identities = @(
-            [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-            (New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544')
-        )
-        foreach ($identity in $identities) {
-            $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
-                $identity, 'FullControl', 'Allow')))
+        if ($IsWindows) {
+            $acl = Get-Acl -LiteralPath $Path
+            $acl.SetAccessRuleProtection($true, $false)   # break inheritance, drop inherited rules
+            foreach ($existing in @($acl.Access)) { [void]$acl.RemoveAccessRule($existing) }
+
+            $identities = @(
+                [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+                (New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544')  # BUILTIN\Administrators
+            )
+            foreach ($identity in $identities) {
+                $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+                    $identity, 'FullControl', 'Allow')))
+            }
+            Set-Acl -LiteralPath $Path -AclObject $acl
+            return
         }
-        Set-Acl -LiteralPath $Path -AclObject $acl
+
+        # Resolved at run time, so this parses on a PowerShell that has never heard of it.
+        $modeType = 'System.IO.UnixFileMode' -as [type]
+        if (-not $modeType) {
+            $octal = if ($Directory) { '700' } else { '600' }
+            Write-Warning "Cannot restrict permissions on $Path. Setting them needs PowerShell 7.3 or later; this is $($PSVersionTable.PSVersion). Run: chmod $octal '$Path'"
+            return
+        }
+
+        # 0600 (384) for a file, 0700 (448) for a directory: a directory needs the execute
+        # bit or its owner cannot open it, which would break the sweep rather than protect
+        # it. File::SetUnixFileMode is the setter for both; there is no Directory:: form.
+        $mode = [Enum]::ToObject($modeType, $(if ($Directory) { 448 } else { 384 }))
+        [System.IO.File]::SetUnixFileMode($Path, $mode)
     }
     catch {
+        # Network shares, FAT volumes, and some container filesystems reject permission
+        # changes outright. Warn rather than fail: losing the report is worse than losing
+        # the hardening, but the operator has to know which of the two they got.
         Write-Warning "Could not restrict permissions on $Path. Verify access controls manually. $($_.Exception.Message)"
     }
 }
