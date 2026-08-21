@@ -249,6 +249,62 @@ end {
         $labelOwners[$safe] = [string]$target.TenantId
     }
 
+    function Protect-OutputFile {
+        # Every artefact this script writes is a targeting list: it names privileged accounts
+        # and states which of them lack a phishing-resistant method. A new file takes its
+        # permissions from where it lands -- on a shared reports folder that can mean everyone,
+        # and on Linux or macOS it means whatever the umask allows, which on most distributions
+        # leaves the file world-readable.
+        #
+        # Windows: break inheritance, then grant the file owner and local Administrators only.
+        # Linux and macOS: 0600 for a file, 0700 for a directory. The API that sets it arrived
+        # in .NET 7, so PowerShell 7.0 to 7.2 cannot call it; there the operator is told what
+        # to run instead of being left believing a control applied when it did not.
+        param(
+            [Parameter(Mandatory)][string]$Path,
+            [switch]$Directory
+        )
+
+        try {
+            if ($IsWindows) {
+                $acl = Get-Acl -LiteralPath $Path
+                $acl.SetAccessRuleProtection($true, $false)   # break inheritance, drop inherited rules
+                foreach ($existing in @($acl.Access)) { [void]$acl.RemoveAccessRule($existing) }
+
+                $identities = @(
+                    [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+                    (New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544')  # BUILTIN\Administrators
+                )
+                foreach ($identity in $identities) {
+                    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+                        $identity, 'FullControl', 'Allow')))
+                }
+                Set-Acl -LiteralPath $Path -AclObject $acl
+                return
+            }
+
+            # Resolved at run time, so this parses on a PowerShell that has never heard of it.
+            $modeType = 'System.IO.UnixFileMode' -as [type]
+            if (-not $modeType) {
+                $octal = if ($Directory) { '700' } else { '600' }
+                Write-Warning "Cannot restrict permissions on $Path. Setting them needs PowerShell 7.3 or later; this is $($PSVersionTable.PSVersion). Run: chmod $octal '$Path'"
+                return
+            }
+
+            # 0600 (384) for a file, 0700 (448) for a directory: a directory needs the execute
+            # bit or its owner cannot open it, which would break the sweep rather than protect
+            # it. File::SetUnixFileMode is the setter for both; there is no Directory:: form.
+            $mode = [Enum]::ToObject($modeType, $(if ($Directory) { 448 } else { 384 }))
+            [System.IO.File]::SetUnixFileMode($Path, $mode)
+        }
+        catch {
+            # Network shares, FAT volumes, and some container filesystems reject permission
+            # changes outright. Warn rather than fail: losing the report is worse than losing
+            # the hardening, but the operator has to know which of the two they got.
+            Write-Warning "Could not restrict permissions on $Path. Verify access controls manually. $($_.Exception.Message)"
+        }
+    }
+
     function New-SweepResultRow {
         # One shape for every result, so the sequential path, the parallel path, and the
         # failure path cannot drift into producing different columns.
@@ -405,8 +461,15 @@ end {
         $pwshPath = if ($IsWindows) { Join-Path $PSHOME 'pwsh.exe' } else { Join-Path $PSHOME 'pwsh' }
         if (-not (Test-Path -LiteralPath $pwshPath)) { $pwshPath = 'pwsh' }
 
+        # The handoff directory sits in the shared temp directory, so on a multi-user host
+        # every local account can read it for as long as the sweep runs. What it holds is
+        # not user rows, but it does name every customer being assessed, where their
+        # evidence is being written, and which app registration is reading their tenant.
+        # Lock it to the owner before anything is written into it -- the files inside
+        # inherit that, and the directory is removed in the finally below either way.
         $handoffRoot = Join-Path ([System.IO.Path]::GetTempPath()) "EntraSweep_$runStamp"
         New-Item -ItemType Directory -Path $handoffRoot -Force | Out-Null
+        if (-not $SkipAclHardening) { Protect-OutputFile -Path $handoffRoot -Directory }
 
         $rowFunction = ${function:New-SweepResultRow}.ToString()
         $assessmentPath = (Resolve-Path -LiteralPath $AssessmentScriptPath).Path
@@ -513,20 +576,7 @@ end {
 
     # The estate summary is the single highest-value file here: it ranks every managed
     # customer by how many privileged accounts are about to lose MFA.
-    if (-not $SkipAclHardening -and $IsWindows) {
-        try {
-            $acl = Get-Acl -LiteralPath $summaryPath
-            $acl.SetAccessRuleProtection($true, $false)
-            foreach ($existing in @($acl.Access)) { [void]$acl.RemoveAccessRule($existing) }
-            foreach ($identity in @([System.Security.Principal.WindowsIdentity]::GetCurrent().User,
-                    (New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544'))) {
-                $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
-                    $identity, 'FullControl', 'Allow')))
-            }
-            Set-Acl -LiteralPath $summaryPath -AclObject $acl
-        }
-        catch { Write-Warning "Could not restrict permissions on $summaryPath. Verify access controls manually." }
-    }
+    if (-not $SkipAclHardening) { Protect-OutputFile -Path $summaryPath }
 
     Write-Host "`n===== CROSS-TENANT SWEEP SUMMARY =====" -ForegroundColor Magenta
     $sorted | Format-Table Customer, Status, SmsPolicyState, VoicePolicyState,
