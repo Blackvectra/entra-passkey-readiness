@@ -75,3 +75,8 @@ TicketHistory.json
 # Both land wherever -OutputPath points, which is not always under reports/.
 *_Remediation.ps1
 EntraSmsVoiceChange_*.csv
+
+# The estate roll-up names every customer alongside how many of their privileged accounts
+# are about to lose MFA. It is the highest-value single file this project produces.
+EstateReadiness_*.html
+!examples/Example-EstateReport.html

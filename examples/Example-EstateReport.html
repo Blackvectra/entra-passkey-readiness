@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Managed estate - Entra SMS/Voice Estate Readiness</title>
+<style>
+/* Same visual language as the per-tenant client report, so an estate roll-up and the
+   report it links to read as one family of documents. Light ground: this gets printed
+   to PDF and attached to a delivery review. */
+:root {
+  --navy: #0E1B2C; --accent: #0F9D6E;
+  --ink: #14202E; --ink-2: #4A5C70; --ink-3: #6E8095;
+  --rule: #DDE4EC; --panel: #F5F8FB; --page: #FFFFFF;
+  --crit: #C22B2B; --high: #C25E17; --mod: #A8820A; --low: #0F9D6E;
+}
+* { box-sizing: border-box; }
+html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+body { margin: 0; background: var(--page); color: var(--ink);
+  font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+
+.masthead { background: var(--navy); color: #fff; padding: 30px 0 26px;
+  border-bottom: 4px solid var(--accent); }
+.wrap { max-width: 1240px; margin: 0 auto; padding: 0 28px; }
+.eyebrow { font-size: 11px; letter-spacing: 2.2px; text-transform: uppercase;
+  color: var(--accent); font-weight: 700; margin-bottom: 8px; }
+h1 { font-size: 30px; margin: 0 0 6px; letter-spacing: -0.4px; font-weight: 650; }
+.masthead .sub { color: #A9BDD2; font-size: 13.5px; }
+
+main { padding: 8px 0 60px; }
+h2 { font-size: 12.5px; text-transform: uppercase; letter-spacing: 1.6px;
+  color: var(--ink-3); margin: 42px 0 14px; font-weight: 700;
+  padding-bottom: 8px; border-bottom: 1px solid var(--rule); }
+
+.clock { display: flex; gap: 14px; flex-wrap: wrap; margin: 22px 0 4px; }
+.clock > div { background: var(--panel); border: 1px solid var(--rule);
+  border-left: 3px solid var(--accent); border-radius: 4px; padding: 13px 17px; flex: 1 1 260px; }
+.clock .d { font-size: 21px; font-weight: 700; letter-spacing: -0.3px; }
+.clock .t { font-size: 12px; color: var(--ink-2); margin-top: 3px; line-height: 1.45; }
+
+.headline { display: flex; align-items: center; gap: 22px; border: 1px solid var(--rule);
+  border-left: 4px solid var(--crit); border-radius: 6px; padding: 20px 24px;
+  background: var(--panel); margin-top: 18px; }
+.headline.good { border-left-color: var(--low); }
+.headline .hn { font-size: 46px; font-weight: 700; line-height: 1; letter-spacing: -1.5px;
+  color: var(--crit); font-variant-numeric: tabular-nums; }
+.headline.good .hn { color: var(--low); }
+.headline .ht { font-size: 13.5px; line-height: 1.55; color: var(--ink); max-width: 78ch; }
+
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px; margin-top: 16px; }
+.card { background: var(--panel); border: 1px solid var(--rule); border-radius: 5px;
+  padding: 15px 17px; }
+.card .n { font-size: 27px; font-weight: 700; line-height: 1.1; letter-spacing: -0.5px;
+  font-variant-numeric: tabular-nums; }
+.card .l { font-size: 10.5px; text-transform: uppercase; letter-spacing: 1.1px;
+  color: var(--ink-3); margin-top: 6px; font-weight: 600; }
+.card.crit .n { color: var(--crit); } .card.high .n { color: var(--high); }
+.card.warnc .n { color: var(--mod); } .card.ok .n { color: var(--low); }
+
+.warn { border: 1px solid var(--rule); border-left: 4px solid var(--mod);
+  background: var(--panel); border-radius: 6px; padding: 16px 22px; margin: 16px 0; }
+.warn h3 { margin: 0 0 8px; font-size: 15px; font-weight: 650; }
+.warn p { margin: 0 0 10px; font-size: 13.5px; color: var(--ink-2); max-width: 82ch; }
+.warn ul { margin: 0; padding-left: 20px; font-size: 13.5px; }
+.warn li { margin-bottom: 4px; }
+.warn .fix { margin-top: 10px; color: var(--ink); }
+
+/* Wide table, narrow phone. Scrolls inside its own box so the page never does. */
+.tablewrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: 6px; margin-top: 14px; }
+table { border-collapse: collapse; width: 100%; font-size: 13.5px; min-width: 900px; }
+th { background: var(--panel); text-align: left; padding: 10px 14px; font-size: 10.5px;
+  text-transform: uppercase; letter-spacing: 1.1px; color: var(--ink-3); font-weight: 700;
+  border-bottom: 1px solid var(--rule); white-space: nowrap; }
+td { padding: 10px 14px; border-bottom: 1px solid var(--rule); vertical-align: middle; }
+tr:last-child td { border-bottom: none; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+td.cust { font-weight: 600; }
+td .sub { color: var(--ink-3); font-size: 12px; font-weight: 400; }
+tr.urgent td.cust { box-shadow: inset 3px 0 0 var(--crit); }
+tr.failed { background: #FDF6F6; }
+tr.failed td.cust { box-shadow: inset 3px 0 0 var(--crit); color: var(--crit); }
+code { font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  background: var(--panel); padding: 1px 5px; border-radius: 3px; color: var(--ink-2); }
+
+.pill { display: inline-block; font-size: 10.5px; font-weight: 700; letter-spacing: 0.6px;
+  text-transform: uppercase; padding: 3px 8px; border-radius: 3px;
+  border: 1px solid var(--rule); color: var(--ink-2); white-space: nowrap; }
+.pill.ok { border-color: var(--low); color: var(--low); }
+.pill.warn-pill { border-color: var(--mod); color: var(--mod); }
+.pill.bad { border-color: var(--crit); color: var(--crit); }
+
+footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--rule);
+  font-size: 12px; color: var(--ink-3); line-height: 1.6; }
+@media print { .tablewrap { overflow: visible; } table { min-width: 0; } }
+</style>
+</head>
+<body>
+<header class="masthead">
+<div class="wrap">
+<div class="eyebrow">Estate readiness</div>
+<h1>Managed estate</h1>
+<div class="sub">Microsoft-provided SMS and voice retirement &middot; 5 tenants &middot; 18 August 2026</div>
+</div>
+</header>
+
+<main class="wrap">
+
+<div class="clock">
+<div><div class="d">14 days</div><div class="t"><strong>1 September 2026</strong> &mdash; users in SMS or voice scope are auto-enabled for passkeys and nudged to register at their next MFA sign-in.</div></div>
+<div><div class="d">167 days</div><div class="t"><strong>1 February 2027</strong> &mdash; Microsoft-provided SMS and voice delivery is retired. No opt-out.</div></div>
+</div>
+
+<div class="headline">
+<div class="hn">21</div>
+<div class="ht">users across 3 customers hold a phone number as their only method that satisfies MFA. 3 of them privileged. At their next sign-in after 1 February 2027 they meet a registration prompt they cannot skip, and cannot work until they complete it.</div>
+</div>
+
+<h2>Estate at a glance</h2>
+<div class="grid">
+<div class="card ok"><div class="n">4</div><div class="l">Tenants assessed</div></div>
+<div class="card crit"><div class="n">1</div><div class="l">Tenants failed</div></div>
+<div class="card warnc"><div class="n">2</div><div class="l">Lower-bound results</div></div>
+<div class="card crit"><div class="n">3</div><div class="l">Admins stranded</div></div>
+<div class="card high"><div class="n">4</div><div class="l">Critical findings</div></div>
+<div class="card high"><div class="n">62</div><div class="l">High findings</div></div>
+<div class="card"><div class="n">428</div><div class="l">Migration candidates</div></div>
+<div class="card"><div class="n">1782</div><div class="l">Users assessed</div></div>
+</div>
+
+<div class="warn">
+<h3>1 tenant did not report</h3>
+<p>These are not tenants with no findings. They are tenants with no data, and they carry whatever exposure they had before the sweep ran.</p>
+<ul>
+<li><strong>Tailspin Freight</strong> &mdash; Consent required: the administrator has not consented to use the application.</li>
+</ul>
+</div>
+<div class="warn">
+<h3>1 tenant reported nothing, and that result cannot be trusted</h3>
+<p>Their authentication methods policy is not fully migrated, so the legacy per-user MFA service settings page and the legacy SSPR authentication methods page still govern them. Both can hand out SMS and voice through settings no API exposes. A zero here means <em>not measured</em>, not <em>not exposed</em>.</p>
+<ul>
+<li><strong>Fabrikam Legal</strong> &mdash; migration state <code>preMigration</code></li>
+</ul>
+<p class="fix">Check each one by hand: <strong>Entra admin center &rsaquo; Protection &rsaquo; Multifactor authentication &rsaquo; Additional cloud-based MFA settings</strong>, and <strong>Password reset &rsaquo; Authentication methods</strong>.</p>
+</div>
+
+<h2>Customers, worst first</h2>
+<div class="tablewrap">
+<table>
+<thead>
+<tr>
+<th>Customer</th><th>Result</th><th class="num">Stranded</th><th class="num">Critical</th>
+<th class="num">High</th><th class="num">Candidates</th><th class="num">Users</th><th>Migration state</th>
+</tr>
+</thead>
+<tbody>
+<tr class="failed">
+<td class="cust">Tailspin Freight</td>
+<td><span class="pill bad">Not assessed</span></td>
+<td class="num">&mdash;</td>
+<td class="num">&mdash;</td>
+<td class="num">&mdash;</td>
+<td class="num">&mdash;</td>
+<td class="num">&mdash;</td>
+<td><code>not-assessed</code></td>
+</tr>
+<tr>
+<td class="cust">Fabrikam Legal</td>
+<td><span class="pill warn-pill">Lower bound</span></td>
+<td class="num">0</td>
+<td class="num">0</td>
+<td class="num">0</td>
+<td class="num">0</td>
+<td class="num">88</td>
+<td><code>preMigration</code></td>
+</tr>
+<tr class="urgent">
+<td class="cust">Contoso Manufacturing</td>
+<td><span class="pill ok">Measured</span></td>
+<td class="num"><strong>14</strong> <span class='sub'>(2 admin)</span></td>
+<td class="num">3</td>
+<td class="num">41</td>
+<td class="num">96</td>
+<td class="num">420</td>
+<td><code>migrationComplete</code></td>
+</tr>
+<tr class="urgent">
+<td class="cust">Northwind Health</td>
+<td><span class="pill ok">Measured</span></td>
+<td class="num"><strong>5</strong> <span class='sub'>(1 admin)</span></td>
+<td class="num">1</td>
+<td class="num">12</td>
+<td class="num">310</td>
+<td class="num">1210</td>
+<td><code>migrationComplete</code></td>
+</tr>
+<tr class="urgent">
+<td class="cust">Adventure Works</td>
+<td><span class="pill warn-pill">Lower bound</span></td>
+<td class="num"><strong>2</strong></td>
+<td class="num">0</td>
+<td class="num">9</td>
+<td class="num">22</td>
+<td class="num">64</td>
+<td><code>preMigration</code></td>
+</tr>
+</tbody>
+</table>
+</div>
+
+<footer>
+Generated 18 August 2026 09:00 from <code>SweepSummary_20260818_090000.csv</code>.
+Ranked failures first, then tenants whose result is a lower bound and shows nothing, then by the number of users stranded at the retirement.
+&ldquo;Stranded&rdquo; counts users holding a phone number as their only method that satisfies MFA &mdash; a narrower population than the risk bands, and the one to drive to zero.
+Read-only assessment: no tenant setting was changed by the sweep that produced this data.
+<br><br>
+<strong>This file names every customer in the estate alongside how many of their privileged accounts are about to lose MFA.</strong> Treat it like a penetration test report.
+</footer>
+
+</main>
+</body>
+</html>
