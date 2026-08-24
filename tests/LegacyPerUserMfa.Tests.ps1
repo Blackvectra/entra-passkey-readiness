@@ -24,6 +24,7 @@ BeforeAll {
     # Read by the lifted function. Values copied from the script.
     $script:GraphBeta = 'https://graph.microsoft.com/beta'
     $script:PerUserMfaUnreadable = '(unreadable)'
+    $script:PerUserMfaNotChecked = '(not checked)'
 
     # What the stub Graph should answer, per user, per attempt. Set by each test.
     $script:BatchPlan = @{}
@@ -311,6 +312,22 @@ Describe 'Get-RiskAssessment with a legacy per-user MFA state' {
                 -UserType 'Member' -PhoneMethodsRegistered 'mobilePhone'
 
             $step | Should -Match '-SkipLegacyPerUserMfa'
+        }
+
+        It 'does not tell an unreadable user to drop a switch that was never set' {
+            # Found in a live tenant: an admin whose per-user MFA state came back
+            # (unreadable) was told "This run did not read that state; drop
+            # -SkipLegacyPerUserMfa". The run did read it -- Graph refused to answer for
+            # that user. Following the instruction re-runs a command that fails the same
+            # way, and buries the real cause, which is usually a role that cannot read
+            # /authentication/requirements.
+            $step = Get-RemediationStep -Risk 'Moderate' -HasPhoneMethodRegistered $true `
+                -UserType 'Member' -PhoneMethodsRegistered 'mobilePhone' `
+                -PerUserMfaState $script:PerUserMfaUnreadable
+
+            $step | Should -Not -Match '-SkipLegacyPerUserMfa'
+            $step | Should -Match 'would not answer'
+            $step | Should -Match 'legacy per-user MFA service settings' -Because 'the manual check is still the action'
         }
     }
 }
