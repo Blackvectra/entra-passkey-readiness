@@ -456,6 +456,9 @@ $controls.BtnImport.Add_Click({
         if ($dialog.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return }
         try {
             $imported = @(Import-Csv -LiteralPath $dialog.FileName)
+            if ($imported.Count -eq 0) {
+                throw 'That CSV has no rows.'
+            }
             if (-not $imported[0].PSObject.Properties['TenantId']) {
                 throw 'That CSV has no TenantId column.'
             }
