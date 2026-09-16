@@ -172,7 +172,15 @@ function Get-EstateRollup {
     #
     # Separated from the rendering so the arithmetic is testable without parsing HTML,
     # and so a future second output format cannot recompute any of it differently.
-    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Rows)
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Rows,
+        # Compared against each row's AssessmentTimeUtc. Defaults to now so a caller that
+        # only wants the arithmetic does not have to supply one.
+        [datetime]$GeneratedAt = (Get-Date),
+        # A tenant assessed longer ago than this is reported as stale rather than current.
+        # Fourteen days is a fortnight of joiners, leavers and registration drift.
+        [ValidateRange(1, 3650)][int]$StaleAfterDays = 14
+    )
 
     $assessed = @($Rows | Where-Object { (Get-Column $_ 'Status') -eq 'Success' })
     $failed = @($Rows | Where-Object { (Get-Column $_ 'Status') -ne 'Success' })
@@ -189,6 +197,21 @@ function Get-EstateRollup {
             (ConvertTo-Count (Get-Column $_ 'Critical')) +
             (ConvertTo-Count (Get-Column $_ 'High')) +
             (ConvertTo-Count (Get-Column $_ 'BlockedAtRetirement')) -le 0
+        })
+
+    # Rows carried forward by the sweep's -Resume are copied verbatim into a summary
+    # stamped with the day the sweep ran, so the file's own date says nothing about when
+    # any individual tenant was measured. Ranking an estate on a six-week-old zero is the
+    # same failure as ranking it on a lower-bound zero: the row looks settled, so it gets
+    # skipped. A row with no AssessmentTimeUtc at all was written by a build from before
+    # that column existed, and is treated as undated rather than assumed fresh.
+    $staleCutoff = $GeneratedAt.ToUniversalTime().AddDays(-$StaleAfterDays)
+    $stale = @($assessed | Where-Object {
+            $stamp = [string](Get-Column $_ 'AssessmentTimeUtc')
+            if ([string]::IsNullOrWhiteSpace($stamp)) { return $true }
+            $parsed = [datetime]::MinValue
+            if (-not [datetime]::TryParse($stamp, [ref]$parsed)) { return $true }
+            return ($parsed.ToUniversalTime() -lt $staleCutoff)
         })
 
     $sum = {
@@ -229,8 +252,11 @@ function Get-EstateRollup {
         Critical                = & $sum 'Critical'
         High                    = & $sum 'High'
         UsersAssessed           = & $sum 'EnabledUsersAssessed'
+        TenantsStale            = $stale.Count
+        StaleAfterDays          = $StaleAfterDays
         Failed                  = $failed
         LowerBoundSilent        = $lowerBoundSilent
+        Stale                   = $stale
         Ranked                  = @($ranked)
     }
 }
@@ -249,6 +275,18 @@ function New-EstateReportHtml {
     $retirementDate = [datetime]'2027-02-01'
     $daysToAutoEnable = [math]::Max(0, [int]($autoEnableDate - $GeneratedAt).TotalDays)
     $daysToRetirement = [math]::Max(0, [int]($retirementDate - $GeneratedAt).TotalDays)
+
+    # Same reason as the per-tenant report: a clamped countdown sits at '0 days' forever
+    # once the date has passed, beside a sentence still in the future tense.
+    $autoEnablePassed = $GeneratedAt -ge $autoEnableDate
+    $retirementPassed = $GeneratedAt -ge $retirementDate
+    $autoEnableCount = if ($autoEnablePassed) { 'In effect' } else { "$daysToAutoEnable days" }
+    $retirementCount = if ($retirementPassed) { 'Passed' } else { "$daysToRetirement days" }
+    $autoEnableText = if ($autoEnablePassed) {
+        'users in SMS or voice scope have been auto-enabled for passkeys and are nudged to register at MFA sign-in.'
+    } else {
+        'users in SMS or voice scope are auto-enabled for passkeys and nudged to register at their next MFA sign-in.'
+    }
 
     $blocked = $Rollup.UsersBlocked
     $headlineClass = if ($blocked -gt 0) { 'headline' } else { 'headline good' }
@@ -293,6 +331,30 @@ $names
 $names
 </ul>
 <p class="fix">Check each one by hand: <strong>Entra admin center &rsaquo; Protection &rsaquo; Multifactor authentication &rsaquo; Additional cloud-based MFA settings</strong>, and <strong>Password reset &rsaquo; Authentication methods</strong>.</p>
+</div>
+"@)
+    }
+
+    if ($Rollup.TenantsStale -gt 0) {
+        $names = ($Rollup.Stale | ForEach-Object {
+                $stamp = [string](Get-Column $_ 'AssessmentTimeUtc')
+                $when = if ([string]::IsNullOrWhiteSpace($stamp)) { 'no assessment date recorded' }
+                        else {
+                            $parsed = [datetime]::MinValue
+                            if ([datetime]::TryParse($stamp, [ref]$parsed)) {
+                                "assessed $($parsed.ToUniversalTime().ToString('yyyy-MM-dd'))"
+                            } else { 'no assessment date recorded' }
+                        }
+                "<li><strong>$(ConvertTo-SafeHtml (Get-Column $_ 'Customer'))</strong> &mdash; $(ConvertTo-SafeHtml $when)</li>"
+            }) -join "`n"
+        $warnings.Add(@"
+<div class="warn">
+<h3>$($Rollup.TenantsStale) $(if ($Rollup.TenantsStale -eq 1) { 'tenant carries' } else { 'tenants carry' }) figures older than $($Rollup.StaleAfterDays) days</h3>
+<p>The sweep's <code>-Resume</code> copies a tenant that already succeeded straight into the next summary without reassessing it, so a row can be months old in a file written today. Their numbers below describe the tenant as it was on the date shown, not as it is now.</p>
+<ul>
+$names
+</ul>
+<p class="fix">Re-run the sweep for these customers without <code>-Resume</code> before treating their figures as current.</p>
 </div>
 "@)
     }
@@ -447,8 +509,8 @@ footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--rule);
 <main class="wrap">
 
 <div class="clock">
-<div><div class="d">$daysToAutoEnable days</div><div class="t"><strong>1 September 2026</strong> &mdash; users in SMS or voice scope are auto-enabled for passkeys and nudged to register at their next MFA sign-in.</div></div>
-<div><div class="d">$daysToRetirement days</div><div class="t"><strong>1 February 2027</strong> &mdash; Microsoft-provided SMS and voice delivery is retired. No opt-out.</div></div>
+<div><div class="d">$autoEnableCount</div><div class="t"><strong>1 September 2026</strong> &mdash; $autoEnableText</div></div>
+<div><div class="d">$retirementCount</div><div class="t"><strong>1 February 2027</strong> &mdash; Microsoft-provided SMS and voice delivery is retired. No opt-out.</div></div>
 </div>
 
 <div class="$headlineClass">
@@ -523,7 +585,11 @@ if (-not $summaryRows[0].PSObject.Properties['Customer']) {
     throw "$SummaryPath does not look like a sweep summary: no Customer column."
 }
 
-$rollup = Get-EstateRollup -Rows $summaryRows
+# One clock for the whole report: the rollup decides which rows are stale against it, and
+# the page prints it as the generation time. Two Get-Date calls would be a race nobody
+# would ever notice and nobody could ever reproduce.
+$generatedAt = Get-Date
+$rollup = Get-EstateRollup -Rows $summaryRows -GeneratedAt $generatedAt
 
 if (-not $OutputPath) {
     $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
@@ -536,7 +602,7 @@ if ($parent -and -not (Test-Path -LiteralPath $parent)) {
 }
 
 $heading = if ($Title) { $Title } else { 'Managed estate' }
-$html = New-EstateReportHtml -Rollup $rollup -Heading $heading -GeneratedAt (Get-Date) `
+$html = New-EstateReportHtml -Rollup $rollup -Heading $heading -GeneratedAt $generatedAt `
     -SourceName (Split-Path -Leaf $SummaryPath)
 
 $html | Out-File -LiteralPath $OutputPath -Encoding utf8 -Force

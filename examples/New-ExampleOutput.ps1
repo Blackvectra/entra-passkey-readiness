@@ -185,7 +185,7 @@ $rows = foreach ($person in $directory) {
         Risk                   = $risk[0]
         Reason                 = $risk[1]
         NextStep               = Get-RemediationStep -Risk $risk[0] -HasPhoneMethodRegistered $hasPhone `
-            -UserType $person.Type -PhoneMethodsRegistered $phoneList -PerUserMfaState $person.LegacyMfa
+            -UserType $person.Type -PhoneMethodsRegistered $phoneList -PerUserMfaState $person.LegacyMfa -Now ([datetime]'2026-08-17T09:14:22Z')
         BlockedAtRetirement    = Test-OnlyPhoneBasedMfa -MethodsRegistered ([string[]]$person.Methods) `
             -PhoneMethods $phoneMethods -SurvivingMfaMethods $survivingMfaMethods
         DisplayName            = $person.Name
@@ -290,27 +290,34 @@ $null = New-HtmlReport -Summary $summary -Rows $rows -Path $reportPath -Customer
 $estateRows = @(
     [PSCustomObject]@{ Customer = 'Contoso Manufacturing'; Status = 'Success'; AssessmentConfidence = 'Complete'
         PolicyMigrationState = 'migrationComplete'; BlockedAtRetirement = 14; BlockedAdminsAtRetirement = 2
-        Critical = 3; High = 41; MigrationCandidates = 96; EnabledUsersAssessed = 420; Error = '' }
+        Critical = 3; High = 41; MigrationCandidates = 96; EnabledUsersAssessed = 420; Error = ''
+        AssessmentTimeUtc = '2026-08-18T08:12:00.0000000Z' }
     [PSCustomObject]@{ Customer = 'Fabrikam Legal'; Status = 'Success'; AssessmentConfidence = 'LowerBound'
         PolicyMigrationState = 'preMigration'; BlockedAtRetirement = 0; BlockedAdminsAtRetirement = 0
-        Critical = 0; High = 0; MigrationCandidates = 0; EnabledUsersAssessed = 88; Error = '' }
+        Critical = 0; High = 0; MigrationCandidates = 0; EnabledUsersAssessed = 88; Error = ''
+        AssessmentTimeUtc = '2026-08-18T08:31:00.0000000Z' }
     [PSCustomObject]@{ Customer = 'Northwind Health'; Status = 'Success'; AssessmentConfidence = 'Complete'
         PolicyMigrationState = 'migrationComplete'; BlockedAtRetirement = 5; BlockedAdminsAtRetirement = 1
-        Critical = 1; High = 12; MigrationCandidates = 310; EnabledUsersAssessed = 1210; Error = '' }
+        Critical = 1; High = 12; MigrationCandidates = 310; EnabledUsersAssessed = 1210; Error = ''
+        # Carried forward by -Resume from a sweep five weeks earlier, which is the whole
+        # reason the stale band exists: the row looks as current as every other one.
+        AssessmentTimeUtc = '2026-07-14T07:55:00.0000000Z' }
     [PSCustomObject]@{ Customer = 'Tailspin Freight'; Status = 'Failed'; AssessmentConfidence = 'NotAssessed'
         PolicyMigrationState = 'not-assessed'; BlockedAtRetirement = ''; BlockedAdminsAtRetirement = ''
         Critical = ''; High = ''; MigrationCandidates = ''; EnabledUsersAssessed = ''
-        Error = 'Consent required: the administrator has not consented to use the application.' }
+        Error = 'Consent required: the administrator has not consented to use the application.'
+        AssessmentTimeUtc = '' }
     [PSCustomObject]@{ Customer = 'Adventure Works'; Status = 'Success'; AssessmentConfidence = 'LowerBound'
         PolicyMigrationState = 'preMigration'; BlockedAtRetirement = 2; BlockedAdminsAtRetirement = 0
-        Critical = 0; High = 9; MigrationCandidates = 22; EnabledUsersAssessed = 64; Error = '' }
+        Critical = 0; High = 9; MigrationCandidates = 22; EnabledUsersAssessed = 64; Error = ''
+        AssessmentTimeUtc = '2026-08-18T08:44:00.0000000Z' }
 )
 
 # Fixed date for the same reason the per-tenant report uses the assessment time: the
 # countdowns have to be reproducible, or regenerating the sample produces a diff every day
 # and people learn to skip regenerating it.
 $estatePath = Join-Path $examplesDir 'Example-EstateReport.html'
-New-EstateReportHtml -Rollup (Get-EstateRollup -Rows $estateRows) -Heading 'Managed estate' `
+New-EstateReportHtml -Rollup (Get-EstateRollup -Rows $estateRows -GeneratedAt ([datetime]'2026-08-18T09:00:00')) -Heading 'Managed estate' `
     -GeneratedAt ([datetime]'2026-08-18T09:00:00') -SourceName 'SweepSummary_20260818_090000.csv' |
     Out-File -LiteralPath $estatePath -Encoding utf8 -Force
 

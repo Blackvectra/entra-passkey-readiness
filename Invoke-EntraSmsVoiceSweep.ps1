@@ -353,6 +353,13 @@ end {
             BlockedAdminsAtRetirement  = & $get 'BlockedAdminsAtRetirement'
             PasswordlessCapableInScope = & $get 'PasswordlessCapableInScope'
             OldestReportRowUtc         = & $get 'OldestReportRowUtc'
+            # When this tenant was actually assessed, which is not the same as when the
+            # summary file was written. -Resume copies a successful row forward verbatim
+            # into a summary stamped with today's date, so without this column a tenant
+            # assessed six weeks ago is indistinguishable from one assessed this morning --
+            # in the CSV, and in the estate report that ranks customers from it. A stale
+            # zero reads as "nobody is stranded here" long after it stopped being true.
+            AssessmentTimeUtc          = & $get 'AssessmentTimeUtc'
             ReportPath                 = if ($Summary) { & $get 'OutputPath' } else { '' }
             Error                      = $ErrorMessage
         }
@@ -618,7 +625,7 @@ end {
         'PolicyMigrationState', 'SmsPolicyState', 'VoicePolicyState', 'EnabledUsersAssessed',
         'MigrationCandidates', 'Critical', 'High', 'Moderate', 'Low', 'BlockedAtRetirement',
         'BlockedAdminsAtRetirement', 'PasswordlessCapableInScope', 'OldestReportRowUtc',
-        'ReportPath', 'Error'
+        'AssessmentTimeUtc', 'ReportPath', 'Error'
     )
 
     # Same injection guard as the per-tenant exports: customer labels reach this file too.
@@ -683,7 +690,16 @@ end {
         Write-Host 'Check each one by hand in Entra admin center > Protection > Multifactor authentication > Additional cloud-based MFA settings, and Password reset > Authentication methods.' -ForegroundColor Yellow
     }
 
-    Write-Host '2026-09-01 is the auto-enablement date. Move users out of SMS/voice AMP scope before then to prevent it.' -ForegroundColor Yellow
+    # Told operators to act "before then" about a date already gone by, on every run, for
+    # as long as the tool kept being used. The advice inverts once the date passes: before
+    # it, moving users out of scope prevents the nudge; after it, the nudge has already
+    # fired and the only remaining deadline is the hard cutoff.
+    if ((Get-Date) -lt [datetime]'2026-09-01') {
+        Write-Host '2026-09-01 is the auto-enablement date. Move users out of SMS/voice AMP scope before then to prevent it.' -ForegroundColor Yellow
+    }
+    else {
+        Write-Host 'Passkey auto-enablement began on 2026-09-01: in-scope users are already being nudged to register. 2027-02-01 is the hard cutoff.' -ForegroundColor Yellow
+    }
     Write-Host 'No tenant settings were changed.' -ForegroundColor Green
 
     $sorted

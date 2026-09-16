@@ -544,11 +544,37 @@ function Invoke-GraphGet {
 function Get-GraphCollection {
     # Follows @odata.nextLink to completion. Partial pagination is treated as a hard failure
     # by Invoke-GraphGet rather than being swallowed into a short result set.
-    param([Parameter(Mandatory)][string]$Uri)
+    param(
+        [Parameter(Mandatory)][string]$Uri,
+        # 20,000 pages at the $top=999 this script asks for is roughly twenty million
+        # objects -- far past any tenant, and far short of running all night.
+        [ValidateRange(1, 1000000)][int]$MaxPages = 20000
+    )
 
+    # The loop condition is a value the server controls, so it gets a bound and a cycle
+    # check. A nextLink pointing back at the page that produced it -- a $skiptoken the
+    # endpoint did not honour, or a gateway that rewrote the URL -- otherwise spins here
+    # forever, adding a page of duplicates to $items on every pass until the process runs
+    # out of memory. During an unattended ninety-tenant sweep that is not a slow run; it is
+    # a sweep that never finishes and never says why.
+    #
+    # Both guards throw rather than returning what was collected so far: a short result set
+    # that looks complete is exactly the silent undercount this function exists to avoid.
     $items = [System.Collections.Generic.List[object]]::new()
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     $next = $Uri
+    $page = 0
+
     while ($next) {
+        if (-not $seen.Add([string]$next)) {
+            throw "Graph pagination looped: $next was returned as the next page of itself. Aborting rather than reporting a partial result as complete."
+        }
+
+        $page++
+        if ($page -gt $MaxPages) {
+            throw "Graph pagination exceeded $MaxPages pages for $Uri. Aborting rather than reporting a partial result as complete."
+        }
+
         $response = Invoke-GraphGet -Uri $next
         if ($response.PSObject.Properties.Name -contains 'value') {
             foreach ($item in @($response.value)) { $items.Add($item) }
@@ -1098,7 +1124,15 @@ function Get-RemediationStep {
         [string]$PhoneMethodsRegistered,
 
         # See Get-RiskAssessment. Empty means the legacy state was not read.
-        [string]$PerUserMfaState = ''
+        [string]$PerUserMfaState = '',
+
+        # The clock this advice is written against, so a report is internally consistent:
+        # the countdown tiles key off the assessment time, and the steps beneath them have
+        # to key off the same instant or one document can say both "15 days until
+        # auto-enablement" and "they were auto-enabled already". In a live run this is the
+        # assessment start; it is a parameter so a regenerated sample, or a report rebuilt
+        # from an old export, describes the world as it was when the data was taken.
+        [datetime]$Now = (Get-Date)
     )
 
     # Named so the instruction says which registration to remove, not "the phone method".
@@ -1124,7 +1158,7 @@ function Get-RemediationStep {
             if ($HasPhoneMethodRegistered) {
                 return $legacyPrefix + "Include in the passkey registration campaign. Direct the user to register a passkey or Microsoft Authenticator for their device type, confirm the registration landed, then remove $methods."
             }
-            return $legacyPrefix + 'Include in the passkey registration campaign. The user is in scope with no passwordless method, so they will be auto-enabled and nudged on 2026-09-01 whether or not you act first.'
+            return $legacyPrefix + $(if ($Now -lt [datetime]'2026-09-01') { 'Include in the passkey registration campaign. The user is in scope with no passwordless method, so they will be auto-enabled and nudged on 2026-09-01 whether or not you act first.' } else { 'Include in the passkey registration campaign. The user is in scope with no passwordless method, so they were auto-enabled on 2026-09-01 and are already being nudged to register at sign-in.' })
         }
         'Moderate' {
             # Two different instructions, because the run may already have answered the
@@ -1152,7 +1186,7 @@ function Get-RemediationStep {
             if ($HasPhoneMethodRegistered) {
                 return "No action required before the retirement; the user already holds a surviving method. Optionally remove $methods to reduce account-recovery attack surface, which is worth doing independently of this change."
             }
-            return 'No action required. The user is in scope but already holds a method that survives the retirement. Expect a registration nudge on 2026-09-01.'
+            return $(if ($Now -lt [datetime]'2026-09-01') { 'No action required. The user is in scope but already holds a method that survives the retirement. Expect a registration nudge on 2026-09-01.' } else { 'No action required. The user is in scope but already holds a method that survives the retirement. The registration nudge that began on 2026-09-01 may still appear at sign-in.' })
         }
         default {
             return 'No action required. No resolved exposure to the SMS and voice retirement.'
@@ -1287,6 +1321,21 @@ function New-HtmlReport {
     $daysToAutoEnable = [math]::Max(0, [int]($autoEnableDate - $now).TotalDays)
     $daysToRetirement = [math]::Max(0, [int]($retirementDate - $now).TotalDays)
 
+    # A clamped countdown reads '0 days' forever once the date is behind us, next to a
+    # sentence still written in the future tense. A client opening this in September 2026
+    # saw '0 days -- users in scope are auto-enabled and nudged', which describes something
+    # that already happened as something about to, and makes the report look unmaintained.
+    # Both tiles now say which side of the date the run is on.
+    $autoEnablePassed = $now -ge $autoEnableDate
+    $retirementPassed = $now -ge $retirementDate
+    $autoEnableCount = if ($autoEnablePassed) { 'In effect' } else { "$daysToAutoEnable days" }
+    $retirementCount = if ($retirementPassed) { 'Passed' } else { "$daysToRetirement days" }
+    $autoEnableText = if ($autoEnablePassed) {
+        'users in SMS or voice scope have been auto-enabled for passkeys and are nudged to register at MFA sign-in. Anyone still listed below was not moved before the date.'
+    } else {
+        'users in SMS or voice scope are auto-enabled for passkeys and nudged to register at next MFA sign-in.'
+    }
+
     $heading = if ($Customer) { $Customer } else { 'Microsoft Entra ID' }
     $title = if ($Customer) { "$Customer - Entra SMS/Voice Migration Impact" } else { 'Entra SMS/Voice Migration Impact' }
 
@@ -1366,7 +1415,8 @@ function New-HtmlReport {
                 $nextStep = Get-RemediationStep -Risk ([string]$row.Risk) `
                     -HasPhoneMethodRegistered ([bool]$row.PhoneMethodsRegistered) `
                     -UserType ([string]$row.UserType) `
-                    -PhoneMethodsRegistered ([string]$row.PhoneMethodsRegistered)
+                    -PhoneMethodsRegistered ([string]$row.PhoneMethodsRegistered) `
+                    -Now $now
             }
 
             @"
@@ -1607,8 +1657,8 @@ $summaryHtml
 </div>
 
 <div class="clock">
-<div><div class="d">$daysToAutoEnable days</div><div class="t"><strong>1 September 2026</strong> &mdash; users in SMS or voice scope are auto-enabled for passkeys and nudged to register at next MFA sign-in.</div></div>
-<div><div class="d">$daysToRetirement days</div><div class="t"><strong>1 February 2027</strong> &mdash; Microsoft-provided SMS and voice delivery is retired. No opt-out. Also the deadline to have a customer-managed telecom provider configured.</div></div>
+<div><div class="d">$autoEnableCount</div><div class="t"><strong>1 September 2026</strong> &mdash; $autoEnableText</div></div>
+<div><div class="d">$retirementCount</div><div class="t"><strong>1 February 2027</strong> &mdash; Microsoft-provided SMS and voice delivery is retired. No opt-out. Also the deadline to have a customer-managed telecom provider configured.</div></div>
 </div>
 
 <h2>Stopped at sign-in on 1 February 2027</h2>
@@ -1750,10 +1800,12 @@ function Get-FriendlyMethodName {
         'alternateMobilePhone'            = 'Alt phone'
         'alternateMobileCall'             = 'Alt phone'
         'officePhone'                     = 'Office phone'
-        'mobileCall'                      = 'Office phone'
+        'mobileCall'                      = 'Phone'
         'smsSignIn'                       = 'SMS sign-in'
         'temporaryAccessPass'             = 'TAP'
         'temporaryAccessPassMultiUse'     = 'TAP'
+        'externalAuthMethod'              = 'External MFA provider'
+        'qrCode'                          = 'QR code + PIN'
         'email'                           = 'Email'
         'securityQuestion'                = 'Security questions'
         'appPassword'                     = 'App password'
@@ -1790,7 +1842,10 @@ function Get-FriendlyMethodName {
         }
     }
     foreach ($name in $raw) {
-        if (-not $map.Contains($name)) { $friendly.Add($name) }
+        # -not $friendly.Contains: the mapped names above are de-duplicated as they are
+        # added, and an unrecognised one has to be too, or a user holding the same unknown
+        # method twice reads as 'xx + xx'.
+        if ((-not $map.Contains($name)) -and (-not $friendly.Contains($name))) { $friendly.Add($name) }
     }
     return ($friendly -join ' + ')
 }
@@ -2655,6 +2710,20 @@ $survivingMfaMethods = @(
     'passKeySynced'
     'microsoftAuthenticatorPasswordless'
 
+    # A third-party MFA provider (Duo, Okta, RSA and the rest) surfaced through Entra's
+    # External Authentication Methods. Microsoft states plainly that a sign-in completed
+    # with one "is considered to meet the Microsoft Entra MFA requirement", and it is not
+    # SMS or voice, so it survives the retirement untouched. Left out of this list, an
+    # entire tenant that standardised on an external provider reported every phone-holding
+    # user as losing their sign-in -- a false lockout on the one number this tool exists
+    # to get right, and the kind that gets read aloud in a client meeting.
+    #
+    # Worth knowing when reading a CA policy beside this: an external method satisfies
+    # "Require multifactor authentication" but does NOT satisfy an authentication strength,
+    # including the built-in MFA strength. That is a conditional-access question, not a
+    # retirement one, and it does not change whether the user can still sign in.
+    'externalAuthMethod'
+
     # The older spellings of methods already in this list, from the same enum.
     'fido'
     'appNotification'
@@ -2670,7 +2739,13 @@ $script:UnrecognisedMethods = [System.Collections.Generic.HashSet[string]]::new(
 # Stands in for the dropped InRegistrationReport column. Defined once because the summary
 # counts these rows and the CSV displays them, and the two must not drift apart.
 $script:NoReportRowMarker = '(no row in registration report)'
-$nonMfaMethods = @('email', 'securityQuestion', 'temporaryAccessPass', 'temporaryAccessPassMultiUse', 'appPassword')
+# qrCode is deliberately here and not in $survivingMfaMethods. It survives the retirement,
+# but Microsoft documents it as "a single-factor method in which the PIN (something you
+# know) is a credential" -- so it does not keep a phone-only frontline worker signed in,
+# and counting it as surviving would mark those users safe when they are not. Listing it
+# here rather than leaving it unrecognised keeps it out of UnrecognisedMethods, which
+# exists to name genuinely unknown spellings rather than known-and-classified ones.
+$nonMfaMethods = @('email', 'securityQuestion', 'temporaryAccessPass', 'temporaryAccessPassMultiUse', 'appPassword', 'qrCode')
 
 # The legacy per-user MFA read, when asked for. A whole-tenant failure here is reported and
 # survived rather than thrown: the rest of the assessment is still worth having, and the
@@ -2773,7 +2848,7 @@ $rows = foreach ($user in $enabledUsers) {
     } else {
         Get-RemediationStep -Risk $risk[0] -HasPhoneMethodRegistered $hasPhoneMethod `
             -UserType $userType -PhoneMethodsRegistered $phoneMethodList `
-            -PerUserMfaState $perUserMfaState
+            -PerUserMfaState $perUserMfaState -Now $assessmentStartUtc
     }
 
     # A user with no row in the registration report is not the same as a user with nothing
@@ -3211,7 +3286,7 @@ else {
     }
 }
 
-Write-Host "`n2026-09-01  Passkey auto-enablement and registration nudge begins." -ForegroundColor Yellow
+Write-Host "`n2026-09-01  Passkey auto-enablement and registration nudge $(if ($assessmentStartUtc -lt [datetime]'2026-09-01') { 'begins' } else { 'began - already in effect' })." -ForegroundColor Yellow
 Write-Host '2027-02-01  SMS and voice retired. No opt-out.' -ForegroundColor Red
 Write-Host 'Passkey deployment guide: https://aka.ms/passkey-deployment-guide' -ForegroundColor Cyan
 Write-Host 'Read-only run. No tenant settings were changed.' -ForegroundColor Green

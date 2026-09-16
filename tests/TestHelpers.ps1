@@ -59,3 +59,46 @@ function Get-EstateReportScriptPath {
 function Get-SweepGuiScriptPath {
     Join-Path (Split-Path -Parent $PSScriptRoot) 'Show-EntraSmsVoiceSweepGui.ps1'
 }
+
+function Get-MethodListsFromScript {
+    <#
+    .SYNOPSIS
+        Returns the assessment script's own method-classification arrays.
+    .DESCRIPTION
+        $phoneMethods, $survivingMfaMethods and $nonMfaMethods sit at script scope rather
+        than inside a function, so Import-ScriptFunction cannot reach them and a test that
+        wants them would otherwise retype them. A retyped copy is worse than no test: it
+        passes while the real list says something else, which is how a method that survives
+        the retirement stayed classified as a lockout.
+
+        Lifted by AST assignment rather than by running the script, which would try to
+        reach Graph.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+        (Resolve-Path -LiteralPath $Path).Path, [ref]$null, [ref]$null)
+
+    $wanted = 'phoneMethods', 'survivingMfaMethods', 'nonMfaMethods'
+    $result = @{}
+
+    foreach ($name in $wanted) {
+        $assignment = $ast.FindAll({
+                $args[0] -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $args[0].Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                $args[0].Left.VariablePath.UserPath -eq $name
+            }, $true) | Select-Object -First 1
+
+        if (-not $assignment) { throw "Array '`$$name' was not found in $Path." }
+
+        # Every right-hand side here is an array literal of constant strings. Evaluating it
+        # on its own keeps this to data, with nothing from the script body running.
+        $result[$name] = @([scriptblock]::Create($assignment.Right.Extent.Text).Invoke())
+    }
+
+    return [PSCustomObject]@{
+        PhoneMethods        = $result['phoneMethods']
+        SurvivingMfaMethods = $result['survivingMfaMethods']
+        NonMfaMethods       = $result['nonMfaMethods']
+    }
+}

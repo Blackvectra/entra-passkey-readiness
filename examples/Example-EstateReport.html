@@ -143,6 +143,14 @@ footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--rule);
 </ul>
 <p class="fix">Check each one by hand: <strong>Entra admin center &rsaquo; Protection &rsaquo; Multifactor authentication &rsaquo; Additional cloud-based MFA settings</strong>, and <strong>Password reset &rsaquo; Authentication methods</strong>.</p>
 </div>
+<div class="warn">
+<h3>1 tenant carries figures older than 14 days</h3>
+<p>The sweep's <code>-Resume</code> copies a tenant that already succeeded straight into the next summary without reassessing it, so a row can be months old in a file written today. Their numbers below describe the tenant as it was on the date shown, not as it is now.</p>
+<ul>
+<li><strong>Northwind Health</strong> &mdash; assessed 2026-07-14</li>
+</ul>
+<p class="fix">Re-run the sweep for these customers without <code>-Resume</code> before treating their figures as current.</p>
+</div>
 
 <h2>Customers, worst first</h2>
 <div class="tablewrap">
