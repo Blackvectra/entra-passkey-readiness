@@ -100,6 +100,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **CI also runs weekly on a schedule, not only on push and pull request.** This tool hardcodes the retirement deadlines and branches on the current date, so a test can pass the day it is written and start failing later with no commit to blame — which is not hypothetical: crossing 2026-09-01 broke the sample-reproducibility check, and nothing said so until somebody ran the suite by hand. A Monday run surfaces that within days of the calendar causing it rather than whenever a change next happens to land. GitHub disables a schedule after 60 days without repository activity; a push re-enables it.
+
+- **Dependabot watches the GitHub Actions the CI uses**, grouped into one pull request so a routine bump of three actions is one review. Deliberately the only ecosystem configured: the tool's dependencies are PowerShell Gallery modules, which Dependabot does not cover, and the scripts themselves take no packages.
+
 - **The README is restructured along the layout Microsoft uses for its own tooling docs**: overview, components, prerequisites, installation, get started, usage, then reference sections for parameters and output, then the conceptual material, then troubleshooting, limitations, contributing, security, and related resources. Previously the quick start came before the prerequisites, reference tables sat inside the usage narrative, and the deep material was interleaved with it, so there was no reading order that worked for either a first-time reader or somebody looking up a parameter. Content is unchanged apart from the corrections below; a table of contents now leads, and the `docs/` set is indexed rather than mentioned in passing.
 
 - **The documentation caught up with what the tool actually does.** Several claims had been true when written and were not any more:

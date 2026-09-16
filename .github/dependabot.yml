@@ -1,0 +1,23 @@
+# Only the GitHub Actions this repository's CI uses. There is deliberately no other
+# ecosystem here: the tool's dependencies are PowerShell modules from the PowerShell
+# Gallery, which Dependabot does not cover, and the scripts themselves take no packages.
+#
+# Expect roughly a couple of pull requests a year. Grouped into one so a routine bump of
+# three actions is one review rather than three.
+version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "ci"
+    labels:
+      - dependencies

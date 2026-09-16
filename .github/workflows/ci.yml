@@ -6,6 +6,18 @@ on:
   pull_request:
   workflow_dispatch:
 
+  # This tool hardcodes the retirement deadlines and branches on the current date, so a
+  # test can pass the day it is written and start failing later without a commit to blame.
+  # That is not hypothetical: crossing 2026-09-01 broke the sample-reproducibility check,
+  # and nothing said so until somebody happened to run the suite by hand. A weekly run
+  # surfaces that within days of the calendar causing it.
+  #
+  # Offset from the hour because scheduled workflows queue against everyone else's, and
+  # the top of the hour is the worst of it. GitHub disables the schedule after 60 days
+  # with no repository activity; a push re-enables it.
+  schedule:
+    - cron: '17 6 * * 1'
+
 permissions:
   contents: read
 
