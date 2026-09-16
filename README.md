@@ -321,6 +321,9 @@ Results sort failures first, then tenants whose result is a lower bound and show
 > [!IMPORTANT]
 > `AssessmentConfidence` says whether a tenant's zeroes can be read as "nothing found". `Complete` means the authentication methods policy is fully migrated, so the modern policy read is the whole answer. `LowerBound` means it is not, and the legacy per-user MFA service settings and legacy SSPR methods pages still govern that tenant — both can hand out SMS and voice through settings no API exposes. A `LowerBound` tenant reporting zero has been partially measured, not measured clean, so those tenants are lifted above the genuinely clean ones and named on the console rather than left at the bottom of the file where the usual "open the non-zero rows" habit skips them.
 
+> [!NOTE]
+> `AssessmentTimeUtc` records when each tenant was actually assessed, which is not the same as when the summary file was written. `-Resume` copies a tenant that already succeeded straight into the next summary without reassessing it, so a row can be weeks old in a file dated today. The estate roll-up reads this column and names anything older than a fortnight in a band above the table; a row from a summary written before the column existed is reported as undated rather than assumed current.
+
 **Point `-ReportRoot` at your protected client documentation store, never at a git working directory.**
 
 #### Running tenants concurrently
