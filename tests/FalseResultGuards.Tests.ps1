@@ -310,3 +310,176 @@ Describe 'The sweep records when each tenant was actually assessed' {
         Get-Content -Raw -LiteralPath $script:AssessmentPath | Should -Match 'AssessmentTimeUtc\s+='
     }
 }
+
+Describe 'Tickets put the stranded ahead of the merely unmigrated' {
+    # When -MaxIndividualTickets cuts the High list, the sort order decides who gets a
+    # personal ticket and who falls into the bulk campaign. It was admin-then-alphabetical,
+    # so a phone-only user actually stopped at sign-in could land in the bulk pile while a
+    # non-blocked user with Authenticator got their own P2. The action list already ranks
+    # lockout above admin; the tickets have to agree with it.
+
+    BeforeAll {
+        . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
+        . (Import-ScriptFunction -Path (Get-AssessmentScriptPath) -Name @(
+                'Get-PropertyValue'
+                'Test-RowFlag'
+                'Get-RemediationStep'
+                'Get-TicketNextStep'
+                'Test-NeedsTicket'
+                'New-TicketExport'
+                'Protect-CsvInjection'
+                'Export-AssessmentCsv'
+                'Protect-OutputFile'
+            ))
+        $script:NoReportRowMarker = '(no row in registration report)'
+
+        function New-HighRow {
+            param([string]$Name, [bool]$Blocked, [bool]$Admin = $false)
+            [PSCustomObject]@{
+                Risk                   = 'High'
+                Reason                 = 'test'
+                NextStep               = 'test'
+                BlockedAtRetirement    = $Blocked
+                DisplayName            = $Name
+                UserPrincipalName      = "$($Name.ToLower())@fabrikam-example.com"
+                UserType               = 'Member'
+                IsAdmin                = $Admin
+                InSmsPolicyScope       = $true
+                InVoicePolicyScope     = $false
+                PerUserMfaState        = 'disabled'
+                DaysSinceLastSignIn    = 3
+                PhoneMethodsRegistered = 'mobilePhone'
+                AllMethodsRegistered   = if ($Blocked) { 'mobilePhone' } else { 'mobilePhone; microsoftAuthenticatorPush' }
+                PreferredMethod        = 'Phone'
+                IsPasswordlessCapable  = $false
+                UserId                 = [guid]::NewGuid().ToString()
+            }
+        }
+
+        $script:TicketDir = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('n'))
+        New-Item -ItemType Directory -Path $script:TicketDir | Out-Null
+    }
+
+    AfterAll { Remove-Item -LiteralPath $script:TicketDir -Recurse -Force -ErrorAction SilentlyContinue }
+
+    It 'gives the individual ticket to the blocked user, not the alphabetically earlier one' {
+        # Two High users, one slot. "Aaron" is safe (has Authenticator); "Zoe" is stranded.
+        $rows = @(
+            New-HighRow -Name 'Aaron' -Blocked $false
+            New-HighRow -Name 'Zoe' -Blocked $true
+        )
+        $path = Join-Path $script:TicketDir 'one-slot_Tickets.csv'
+        $null = New-TicketExport -Rows $rows -Path $path -Customer 'Fabrikam' -MaxIndividual 1 -History @{} -SkipAclHardening
+        $tickets = @(Import-Csv -LiteralPath $path)
+
+        $individual = @($tickets | Where-Object { $_.ContactEmail })
+        $individual.Count | Should -Be 1
+        $individual[0].ContactEmail | Should -Be 'zoe@fabrikam-example.com'
+    }
+
+    It 'names the stranded users at the top of the bulk ticket they overflowed into' {
+        $rows = @(
+            New-HighRow -Name 'Aaron' -Blocked $false
+            New-HighRow -Name 'Zoe' -Blocked $true
+            New-HighRow -Name 'Yusuf' -Blocked $true
+        )
+        $path = Join-Path $script:TicketDir 'overflow_Tickets.csv'
+        $null = New-TicketExport -Rows $rows -Path $path -Customer 'Fabrikam' -MaxIndividual 1 -History @{} -SkipAclHardening
+        $bulk = @(Import-Csv -LiteralPath $path | Where-Object { -not $_.ContactEmail -and $_.Risk -eq 'High' })
+
+        $bulk.Count | Should -Be 1
+        # Both stranded users sort ahead of Aaron; the alphabetical tie-break gives the one
+        # slot to Yusuf, so Zoe overflows and must be called out by name. Aaron, who is not
+        # stranded, must not appear in that call-out.
+        $bulk[0].Description | Should -Match 'Of these, 1 hold a phone as their ONLY method'
+        $bulk[0].Description | Should -Match 'Work those first: zoe@fabrikam-example.com'
+        $bulk[0].Description | Should -Not -Match 'Work those first:.*aaron@'
+    }
+
+    It 'says so when nobody in the bulk ticket is stranded' {
+        $rows = @(
+            New-HighRow -Name 'Aaron' -Blocked $false
+            New-HighRow -Name 'Bea' -Blocked $false
+        )
+        $path = Join-Path $script:TicketDir 'safe_Tickets.csv'
+        $null = New-TicketExport -Rows $rows -Path $path -Customer 'Fabrikam' -MaxIndividual 1 -History @{} -SkipAclHardening
+        $bulk = @(Import-Csv -LiteralPath $path | Where-Object { -not $_.ContactEmail -and $_.Risk -eq 'High' })
+        $bulk[0].Description | Should -Match 'None of these is stopped at sign-in'
+    }
+
+    It 'does not tell the reader to wait for a date that has passed' {
+        $rows = @(New-HighRow -Name 'Aaron' -Blocked $false; New-HighRow -Name 'Bea' -Blocked $false)
+        $path = Join-Path $script:TicketDir 'date_Tickets.csv'
+        $null = New-TicketExport -Rows $rows -Path $path -Customer 'Fabrikam' -MaxIndividual 1 -History @{} -SkipAclHardening
+        $bulk = @(Import-Csv -LiteralPath $path | Where-Object { -not $_.ContactEmail -and $_.Risk -eq 'High' })
+        # New-TicketExport reads the wall clock; the wording is asserted against today.
+        if ((Get-Date) -lt [datetime]'2026-09-01') {
+            $bulk[0].Description | Should -Match 'rather than waiting for the Microsoft-managed default'
+        } else {
+            $bulk[0].Description | Should -Match 'has been in effect since 2026-09-01'
+            $bulk[0].Description | Should -Not -Match 'rather than waiting'
+        }
+    }
+}
+
+Describe 'The work queue and the headline number are the same people' {
+    BeforeAll {
+        . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
+        . (Import-ScriptFunction -Path (Get-AssessmentScriptPath) -Name @(
+                'Get-PropertyValue'
+                'Test-RowFlag'
+                'Get-SignInAgeSortKey'
+                'Get-FriendlyMethodName'
+                'Get-FriendlySignInAge'
+                'Get-ActionListEntry'
+                'New-ActionList'
+            ))
+        $script:NoReportRowMarker = '(no row in registration report)'
+        $script:SignInAgeNever = '(none recorded)'
+        $script:SignInAgeUnavailable = '(not available)'
+        $script:StaleSignInDays = 90
+    }
+
+    It 'lists a stranded user even if a future band put them outside Critical/High/Moderate' {
+        # Cannot happen with the current classification, and that is the point: if it ever
+        # can, the count says one thing and the queue another, and nobody notices.
+        $row = [PSCustomObject]@{
+            Risk = 'Low'; BlockedAtRetirement = 'True'; IsAdmin = 'False'; DisplayName = 'Edge Case'
+            UserPrincipalName = 'edge@fabrikam-example.com'; UserType = 'Member'; PerUserMfaState = 'disabled'
+            DaysSinceLastSignIn = '2'; InSmsPolicyScope = 'True'; InVoicePolicyScope = 'False'
+            PhoneMethodsRegistered = 'mobilePhone'; AllMethodsRegistered = 'mobilePhone'
+        }
+        $list = @(New-ActionList -Rows @($row))
+        $list.Count | Should -Be 1
+        $list[0].Priority | Should -Be '1 - Lockout'
+    }
+
+    It 'still leaves an ordinary Low user off the queue' {
+        $row = [PSCustomObject]@{
+            Risk = 'Low'; BlockedAtRetirement = 'False'; IsAdmin = 'False'; DisplayName = 'Fine'
+            UserPrincipalName = 'fine@fabrikam-example.com'; UserType = 'Member'; PerUserMfaState = 'disabled'
+            DaysSinceLastSignIn = '2'; InSmsPolicyScope = 'True'; InVoicePolicyScope = 'False'
+            PhoneMethodsRegistered = 'mobilePhone'; AllMethodsRegistered = 'mobilePhone; passKeyDeviceBound'
+        }
+        @(New-ActionList -Rows @($row)).Count | Should -Be 0
+    }
+}
+
+Describe 'Numbers beside each other in one report agree with each other' {
+    BeforeAll {
+        . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
+        $script:AssessmentText = Get-Content -Raw -LiteralPath (Get-AssessmentScriptPath)
+    }
+
+    It 'computes the executive-summary denominator over the same rows as its numerator' {
+        # PasswordlessCapableInScope is counted over candidate rows, which never include an
+        # Excluded user. The in-scope denominator beneath it has to leave them out too.
+        $script:AssessmentText | Should -Match "InVoicePolicyScope\) -and \`$_\.Risk -ne 'Excluded' \}\)\.Count"
+    }
+
+    It 'carries the policy state on every CA policy named against a retiring strength' {
+        # The green MFA line was already fixed to stop naming disabled policies as if they
+        # enforced something. The yellow strength line one above it had the same problem.
+        $script:AssessmentText | Should -Match "\[\`$\(\`$_\.State\)\] via strength"
+    }
+}
