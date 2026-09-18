@@ -86,8 +86,12 @@ $script:RiskOrder = @{
     Moderate      = 2
     Low           = 3
     Informational = 4
-    # Not a risk level: an operator-applied state from -ExcludeUpnPattern. Ordered last so
-    # a user who becomes excluded reads as an improvement rather than an unknown band.
+    # Not a risk level: an operator-applied state from -ExcludeUpnPattern. Kept here so
+    # rows sort predictably, but Get-Movement never compares it against a real band. It
+    # used to be ordered last "so a user who becomes excluded reads as an improvement",
+    # and that is exactly the false result: an operator who added -ExcludeUpnPattern
+    # between two runs saw forty service accounts reported as Improved, and the console
+    # told them "that is the campaign working". Nothing about those accounts had changed.
     Excluded      = 5
 }
 
@@ -143,6 +147,15 @@ function Get-Movement {
     if (-not $BaselineRisk) { return 'New' }
     if (-not $CurrentRisk) { return 'Resolved' }
 
+    # Excluded is what -ExcludeUpnPattern did to the row, not what happened to the account.
+    # A band on one side and Excluded on the other means the filter changed between the
+    # runs; calling that Improved or Regressed attributes an operator's regex to the
+    # migration. Excluded on both sides is genuinely no change.
+    $baselineExcluded = $BaselineRisk -eq 'Excluded'
+    $currentExcluded = $CurrentRisk -eq 'Excluded'
+    if ($baselineExcluded -and $currentExcluded) { return 'Unchanged' }
+    if ($baselineExcluded -or $currentExcluded) { return 'Filtered' }
+
     $before = $script:RiskOrder[$BaselineRisk]
     $after = $script:RiskOrder[$CurrentRisk]
 
@@ -165,6 +178,12 @@ function Get-ChangeNote {
         }
         'Resolved' {
             return 'No longer a migration candidate. Out of policy scope and no phone method registered, or the account is disabled or deleted.'
+        }
+        'Filtered' {
+            if (([string](Get-PropertyValue $Current 'Risk')) -eq 'Excluded') {
+                return 'Excluded by -ExcludeUpnPattern in the current run but not in the baseline. The filter changed, not the account; its exposure is whatever it was.'
+            }
+            return 'Excluded by -ExcludeUpnPattern in the baseline but not in the current run. The filter changed, not the account; this is not a regression.'
         }
         'Improved' {
             $wasPasswordless = ConvertTo-Boolean (Get-PropertyValue $Baseline 'IsPasswordlessCapable')
@@ -362,7 +381,7 @@ foreach ($baseline in $baselineRows) {
 
 # Read order is triage order: regressions first, because a user who went backwards is
 # the only category that means something is actively wrong.
-$movementOrder = @{ Regressed = 0; New = 1; Improved = 2; Resolved = 3; Unknown = 4; Unchanged = 5 }
+$movementOrder = @{ Regressed = 0; New = 1; Improved = 2; Resolved = 3; Unknown = 4; Filtered = 5; Unchanged = 6 }
 $allChanges = @($changes | Sort-Object `
     @{ Expression = { $movementOrder[$_.Movement] }; Ascending = $true }, `
     @{ Expression = { $script:RiskOrder[$_.CurrentRisk] } ; Ascending = $true }, `
@@ -386,12 +405,16 @@ function Measure-Movement {
 
 # Remediation velocity: users who left the actionable bands entirely. This is the number
 # that answers "is the campaign working", and the one worth putting in a status update.
+# Filtered rows are left out of both directions: a service account an operator regexed
+# out of the report is not a user the campaign reached.
 $leftActionable = @($allChanges | Where-Object {
+        $_.Movement -ne 'Filtered' -and
         $_.BaselineRisk -in @('Critical', 'High', 'Moderate') -and
         $_.CurrentRisk -notin @('Critical', 'High', 'Moderate')
     }).Count
 
 $enteredActionable = @($allChanges | Where-Object {
+        $_.Movement -ne 'Filtered' -and
         $_.BaselineRisk -notin @('Critical', 'High', 'Moderate') -and
         $_.CurrentRisk -in @('Critical', 'High', 'Moderate')
     }).Count
@@ -406,6 +429,7 @@ $summary = [PSCustomObject][ordered]@{
     New                      = Measure-Movement 'New'
     Improved                 = Measure-Movement 'Improved'
     Resolved                 = Measure-Movement 'Resolved'
+    Filtered                 = Measure-Movement 'Filtered'
     Unchanged                = Measure-Movement 'Unchanged'
     LeftActionableBands      = $leftActionable
     EnteredActionableBands   = $enteredActionable
@@ -426,6 +450,9 @@ if ($leftActionable -gt 0) {
 }
 if ($enteredActionable -gt 0) {
     Write-Host "$enteredActionable user(s) entered the actionable bands. Usually new accounts or a group membership change." -ForegroundColor Yellow
+}
+if ($summary.Filtered -gt 0) {
+    Write-Host "$($summary.Filtered) user(s) differ only because -ExcludeUpnPattern was not the same in both runs. Not counted as progress in either direction." -ForegroundColor Cyan
 }
 Write-Host "Change report: $($summary.OutputPath)" -ForegroundColor Green
 Write-Host 'No tenant was contacted. This compares files only.' -ForegroundColor Green

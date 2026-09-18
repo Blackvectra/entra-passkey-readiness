@@ -550,9 +550,11 @@ Describe 'A default run against a stubbed tenant' {
         $script:Summary.CaPoliciesRequiringMfa | Should -Not -Match 'Block legacy auth'
     }
 
-    It 'connects a CA policy to the retiring strength it grants through' {
+    It 'connects a CA policy to the retiring strength it grants through, and says whether it is enforcing' {
+        # The state is part of the value. Without it a disabled or report-only policy on a
+        # retiring-only strength read as a live lockout path.
         $script:Summary.CaPoliciesOnSmsVoiceStrength |
-            Should -Be "Phone approvals for finance via strength 'Phone transfer approvals'"
+            Should -Be "Phone approvals for finance [enabled] via strength 'Phone transfer approvals'"
     }
 }
 

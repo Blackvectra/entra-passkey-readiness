@@ -102,6 +102,8 @@ This is the step that saves the most time, and the one most likely to get skippe
 
 Read `Regressed` first. A user who went backwards means something is actively wrong: a removed method, a reset account, or a group membership change that pulled somebody into policy scope. `LeftActionableBands` is the number worth putting in a client status update.
 
+If you changed `-ExcludeUpnPattern` between the two runs, expect `Filtered` rows. They are reported so the diff is complete, and they are deliberately left out of `LeftActionableBands`: a service account you regexed out of the report is not a user the campaign reached.
+
 Do not re-read the full export every cycle. On a 400-row assessment, 380 rows will be identical to last month and reading them all is how a monthly cadence quietly becomes a quarterly one.
 
 ### 2b. Check the lockout number first

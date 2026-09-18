@@ -381,9 +381,10 @@ Every user is classified by direction of travel, and the report sorts regression
 | `New` | Appeared in this run. New account, newly in scope, or newly present in the registration report. |
 | `Improved` | Risk band improved. Usually the remediation completing. |
 | `Resolved` | No longer a migration candidate at all. Also what a disabled or deleted account looks like, so it is reported rather than assumed to be good news. |
+| `Filtered` | `-ExcludeUpnPattern` differed between the two runs, so the user is `Excluded` on one side and a real band on the other. The filter changed, not the account. Never counted as progress in either direction. |
 | `Unchanged` | No movement. Excluded unless you pass `-IncludeUnchanged`. |
 
-The console summary reports `LeftActionableBands` and `EnteredActionableBands`. The first is the number worth putting in a client status update; the second is usually new starters or a group membership change.
+The console summary reports `LeftActionableBands` and `EnteredActionableBands`. The first is the number worth putting in a client status update; the second is usually new starters or a group membership change. `Filtered` rows are left out of both, so adding an exclusion pattern between runs cannot manufacture progress.
 
 Users are matched on object ID, so a rename does not read as a new account. Where only the UPN matched, the row records `MatchedOn = UserPrincipalName` so you can tell the difference.
 
