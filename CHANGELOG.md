@@ -100,6 +100,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **`README.md` documents the sweep summary CSV column by column, and the estate roll-up's parameters.** The sweep summary is the file the estate report reads and the one an operator opens in Excel, and its twenty-one columns were described only in prose. `New-EntraSmsVoiceEstateReport.ps1` had `-SummaryPath` and `-Title` undocumented, and its section still described two callout bands where there are now three. Found by cross-checking every script's parameter block and every output file's header against the README mechanically, rather than by reading it.
+
 - **CI also runs weekly on a schedule, not only on push and pull request.** This tool hardcodes the retirement deadlines and branches on the current date, so a test can pass the day it is written and start failing later with no commit to blame — which is not hypothetical: crossing 2026-09-01 broke the sample-reproducibility check, and nothing said so until somebody ran the suite by hand. A Monday run surfaces that within days of the calendar causing it rather than whenever a change next happens to land. GitHub disables a schedule after 60 days without repository activity; a push re-enables it.
 
 - **Dependabot watches the GitHub Actions the CI uses**, grouped into one pull request so a routine bump of three actions is one review. Deliberately the only ecosystem configured: the tool's dependencies are PowerShell Gallery modules, which Dependabot does not cover, and the scripts themselves take no packages.
