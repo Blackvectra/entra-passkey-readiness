@@ -324,6 +324,30 @@ Results sort failures first, then tenants whose result is a lower bound and show
 > [!NOTE]
 > `AssessmentTimeUtc` records when each tenant was actually assessed, which is not the same as when the summary file was written. `-Resume` copies a tenant that already succeeded straight into the next summary without reassessing it, so a row can be weeks old in a file dated today. The estate roll-up reads this column and names anything older than a fortnight in a band above the table; a row from a summary written before the column existed is reported as undated rather than assumed current.
 
+#### Sweep summary columns
+
+One row per tenant in `SweepSummary_<timestamp>.csv`. This is the file the [estate roll-up](#estate-roll-up) reads.
+
+| Column | Meaning |
+|---|---|
+| `Customer` | The label from `-CustomerName` or the tenant list, sanitised for use as a folder name. Also what `-Resume` matches on. |
+| `TenantId` | Tenant GUID Graph reported, which is not always the verified domain you supplied |
+| `Status` | `Success` or `Failed`. A failed tenant has an `Error` and empty counts — it is not a tenant with no findings. |
+| `AssessmentConfidence` | `Complete`, `LowerBound`, or `NotAssessed`. See the note above; a `LowerBound` zero is *not measured*, not *clean*. |
+| `RegistrationCampaignState` | The passkey registration campaign setting |
+| `PolicyMigrationState` | Authentication methods policy migration state. Anything but `migrationComplete` makes the row `LowerBound`. |
+| `SmsPolicyState` / `VoicePolicyState` | Whether each method is enabled in the modern policy |
+| `EnabledUsersAssessed` | Enabled users the assessment covered |
+| `MigrationCandidates` | Users in policy scope or with a phone method registered |
+| `Critical` / `High` / `Moderate` / `Low` | Risk-band counts. Together they equal `MigrationCandidates`. |
+| `BlockedAtRetirement` | **Users stopped at sign-in on 2027-02-01.** The column the estate is ranked on. |
+| `BlockedAdminsAtRetirement` | How many of those hold a privileged role |
+| `PasswordlessCapableInScope` | In-scope users who already hold a surviving method |
+| `OldestReportRowUtc` | Age of the oldest registration-report row behind the figures |
+| `AssessmentTimeUtc` | When this tenant was actually assessed. Differs from the file's timestamp for rows `-Resume` carried forward. |
+| `ReportPath` | Where that tenant's per-user export was written |
+| `Error` | Why a `Failed` tenant failed, verbatim |
+
 **Point `-ReportRoot` at your protected client documentation store, never at a git working directory.**
 
 #### Running tenants concurrently
@@ -683,13 +707,22 @@ Ninety per-tenant reports do not answer the question that decides the week: acro
 
 Reads the newest `SweepSummary_*.csv` and writes one self-contained HTML page ([sample](examples/Example-EstateReport.html)). No Graph calls, no permissions, no network — it is safe to run on a machine that has never connected to a tenant.
 
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-ReportRoot` | string | — | The sweep's output root. The newest `SweepSummary_*.csv` beneath it is used. One of `-ReportRoot` or `-SummaryPath` is required. |
+| `-SummaryPath` | string | — | A specific `SweepSummary_*.csv`, for rolling up an older sweep or one kept elsewhere. |
+| `-OutputPath` | string | beside the summary | Where to write the HTML. Defaults to `EstateReadiness_<timestamp>.html` next to the summary it was built from. |
+| `-Title` | string | `Managed estate` | The heading on the page, for an MSP that wants its own name on it. |
+| `-SkipAclHardening` | switch | off | Leave the file's permissions alone. See [Security](#security). |
+| `-PassThru` | switch | off | Also return the roll-up object, for scripting against the numbers without parsing HTML. |
+
 Customers are ranked the way the estate should be worked, which is **not** by finding count:
 
 1. **Tenants that did not report**, named with their error. A tenant with no data is not a tenant with no findings.
 2. **Tenants that reported nothing on a result that cannot be trusted.** Their policy migration is incomplete, so the legacy per-user MFA and SSPR pages still govern them and this assessment cannot read either. A zero there means *not measured*. Left at the bottom of a spreadsheet these get skipped, because they look exactly like a genuinely clean tenant.
 3. **Then by how many users are stranded** at the retirement, then by risk band.
 
-The first two get their own callout bands above the table, because their rows look unremarkable and a reader scanning for large numbers misses them.
+The first two get their own callout bands above the table, because their rows look unremarkable and a reader scanning for large numbers misses them. A third band names any tenant whose figures are more than fourteen days old — rows that `-Resume` carried forward from an earlier sweep, or that predate the `AssessmentTimeUtc` column and so cannot be dated. Their numbers describe the tenant as it was, not as it is.
 
 > [!IMPORTANT]
 > This page names every customer in the estate alongside how many of their privileged accounts are about to lose MFA. It is the single highest-value file this project produces and the least suitable for sending anywhere. `.gitignore` covers `EstateReadiness_*.html`, but that is a safety net, not a control.
