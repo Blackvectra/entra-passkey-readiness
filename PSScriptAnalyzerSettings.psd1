@@ -6,9 +6,9 @@
 
     ExcludeRules = @(
         # PSAvoidUsingWriteHost
-        # This is an operator-facing assessment tool, not a library. The coloured console
+        # This is an operator-facing assessment tool, not a library. The colored console
         # summary is a deliberate part of the deliverable: it is what a technician reads
-        # before opening the CSV, and severity is carried by colour. Machine-readable
+        # before opening the CSV, and severity is carried by color. Machine-readable
         # output already has its own channel: the summary object on the pipeline, the
         # CSV, the ticket queue, and the HTML report. Switching to Write-Output would put
         # narration into the pipeline and corrupt the object the sweep runner captures.

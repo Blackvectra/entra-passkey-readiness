@@ -70,7 +70,7 @@ Describe 'Test-CustomerNameInput' {
 
     It 'rejects a name that would be a formula in the saved tenant list' {
         # Every other CSV this project writes is a report, so a leading quote is the right
-        # neutralisation there. The tenant list is an input the sweep reads back, and a
+        # neutralization there. The tenant list is an input the sweep reads back, and a
         # name saved as '=Contoso would become the output folder name -- so the row is
         # refused instead. No real company is called =Contoso.
         foreach ($value in @('=cmd|''/c calc''!A1', '+Contoso', '@Fabrikam', '-Northwind')) {
@@ -136,7 +136,7 @@ Describe 'Test-TenantListInput' {
         $result.Problems[0] | Should -Match 'same output folder as row 1'
     }
 
-    It 'catches names that collide only after sanitising' {
+    It 'catches names that collide only after sanitizing' {
         # 'Contoso.' and 'Contoso' both become Contoso once trailing dots are stripped, so
         # they collide in the filesystem even though the typed strings differ.
         $result = Test-TenantListInput -Entries @(
@@ -171,7 +171,7 @@ Describe 'ConvertTo-SafeLabel matches the sweep' {
 
     It 'produces the same folder name the sweep would' {
         # The duplicate check above predicts what Invoke-EntraSmsVoiceSweep.ps1 will do.
-        # If the two sanitisers disagree, the window either blocks a list that would have
+        # If the two sanitizers disagree, the window either blocks a list that would have
         # worked or waves through one that collides. Compared as source, since the sweep's
         # copy lives inside its end block.
         $sweepText = Get-Content -LiteralPath (Get-SweepScriptPath) -Raw
@@ -184,8 +184,8 @@ Describe 'ConvertTo-SafeLabel matches the sweep' {
         $sweepBody | Should -Not -BeNullOrEmpty
         $guiBody | Should -Not -BeNullOrEmpty
 
-        $normalise = { param($t) (($t -split "`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith('#') }) -join "`n" }
-        (& $normalise $guiBody) | Should -Be (& $normalise $sweepBody)
+        $normalize = { param($t) (($t -split "`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith('#') }) -join "`n" }
+        (& $normalize $guiBody) | Should -Be (& $normalize $sweepBody)
     }
 }
 

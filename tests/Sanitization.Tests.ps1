@@ -30,7 +30,7 @@ Describe 'Protect-CsvInjection' {
             @{ Value = "`rSomething"; Label = 'carriage return' }
         )
 
-        It 'neutralises a display name starting with <Label>' -TestCases $dangerous {
+        It 'neutralizes a display name starting with <Label>' -TestCases $dangerous {
             $result = [PSCustomObject]@{ DisplayName = $Value } | Protect-CsvInjection
 
             $result.DisplayName | Should -BeExactly ("'" + $Value)

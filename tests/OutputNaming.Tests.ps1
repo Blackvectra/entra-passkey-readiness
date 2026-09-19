@@ -57,7 +57,7 @@ Describe 'Get-DefaultOutputPath' {
     }
 
     It 'does not use a tenant GUID or a Microsoft multi-tenant alias passed as -TenantId as the label' {
-        # Neither is a name a human would recognise on a folder. With no customer name and
+        # Neither is a name a human would recognize on a folder. With no customer name and
         # no interactive account to read a domain from, the real tenant GUID is what is
         # left -- a GUID the run actually connected to, not the alias that was typed in.
         foreach ($alias in @($script:Guid, 'common', 'organizations', 'consumers')) {

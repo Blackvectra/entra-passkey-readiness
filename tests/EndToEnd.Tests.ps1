@@ -511,8 +511,8 @@ Describe 'A default run against a stubbed tenant' {
         $script:StdOut | Should -Match 'cannot register the method they are about to be told to register'
     }
 
-    It 'reports no unrecognised authentication methods for known input' {
-        $script:Summary.UnrecognisedMethods | Should -BeNullOrEmpty
+    It 'reports no unrecognized authentication methods for known input' {
+        $script:Summary.UnrecognizedMethods | Should -BeNullOrEmpty
     }
 
     It 'names the legacy portal pages when the policy migration is not complete' {

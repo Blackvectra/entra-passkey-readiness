@@ -246,7 +246,7 @@ $summary = [PSCustomObject][ordered]@{
             $_.Risk -ne 'Excluded' -and -not $_.BlockedAtRetirement -and
             $_.PreferredMethod -in @('Phone', 'Alt phone', 'Office phone')
         }).Count
-    UnrecognisedMethods        = ''
+    UnrecognizedMethods        = ''
     UsersExcludedByPattern     = 0
     ExcludeUpnPattern          = ''
     UsersMissingFromReport     = 0
@@ -261,7 +261,7 @@ $customer = 'Fabrikam Manufacturing'
 # is a no-op off Windows in any case.
 #
 # This used to be an ambient variable the lifted functions read out of this scope, which no
-# static analyser can see and which CI flagged as dead. The writers take a parameter now.
+# static analyzer can see and which CI flagged as dead. The writers take a parameter now.
 
 $assessmentPath = Join-Path $examplesDir 'Example-MigrationImpact.csv'
 Export-AssessmentCsv -Data $rows -Path $assessmentPath -SkipAclHardening

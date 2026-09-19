@@ -356,7 +356,7 @@ function Get-SignInAge {
 function Resolve-TenantIdentifier {
     <#
     .SYNOPSIS
-        Normalises whatever somebody actually typed into -TenantId, or explains why it
+        Normalizes whatever somebody actually typed into -TenantId, or explains why it
         cannot be one.
     .DESCRIPTION
         -TenantId wants a tenant GUID or a verified domain. The thing people reach for is
@@ -500,9 +500,9 @@ function Connect-AssessmentGraph {
     $identity = if ($script:IsAppOnly) { "app $ClientId" } else { [string](Get-PropertyValue $finalContext 'Account') }
 
     # Hard guard against reporting the wrong customer. If an explicit -TenantId was supplied
-    # and the established context does not match it, stop rather than write a mislabelled CSV.
+    # and the established context does not match it, stop rather than write a mislabeled CSV.
     if ($TenantId -and $TenantId -match '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$' -and $finalContext.TenantId -ne $TenantId) {
-        throw "Connected tenant $($finalContext.TenantId) does not match requested tenant $TenantId. Aborting to avoid a mislabelled report."
+        throw "Connected tenant $($finalContext.TenantId) does not match requested tenant $TenantId. Aborting to avoid a mislabeled report."
     }
 
     Write-Host "Connected tenant: $($finalContext.TenantId) as $identity" -ForegroundColor Cyan
@@ -572,7 +572,7 @@ function Invoke-GraphBatch {
         [ValidateRange(1, 10)][int]$MaxAttempts = 5
     )
 
-    # @() around $Request matters: ConvertTo-Json serialises a one-element array as a bare
+    # @() around $Request matters: ConvertTo-Json serializes a one-element array as a bare
     # object, and Graph rejects a requests property that is not an array.
     $body = @{ requests = @($Request) } | ConvertTo-Json -Depth 5 -Compress
 
@@ -946,7 +946,7 @@ function Get-RiskAssessment {
         [string]$UserType,
 
         # Legacy per-user MFA state, when -IncludeLegacyPerUserMfa read it. Empty means it
-        # was not read, which is the historical behaviour and still the default.
+        # was not read, which is the historical behavior and still the default.
         #
         # A user enabled or enforced there is in scope for the retirement whatever the
         # modern policy says, so this counts as scope. Without it the tenant's real
@@ -1020,7 +1020,7 @@ function Test-OnlyPhoneBasedMfa {
     # being retired and whose holders are not stopped at sign-in.
     #
     # Getting this wrong in the lenient direction costs somebody their Monday morning, so
-    # a method this function does not recognise counts as not surviving.
+    # a method this function does not recognize counts as not surviving.
     param(
         # Null as well as empty: a user with no registration-report row has no methods, and
         # that is an ordinary case rather than a caller error.
@@ -1412,7 +1412,7 @@ $($rowsHtml -join "`n")
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<!-- No scripts, no external requests. Defence in depth behind the HTML encoding:
+<!-- No scripts, no external requests. Defense in depth behind the HTML encoding:
      even if an encoding bug slipped through, nothing can execute or phone home. -->
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; form-action 'none'; base-uri 'none'">
 <meta name="referrer" content="no-referrer">
@@ -1670,7 +1670,7 @@ $findingsHtml
 <li><strong>Critical rows are individual work.</strong> Privileged accounts that cannot satisfy MFA after retirement. Register a FIDO2 key or platform passkey and verify with a real test sign-in. Check emergency-access accounts specifically; they are the ones most likely to have a phone number attached that nobody has looked at in a year.</li>
 <li><strong>Register the new method before removing the phone method.</strong> Doing it in the other order creates the lockout you are working to prevent.</li>
 <li><strong>A large Moderate count means legacy per-user MFA.</strong> Those users have a phone method registered but do not resolve into modern AMP scope. They are still in scope for the retirement. This assessment cannot read legacy per-user MFA service settings; validate that population manually.</li>
-<li><strong>Policy scope is not effective sign-in behaviour.</strong> Conditional Access is not evaluated here. A user in AMP scope may never be challenged, and a user outside it may still be blocked by a grant control this assessment does not read.</li>
+<li><strong>Policy scope is not effective sign-in behavior.</strong> Conditional Access is not evaluated here. A user in AMP scope may never be challenged, and a user outside it may still be blocked by a grant control this assessment does not read.</li>
 <li><strong>Guests follow a separate Microsoft timeline</strong> for passkey support. Validate B2B readiness independently before assuming a guest can register on the same schedule as a member.</li>
 </ul>
 </div>
@@ -2013,7 +2013,7 @@ function Test-NeedsTicket {
     $previous = $order[[string]$History[$UserId]]
     $current = $order[$CurrentRisk]
 
-    # An unrecognised band on either side falls back to raising the ticket.
+    # An unrecognized band on either side falls back to raising the ticket.
     if ($null -eq $previous -or $null -eq $current) { return $true }
 
     return ($current -lt $previous)
@@ -2241,7 +2241,7 @@ $sample
     Export-AssessmentCsv -Data $tickets.ToArray() -Path $Path -SkipAclHardening:$SkipAclHardening
 
     # History carries forward everything it already held plus everyone ticketed this run,
-    # so a user who remediates and later regresses is still recognised as previously seen.
+    # so a user who remediates and later regresses is still recognized as previously seen.
     $updatedHistory = @{}
     foreach ($key in $History.Keys) { $updatedHistory[[string]$key] = [string]$History[$key] }
     foreach ($row in @($criticalRows) + @($highRows) + @($moderateRows)) {
@@ -2493,7 +2493,7 @@ Assert-GraphDependency
 # and last rows against different instants, which is a silly way to get an off-by-one.
 $assessmentStartUtc = (Get-Date).ToUniversalTime()
 
-# Normalise before connecting, so a sign-in name becomes the tenant it belongs to rather
+# Normalize before connecting, so a sign-in name becomes the tenant it belongs to rather
 # than an error from Graph that names neither the problem nor the fix.
 $TenantId = Resolve-TenantIdentifier -Value $TenantId
 
@@ -2646,8 +2646,8 @@ $survivingMfaMethods = @(
     'x509CertificateSingleFactor'
     'x509CertificateMultiFactor'
 
-    # Both turned up on the first run against a real tenant, in the UnrecognisedMethods
-    # list, where being unrecognised means being treated as not surviving. Nobody was
+    # Both turned up on the first run against a real tenant, in the UnrecognizedMethods
+    # list, where being unrecognized means being treated as not surviving. Nobody was
     # mis-banded there because every one of those users also held Authenticator push --
     # but a user whose only surviving method was a synced passkey would have been reported
     # as locked out on 2027-02-01 when they are perfectly fine. A false positive on the
@@ -2662,10 +2662,10 @@ $survivingMfaMethods = @(
 )
 
 # Anything Microsoft adds later, or that this list has not caught up with, is treated as
-# NOT surviving, so an unrecognised method makes a user look more exposed rather than less.
+# NOT surviving, so an unrecognized method makes a user look more exposed rather than less.
 # Over-warning costs a review; under-warning costs somebody their Monday morning. The
-# unrecognised names are surfaced in the summary so the list can be maintained.
-$script:UnrecognisedMethods = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+# unrecognized names are surfaced in the summary so the list can be maintained.
+$script:UnrecognizedMethods = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
 # Stands in for the dropped InRegistrationReport column. Defined once because the summary
 # counts these rows and the CSV displays them, and the two must not drift apart.
@@ -2730,7 +2730,7 @@ $rows = foreach ($user in $enabledUsers) {
     # which also sweeps up everyone holding Authenticator push.
     foreach ($method in $methods) {
         if ($method -notin $phoneMethods -and $method -notin $survivingMfaMethods -and $method -notin $nonMfaMethods) {
-            [void]$script:UnrecognisedMethods.Add([string]$method)
+            [void]$script:UnrecognizedMethods.Add([string]$method)
         }
     }
     $onlyPhoneBasedMfa = Test-OnlyPhoneBasedMfa -MethodsRegistered ([string[]]$methods) `
@@ -2747,11 +2747,11 @@ $rows = foreach ($user in $enabledUsers) {
     # returned two spellings this script had never heard of, and because an unknown value
     # passes through Get-FriendlyMethodName untranslated, the only symptom was a raw enum
     # name sitting in a column of plain English -- easy to miss, and silently wrong in the
-    # count if the value happened to be an SMS one. An unrecognised value now names itself
+    # count if the value happened to be an SMS one. An unrecognized value now names itself
     # in the summary rather than waiting to be noticed.
     if ($rawPreferred -and $rawPreferred -ne $script:NoReportRowMarker -and
         $rawPreferred -notin $script:PreferredMethodValues) {
-        [void]$script:UnrecognisedMethods.Add($rawPreferred)
+        [void]$script:UnrecognizedMethods.Add($rawPreferred)
     }
 
     $upn = [string](Get-PropertyValue $user 'userPrincipalName')
@@ -2976,7 +2976,7 @@ $summary = [PSCustomObject][ordered]@{
             $_.Risk -ne 'Excluded' -and -not $_.BlockedAtRetirement -and
             $_.PreferredMethod -in $phonePreferredLabels
         }).Count
-    UnrecognisedMethods        = (@($script:UnrecognisedMethods | Sort-Object) -join '; ')
+    UnrecognizedMethods        = (@($script:UnrecognizedMethods | Sort-Object) -join '; ')
     UsersExcludedByPattern     = @($rows | Where-Object Risk -eq 'Excluded').Count
     ExcludeUpnPattern          = (@($ExcludeUpnPattern) -join ' | ')
     UsersMissingFromReport     = @($rows | Where-Object { $_.AllMethodsRegistered -eq $script:NoReportRowMarker }).Count
@@ -3112,8 +3112,8 @@ if ($summary.StaleAccountsInActionList -gt 0 -or $summary.NeverSignedInInActionL
 if ($summary.UsersExcludedByPattern -gt 0) {
     Write-Host "$($summary.UsersExcludedByPattern) user(s) excluded by -ExcludeUpnPattern and left out of every count. They remain in the CSV marked Excluded; check the pattern did not catch a real person." -ForegroundColor Cyan
 }
-if ($summary.UnrecognisedMethods) {
-    Write-Host "Unrecognised authentication methods seen: $($summary.UnrecognisedMethods). Treated as NOT surviving the retirement, so affected users are reported as more exposed rather than less." -ForegroundColor Yellow
+if ($summary.UnrecognizedMethods) {
+    Write-Host "Unrecognized authentication methods seen: $($summary.UnrecognizedMethods). Treated as NOT surviving the retirement, so affected users are reported as more exposed rather than less." -ForegroundColor Yellow
 }
 
 # The one warning that invalidates the headline numbers rather than qualifying them.

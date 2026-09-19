@@ -90,7 +90,7 @@ function Test-CustomerNameInput {
     if ($Value -match '[\\/:*?"<>|]') { return $false }
     if ($Value.Trim().Trim('.') -eq '') { return $false }
 
-    # Formula-leading names are rejected here rather than neutralised on the way out.
+    # Formula-leading names are rejected here rather than neutralized on the way out.
     # Every other CSV this project writes is a report, so prefixing a quote is the right
     # answer there; the tenant list is an *input* the sweep reads back, and a name that
     # came out as '=Contoso would then become the output folder name. No real company is
@@ -122,7 +122,7 @@ function Get-TenantEntryProblem {
 function ConvertTo-SafeLabel {
     # Must match Invoke-EntraSmsVoiceSweep.ps1 exactly, because the duplicate-label check
     # below is predicting what that script will do. Two labels that differ only in
-    # characters the sanitiser strips collide in the filesystem.
+    # characters the sanitizer strips collide in the filesystem.
     param([string]$Label)
 
     $safe = ($Label -replace '[\\/:*?"<>|]', '_').Trim().Trim('.')

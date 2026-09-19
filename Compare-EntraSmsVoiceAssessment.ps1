@@ -146,7 +146,7 @@ function Get-Movement {
     $before = $script:RiskOrder[$BaselineRisk]
     $after = $script:RiskOrder[$CurrentRisk]
 
-    # An unrecognised band is reported rather than silently treated as unchanged.
+    # An unrecognized band is reported rather than silently treated as unchanged.
     if ($null -eq $before -or $null -eq $after) { return 'Unknown' }
 
     if ($after -lt $before) { return 'Regressed' }
