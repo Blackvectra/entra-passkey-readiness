@@ -42,7 +42,7 @@ Describe 'Test-NeedsTicket' {
         Test-NeedsTicket -UserId '' -CurrentRisk 'Critical' -History @{} | Should -BeTrue
     }
 
-    It 'tickets when either band is unrecognised' {
+    It 'tickets when either band is unrecognized' {
         # Failing toward a duplicate ticket is recoverable. Failing toward silence is not.
         Test-NeedsTicket -UserId 'u1' -CurrentRisk 'Nonsense' -History @{ 'u1' = 'High' } | Should -BeTrue
         Test-NeedsTicket -UserId 'u1' -CurrentRisk 'Critical' -History @{ 'u1' = 'Nonsense' } | Should -BeTrue

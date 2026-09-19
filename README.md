@@ -229,7 +229,7 @@ nothing is wrong with the script or your account. You downloaded the repository 
    .\Get-EntraSmsVoiceMigrationImpact.ps1
    ```
 
-If step 5 shows a policy set at `MachinePolicy` or `UserPolicy` scope (Group Policy), `Set-ExecutionPolicy` cannot override it — that is your organisation's endpoint policy doing its job. Options, in order of preference: clone with `git clone` instead of downloading a zip (cloned files carry no Mark of the Web, so `RemoteSigned` machines run them as local scripts); ask your endpoint team to allow the script; or run it from a machine not under that policy.
+If step 5 shows a policy set at `MachinePolicy` or `UserPolicy` scope (Group Policy), `Set-ExecutionPolicy` cannot override it — that is your organization's endpoint policy doing its job. Options, in order of preference: clone with `git clone` instead of downloading a zip (cloned files carry no Mark of the Web, so `RemoteSigned` machines run them as local scripts); ask your endpoint team to allow the script; or run it from a machine not under that policy.
 
 **Do not use `-ExecutionPolicy Bypass` as a habit.** It works, but it teaches you to disable a control instead of satisfying it, and this is a tool you may run on customer-facing machines.
 
@@ -253,7 +253,7 @@ reports\Contoso\Contoso_2026-08-18_ActionList.csv
 | `<tenant>_<date>.csv` | The full assessment: one risk-ranked row per exposed user, highest risk first |
 | `..._ActionList.csv` | The work list: affected users only, what they have, what to do, in plain language — no IDs. Attach it to a ticket ([sample](examples/Example-ActionList.csv)) |
 
-Both open straight into Excel. Values that would otherwise be read as formulas are neutralised on the way out, so a display name beginning `=` cannot execute when somebody opens the file.
+Both open straight into Excel. Values that would otherwise be read as formulas are neutralized on the way out, so a display name beginning `=` cannot execute when somebody opens the file.
 
 The folder name comes from `-CustomerName` when you pass it, the domain of the account you signed in with if you don't, and the tenant's GUID as a last resort. Running five clients back to back produces five folders you can tell apart at a glance, not five files distinguishable only by a timestamp. A re-run the same day overwrites that day's files; different days sit side by side. Pass `-CustomerName "Contoso Manufacturing"` when the sign-in domain does not read as the client's name:
 
@@ -434,7 +434,7 @@ App-only runs need the same four Graph permissions granted as **application** pe
 
 Client secrets are deliberately not supported. A secret that can read identity posture across an entire customer estate should not exist as a script parameter.
 
-When `-TenantId` is supplied as a GUID, the script verifies the established Graph context matches it and aborts rather than writing a mislabelled report.
+When `-TenantId` is supplied as a GUID, the script verifies the established Graph context matches it and aborts rather than writing a mislabeled report.
 
 ### Client-ready HTML report
 
@@ -608,7 +608,7 @@ Accepts and passes through `-IncludeUnaffected`, `-SkipLegacyPerUserMfa`, `-Excl
 | `PasswordlessCapableInScope` | In-scope users who already have a surviving method |
 | `BlockedAtRetirement` | **Users stopped at sign-in on 2027-02-01.** A phone is their only method that satisfies MFA. The number to drive to zero. |
 | `BlockedAdminsAtRetirement` | How many of those hold a privileged role |
-| `UnrecognisedMethods` | Any registered method name this tool does not classify. Treated as not surviving, so affected users read as more exposed. |
+| `UnrecognizedMethods` | Any registered method name this tool does not classify. Treated as not surviving, so affected users read as more exposed. |
 | `StaleAccountsInActionList` / `NeverSignedInInActionList` | How much of the work queue is probably not a person. Check these against your leaver process before anybody starts chasing names. |
 | `UsersMissingFromReport` | Enabled users with no row in the registration report (see Limitations) |
 | `OldestReportRowUtc` | Age of the oldest registration-report row; the honest confidence marker for the run |
@@ -652,7 +652,7 @@ The registration report also returns `isMfaCapable`, `isMfaRegistered`, and a pe
 
 ## Risk classifications
 
-Summarised here; full logic and remediation guidance in [docs/Risk-Classification.md](docs/Risk-Classification.md).
+Summarized here; full logic and remediation guidance in [docs/Risk-Classification.md](docs/Risk-Classification.md).
 
 | Band | Condition |
 |---|---|
@@ -775,7 +775,7 @@ A `Moderate` user can be stopped while a `High` user is not. Sorting your work b
 Two honest caveats:
 
 - `email` and `securityQuestion` satisfy self-service password reset, not MFA, so they do not count as surviving. A temporary access pass expires by design and does not count either.
-- A method this tool does not recognise is treated as **not** surviving, so an unfamiliar name makes a user look more exposed rather than less. Any such names are listed in `UnrecognisedMethods` in the summary. Over-warning costs a review; under-warning costs somebody their morning.
+- A method this tool does not recognize is treated as **not** surviving, so an unfamiliar name makes a user look more exposed rather than less. Any such names are listed in `UnrecognizedMethods` in the summary. Over-warning costs a review; under-warning costs somebody their morning.
 
 ---
 
@@ -895,7 +895,7 @@ These are properties of the data sources, not defects. Read them before presenti
 - **Reporting latency.** The registration report is not real-time. `OldestReportRowUtc` in the summary is the age of the oldest row behind the assessment, so the confidence in a run is visible. Do not treat a run as a live directory query.
 - **SMS and voice are not separately registered.** Entra stores a phone number with a type, not an "SMS registration" and a "voice registration." `mobilePhone` can satisfy both; `officePhone` is voice-only. There is no clean per-user SMS-versus-voice split available, so the script reports phone-method capability and leaves policy scope to distinguish intent.
 - **Legacy per-user MFA is read from a beta endpoint.** Users enabled for SMS or voice through legacy per-user MFA service settings are in scope for the retirement, and that state has no Graph v1.0 equivalent — it exists only at `/beta/users/{id}/authentication/requirements`. Every run reads it, using the `Policy.Read.All` the script already requests. `-SkipLegacyPerUserMfa` opts out, and then `PerUserMfaState` reads `(not checked)` on every row and that exposure is unassessed.
-- **Conditional Access is not evaluated.** A user may be in AMP scope but never challenged, or may be blocked by a Conditional Access grant this script does not read. Policy scope is not the same as effective sign-in behaviour, and it is not the same as MFA being enforced at all — see [docs/MFA-Enforcement.md](docs/MFA-Enforcement.md) for the ten common reasons a tenant with a Require-MFA policy is not actually requiring MFA.
+- **Conditional Access is not evaluated.** A user may be in AMP scope but never challenged, or may be blocked by a Conditional Access grant this script does not read. Policy scope is not the same as effective sign-in behavior, and it is not the same as MFA being enforced at all — see [docs/MFA-Enforcement.md](docs/MFA-Enforcement.md) for the ten common reasons a tenant with a Require-MFA policy is not actually requiring MFA.
 - **Guest and B2B readiness.** Guests are assessed, but passkey support for B2B and internal guest users is on a separate Microsoft timeline. Treat guest findings as requiring independent validation.
 - **Nested groups are resolved transitively; dynamic groups are point-in-time.** A dynamic group's membership can change between the assessment and September 1.
 

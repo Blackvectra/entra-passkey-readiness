@@ -115,7 +115,7 @@ TenantId,CustomerName
 
     It 'refuses labels that differ only in characters the folder name cannot keep' {
         # "Contoso/UK" and "Contoso:UK" both become Contoso_UK. The collision is in the
-        # filesystem, so the check has to be on the sanitised form rather than the raw one.
+        # filesystem, so the check has to be on the sanitized form rather than the raw one.
         $message = Invoke-SweepWithList -Csv @'
 TenantId,CustomerName
 11111111-1111-1111-1111-111111111111,Contoso/UK

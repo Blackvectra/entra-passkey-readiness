@@ -148,9 +148,9 @@ Describe 'Every script hardens its output the same way' {
         $actual = Get-FunctionText -Path $Path -Name 'Protect-OutputFile'
 
         # Indentation differs: the sweep defines its copy inside an end block.
-        $normalise = { param($t) (($t -split "`n") | ForEach-Object { $_.TrimEnd() -replace '^\s+', '' }) -join "`n" }
+        $normalize = { param($t) (($t -split "`n") | ForEach-Object { $_.TrimEnd() -replace '^\s+', '' }) -join "`n" }
 
-        (& $normalise $actual) | Should -Be (& $normalise $reference) -Because "$Name must harden output identically to the assessment"
+        (& $normalize $actual) | Should -Be (& $normalize $reference) -Because "$Name must harden output identically to the assessment"
     }
 
     It 'guards against the same CSV formula characters in <Name>' -TestCases $csvWriters {

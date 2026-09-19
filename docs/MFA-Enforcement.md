@@ -22,7 +22,7 @@ This is not usually an oversight at creation. It is a policy that was put into r
 
 ### 2. "Require one of the selected controls"
 
-Conditional Access defaults to requiring *all* selected grant controls, but the common template — the one Microsoft itself publishes as an alternative for organisations not ready to require compliance — is **Require multifactor authentication, Require device to be marked as compliant, or Require Microsoft Entra hybrid joined device**, with **Require one of the selected controls**.
+Conditional Access defaults to requiring *all* selected grant controls, but the common template — the one Microsoft itself publishes as an alternative for organizations not ready to require compliance — is **Require multifactor authentication, Require device to be marked as compliant, or Require Microsoft Entra hybrid joined device**, with **Require one of the selected controls**.
 
 That is a legitimate policy. It is also a policy where anybody on a compliant or hybrid-joined device never performs MFA, which in a well-managed estate is nearly everybody. The tenant satisfies its policy every day without a single MFA prompt, and the day a user signs in from an unmanaged device is the day they discover they never registered a method.
 
@@ -54,7 +54,7 @@ This is the one that matters most for the SMS retirement, and the one this tool 
 
 Legacy per-user MFA is a separate enforcement layer with three states — `disabled`, `enabled`, `enforced`. It is not replaced by a Conditional Access policy; it sits alongside one. The consequences:
 
-- A user left at `enforced` is prompted regardless of what Conditional Access says, so sign-in behaviour stops matching your policy and troubleshooting stops making sense.
+- A user left at `enforced` is prompted regardless of what Conditional Access says, so sign-in behavior stops matching your policy and troubleshooting stops making sense.
 - The per-user MFA **service settings** have their own trusted-IP bypass and their own "remember MFA on trusted devices" option, neither of which Conditional Access knows about. A user can be exempted from MFA by a setting in a portal nobody has opened in three years.
 - A user moved to `enabled` who never completed registration stays at `enabled` forever; they do not transition to `enforced` on their own, and an administrator has to move them explicitly.
 
@@ -83,7 +83,7 @@ Note also that from **2026-07-06** Conditional Access policies targeting **Regis
 
 For B2B collaboration, cross-tenant access settings can be configured to **trust MFA claims from the guest's home tenant**. That is often the right call — but the MFA in question happened in somebody else's tenant, under somebody else's policy, with methods you cannot see and cannot audit. Your policy is satisfied by an assertion.
 
-**Check:** cross-tenant access settings per partner organisation, and whether your guests are excluded from policies you assume cover everyone.
+**Check:** cross-tenant access settings per partner organization, and whether your guests are excluded from policies you assume cover everyone.
 
 ### 10. Security Defaults and Conditional Access are mutually exclusive
 

@@ -235,8 +235,8 @@ end {
     # the summary row, and the -Resume match. Two tenants sharing one label is therefore
     # not a cosmetic problem: the second run overwrites the first tenant's evidence, and a
     # resumed sweep marks one tenant complete on the other's results. Two labels that
-    # differ only in characters the sanitiser strips collide the same way, so the check is
-    # on the sanitised form. Fail here, before any tenant is contacted.
+    # differ only in characters the sanitizer strips collide the same way, so the check is
+    # on the sanitized form. Fail here, before any tenant is contacted.
     $labelOwners = @{}
     foreach ($target in $targets) {
         $safe = ConvertTo-SafeLabel -Label ([string]$target.Label)
@@ -412,7 +412,7 @@ end {
     foreach ($target in $targets) {
         $index++
 
-        # A label that sanitises away to nothing still needs a folder, and the run index
+        # A label that sanitizes away to nothing still needs a folder, and the run index
         # makes that fallback unique where the label could not.
         $safeLabel = ConvertTo-SafeLabel -Label ([string]$target.Label)
         if ([string]::IsNullOrWhiteSpace($safeLabel)) { $safeLabel = "tenant_$index" }

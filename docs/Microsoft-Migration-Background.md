@@ -15,7 +15,7 @@ The scope qualifier matters. What is being retired is Microsoft's own delivery o
 - Hardware OATH tokens
 - External and third-party MFA methods
 
-Organisations with a regulatory or operational requirement for phone-based delivery can continue using it through a **customer-managed telecom provider** obtained via the Microsoft Security Store. That is a procurement and integration project, not a toggle.
+Organizations with a regulatory or operational requirement for phone-based delivery can continue using it through a **customer-managed telecom provider** obtained via the Microsoft Security Store. That is a procurement and integration project, not a toggle.
 
 ## Timeline
 

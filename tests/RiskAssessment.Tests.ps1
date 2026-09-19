@@ -145,7 +145,7 @@ Describe 'Get-RemediationStep' {
             $step.Length | Should -BeGreaterThan 40
         }
 
-        It 'tolerates an unrecognised band rather than returning nothing' {
+        It 'tolerates an unrecognized band rather than returning nothing' {
             Get-RemediationStep -Risk 'Nonsense' -HasPhoneMethodRegistered $false `
                 -UserType 'Member' -PhoneMethodsRegistered '' | Should -Not -BeNullOrEmpty
         }

@@ -9,7 +9,7 @@
 # finding your tenant ID, which is a long way round for a fix that is deleting the local
 # part. This ran against a real tenant and failed exactly that way.
 #
-# The rule these tests encode: normalise what can be normalised without guessing, and
+# The rule these tests encode: normalize what can be normalized without guessing, and
 # fail early and specifically for the rest. Never fail late, after somebody has already
 # answered a sign-in prompt.
 
@@ -76,7 +76,7 @@ Describe 'Resolve-TenantIdentifier' {
 
         It "accepts Entra's own multi-tenant aliases" {
             # Connect-MgGraph takes these, and the run reports whichever tenant it actually
-            # reached, so neither can produce a mislabelled report.
+            # reached, so neither can produce a mislabeled report.
             Resolve-TenantIdentifier -Value 'common' | Should -Be 'common'
             Resolve-TenantIdentifier -Value 'organizations' | Should -Be 'organizations'
         }
@@ -101,7 +101,7 @@ Describe 'Resolve-TenantIdentifier' {
             $message | Should -Match 'omit -TenantId'
         }
 
-        It 'quotes the original input, not the normalised one, so the message matches what was typed' {
+        It 'quotes the original input, not the normalized one, so the message matches what was typed' {
             $message = ''
             try { Resolve-TenantIdentifier -Value '  bad value  ' } catch { $message = $_.Exception.Message }
             $message | Should -Match 'bad value'
@@ -109,10 +109,10 @@ Describe 'Resolve-TenantIdentifier' {
     }
 }
 
-Describe 'The script normalises before it connects' {
+Describe 'The script normalizes before it connects' {
 
-    # Order matters. Normalising after Connect-MgGraph would still fail against Graph,
-    # and normalising after a sign-in prompt wastes the operator's time answering one.
+    # Order matters. Normalizing after Connect-MgGraph would still fail against Graph,
+    # and normalizing after a sign-in prompt wastes the operator's time answering one.
 
     It 'resolves -TenantId ahead of the Graph connection' {
         $text = Get-Content -LiteralPath (Get-AssessmentScriptPath) -Raw

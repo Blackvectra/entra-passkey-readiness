@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<!-- No scripts, no external requests. Defence in depth behind the HTML encoding:
+<!-- No scripts, no external requests. Defense in depth behind the HTML encoding:
      even if an encoding bug slipped through, nothing can execute or phone home. -->
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; form-action 'none'; base-uri 'none'">
 <meta name="referrer" content="no-referrer">
@@ -379,7 +379,7 @@ users hold a phone number as their only method that satisfies MFA. At their next
 <li><strong>Critical rows are individual work.</strong> Privileged accounts that cannot satisfy MFA after retirement. Register a FIDO2 key or platform passkey and verify with a real test sign-in. Check emergency-access accounts specifically; they are the ones most likely to have a phone number attached that nobody has looked at in a year.</li>
 <li><strong>Register the new method before removing the phone method.</strong> Doing it in the other order creates the lockout you are working to prevent.</li>
 <li><strong>A large Moderate count means legacy per-user MFA.</strong> Those users have a phone method registered but do not resolve into modern AMP scope. They are still in scope for the retirement. This assessment cannot read legacy per-user MFA service settings; validate that population manually.</li>
-<li><strong>Policy scope is not effective sign-in behaviour.</strong> Conditional Access is not evaluated here. A user in AMP scope may never be challenged, and a user outside it may still be blocked by a grant control this assessment does not read.</li>
+<li><strong>Policy scope is not effective sign-in behavior.</strong> Conditional Access is not evaluated here. A user in AMP scope may never be challenged, and a user outside it may still be blocked by a grant control this assessment does not read.</li>
 <li><strong>Guests follow a separate Microsoft timeline</strong> for passkey support. Validate B2B readiness independently before assuming a guest can register on the same schedule as a member.</li>
 </ul>
 </div>

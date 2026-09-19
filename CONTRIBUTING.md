@@ -92,7 +92,7 @@ Three areas want a test with any change:
 ## Claims about Microsoft's timeline
 
 Cite [Microsoft Learn](https://learn.microsoft.com/en-us/entra/identity/authentication/concept-sms-voice-retirement)
-for any date, deadline, or behaviour claim, and link the specific page.
+for any date, deadline, or behavior claim, and link the specific page.
 
 This matters more than it sounds. The project previously printed `2027-01-28` as a
 customer-managed telecom provider configuration deadline on every run, attributed to

@@ -57,7 +57,7 @@ Describe 'Test-OnlyPhoneBasedMfa' {
             Test-Blocked -Methods @('mobilePhone', 'temporaryAccessPass') | Should -BeTrue
         }
 
-        It 'treats an unrecognised method as not surviving' {
+        It 'treats an unrecognized method as not surviving' {
             # Microsoft adds method names over time. Until this list catches up, an unknown
             # name must make the user look more exposed, not less.
             Test-Blocked -Methods @('mobilePhone', 'someMethodInventedNextYear') | Should -BeTrue
@@ -102,7 +102,7 @@ Describe 'Test-OnlyPhoneBasedMfa' {
         }
     }
 
-    Context 'Matching behaviour' {
+    Context 'Matching behavior' {
 
         It 'is case-insensitive, because Graph casing is not guaranteed' {
             Test-Blocked -Methods @('MobilePhone', 'MicrosoftAuthenticatorPush') | Should -BeFalse
