@@ -277,13 +277,13 @@ Describe 'A default run against a stubbed tenant' {
         (Join-Path $script:OutDir 'assessment.html') | Should -Not -Exist
     }
 
-    It 'writes the trimmed seventeen-column schema' {
+    It 'writes the trimmed eighteen-column schema' {
         $columns = (Import-Csv -LiteralPath $script:CsvPath)[0].PSObject.Properties.Name
         $columns | Should -Be @(
             'Risk', 'Reason', 'NextStep', 'BlockedAtRetirement', 'DisplayName', 'UserPrincipalName',
             'UserType', 'IsAdmin', 'InSmsPolicyScope', 'InVoicePolicyScope', 'PerUserMfaState',
-            'DaysSinceLastSignIn', 'PhoneMethodsRegistered', 'AllMethodsRegistered', 'PreferredMethod',
-            'IsPasswordlessCapable', 'UserId'
+            'DaysSinceLastSignIn', 'PhoneMethodsRegistered', 'AllMethodsRegistered', 'PasskeyMethods',
+            'PreferredMethod', 'IsPasswordlessCapable', 'UserId'
         )
     }
 
@@ -449,6 +449,40 @@ Describe 'A default run against a stubbed tenant' {
         # BlockedAtRetirement and must not inflate this separate count.
         $script:Summary.UsersDefaultingToPhonePrompt | Should -Be 1
         $script:StdOut | Should -Match 'not locked out but still default to SMS or voice'
+    }
+
+    It 'reports passkey adoption separately from the lockout number' {
+        # The whole point of the column: driving BlockedAtRetirement to zero does not
+        # need a single passkey, so adoption has to be reported on its own. Asserted
+        # against the real run rather than the function, because the console line and
+        # the summary fields are what somebody reads.
+        $script:StdOut | Should -Match 'Passkeys: \d+ of \d+ enabled user\(s\) hold one'
+        $script:StdOut | Should -Match 'blank is no passkey'
+
+        # u-safe and u-fine hold passKeyDeviceBound, u-clear a fido2SecurityKey.
+        $script:Summary.UsersWithPasskey | Should -Be 3
+    }
+
+    It 'counts a passkey holder the default export leaves out' {
+        # The trap the README warns about, proved rather than asserted in prose. Two of
+        # this tenant's three passkey holders have no phone method and are in no retiring
+        # policy scope, so they are not migration candidates and the default CSV does not
+        # carry them -- while UsersWithPasskey, counted over every enabled user, does.
+        # An operator building a roster from the default file would undercount adoption,
+        # which is why -IncludeUnaffected is the documented switch for that job.
+        $rows = @(Import-Csv -LiteralPath $script:CsvPath)
+        $inFile = @($rows | Where-Object { $_.PasskeyMethods }).Count
+
+        $inFile | Should -BeLessThan $script:Summary.UsersWithPasskey
+        $script:Summary.UsersWithPasskey | Should -Be 3
+    }
+
+    It 'leaves users with no registration row out of both passkey figures' {
+        # Unknown is not absent. The three terms must account for every enabled user.
+        ($script:Summary.UsersWithPasskey +
+            $script:Summary.UsersWithoutPasskey +
+            $script:Summary.UsersMissingFromReport) |
+            Should -Be $script:Summary.EnabledUsersAssessed
     }
 
     It 'names the files from the customer when -OutputPath is not given' {

@@ -38,6 +38,7 @@ $examplesDir = $PSScriptRoot
         'Get-RiskAssessment'
         'Get-RemediationStep'
         'Test-OnlyPhoneBasedMfa'
+        'Get-PasskeyMethodList'
         'ConvertTo-SafeHtml'
         'Get-ExecutiveSummary'
         'New-HtmlReport'
@@ -82,6 +83,11 @@ $survivingMfaMethods = @(
     'passKeySynced', 'microsoftAuthenticatorPasswordless'
     'fido', 'appNotification', 'appCode'
 )
+# Lifted from the script by AST rather than transcribed like the two lists above. The two
+# above only feed BlockedAtRetirement, which the sample asserts separately; this one decides
+# what the published sample says about passkey adoption, and a copy that drifted would
+# publish a figure the tool does not produce.
+$passkeyMethods = (Get-MethodListsFromScript -Path (Join-Path $repoRoot 'Get-EntraSmsVoiceMigrationImpact.ps1')).PasskeyMethods
 
 # The fictional tenant. Every name and domain is invented; example.com-style domains are
 # used deliberately so a published sample cannot be mistaken for a real client's evidence.
@@ -198,6 +204,8 @@ $rows = foreach ($person in $directory) {
         DaysSinceLastSignIn    = $person.SignInAge
         PhoneMethodsRegistered = $phoneList
         AllMethodsRegistered   = ($person.Methods -join '; ')
+        PasskeyMethods         = Get-PasskeyMethodList -MethodsRegistered ([string[]]$person.Methods) `
+            -PasskeyMethods $passkeyMethods
         PreferredMethod        = Get-FriendlyMethodName ([string]$person.PreferredRaw)
         IsPasswordlessCapable  = $person.Passwordless
         UserId                 = ('11111111-aaaa-4bbb-8ccc-{0:d12}' -f $index)
@@ -240,6 +248,13 @@ $summary = [PSCustomObject][ordered]@{
     Moderate                   = @($candidates | Where-Object Risk -eq 'Moderate').Count
     Low                        = @($candidates | Where-Object Risk -eq 'Low').Count
     PasswordlessCapableInScope = @($candidates | Where-Object { ($_.InSmsPolicyScope -or $_.InVoicePolicyScope) -and $_.IsPasswordlessCapable }).Count
+    # Over $rows, not $candidates, matching the script: passkey adoption is a whole-tenant
+    # figure. Nobody in this sample is missing from the registration report, so the two
+    # sum to EnabledUsersAssessed here; against a real tenant they need not.
+    UsersWithPasskey           = @($rows | Where-Object { $_.PasskeyMethods }).Count
+    UsersWithoutPasskey        = @($rows | Where-Object {
+        -not $_.PasskeyMethods -and $_.AllMethodsRegistered -ne $script:NoReportRowMarker
+    }).Count
     BlockedAtRetirement        = @($candidates | Where-Object BlockedAtRetirement).Count
     BlockedAdminsAtRetirement  = @($candidates | Where-Object { $_.BlockedAtRetirement -and $_.IsAdmin }).Count
     UsersDefaultingToPhonePrompt = @($rows | Where-Object {

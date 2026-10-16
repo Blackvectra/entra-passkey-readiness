@@ -352,6 +352,11 @@ end {
             BlockedAtRetirement        = & $get 'BlockedAtRetirement'
             BlockedAdminsAtRetirement  = & $get 'BlockedAdminsAtRetirement'
             PasswordlessCapableInScope = & $get 'PasswordlessCapableInScope'
+            # Passkey adoption per tenant. Counted over every enabled user by the
+            # assessment, not over its migration candidates, so the column compares
+            # tenant to tenant without needing their candidate counts to match.
+            UsersWithPasskey           = & $get 'UsersWithPasskey'
+            UsersWithoutPasskey        = & $get 'UsersWithoutPasskey'
             OldestReportRowUtc         = & $get 'OldestReportRowUtc'
             # When this tenant was actually assessed, which is not the same as when the
             # summary file was written. -Resume copies a successful row forward verbatim
@@ -624,7 +629,8 @@ end {
         'Customer', 'TenantId', 'Status', 'AssessmentConfidence', 'RegistrationCampaignState',
         'PolicyMigrationState', 'SmsPolicyState', 'VoicePolicyState', 'EnabledUsersAssessed',
         'MigrationCandidates', 'Critical', 'High', 'Moderate', 'Low', 'BlockedAtRetirement',
-        'BlockedAdminsAtRetirement', 'PasswordlessCapableInScope', 'OldestReportRowUtc',
+        'BlockedAdminsAtRetirement', 'PasswordlessCapableInScope',
+        'UsersWithPasskey', 'UsersWithoutPasskey', 'OldestReportRowUtc',
         'AssessmentTimeUtc', 'ReportPath', 'Error'
     )
 
