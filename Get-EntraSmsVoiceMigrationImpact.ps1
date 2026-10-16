@@ -40,6 +40,12 @@
     migration candidates: users in SMS/voice policy scope or users with a
     phone-based authentication method registered.
 
+    Set this when the question is passkey adoption rather than lockout risk. A user
+    already off phone methods entirely is not a migration candidate and so is absent
+    from the default export, which is correct for a work queue and wrong for counting
+    who still needs a passkey. The PasskeyMethods column is blank for a user holding
+    none, so one sort on it splits the tenant.
+
 .PARAMETER HtmlReport
     Also writes a self-contained HTML client report beside the CSVs. Off by default: a run
     produces spreadsheets, which is what gets attached to a ticket and worked from.
@@ -1064,6 +1070,32 @@ function Test-OnlyPhoneBasedMfa {
     return ($surviving.Count -eq 0)
 }
 
+function Get-PasskeyMethodList {
+    # Which of a user's registered methods are passkeys, as a sorted, semicolon-joined
+    # string, or empty when none are. Empty rather than 'None' so a reader can filter the
+    # column on blank in Excel and so the cell stays quiet in a file that is mostly quiet
+    # -- the same convention PhoneMethodsRegistered already uses.
+    #
+    # A separate function rather than an inline Where-Object because the set it filters on
+    # is a documented classification of Microsoft's enum, not an implementation detail, and
+    # a test that pins the classification has to be able to call it.
+    param(
+        # Null as well as empty, for the same reason as Test-OnlyPhoneBasedMfa: a user with
+        # no registration-report row has no methods, which is data rather than a bug.
+        [Parameter(Mandatory)][AllowNull()][AllowEmptyCollection()][string[]]$MethodsRegistered,
+        [Parameter(Mandatory)][string[]]$PasskeyMethods
+    )
+
+    if ($null -eq $MethodsRegistered) { return '' }
+
+    # Sorted so two runs over the same user produce the same cell regardless of the order
+    # Graph happened to return the methods in, which keeps
+    # Compare-EntraSmsVoiceAssessment from reporting a change where nothing changed.
+    $found = @($MethodsRegistered | Where-Object { $_ -in $PasskeyMethods } | Sort-Object -Unique)
+    if ($found.Count -eq 0) { return '' }
+    return ($found -join '; ')
+}
+
 function Get-PreferredAuthenticationMethod {
     # The method Entra actually prompts a user with by default at sign-in -- a different
     # question from what they have registered. A user can hold Authenticator push and
@@ -1693,6 +1725,7 @@ $(if ($blockedAtRetirement -gt 0) {
 <div class="card low"><div class="n">$low</div><div class="l">Low</div></div>
 <div class="card"><div class="n">$candidates</div><div class="l">Migration candidates</div></div>
 <div class="card"><div class="n">$(ConvertTo-SafeHtml $Summary.PasswordlessCapableInScope)</div><div class="l">Already passwordless</div></div>
+<div class="card"><div class="n">$(ConvertTo-SafeHtml (Get-PropertyValue $Summary 'UsersWithPasskey'))</div><div class="l">Hold a passkey</div></div>
 </div>
 
 <h2>Tenant configuration</h2>
@@ -2756,6 +2789,45 @@ $survivingMfaMethods = @(
     'appCode'
 )
 
+# The passkey subset of the list above, which is a narrower question than "can this user
+# still sign in" and the one an operator running the rollout actually asks: who holds a
+# passkey, and who still needs one.
+#
+# Microsoft's own taxonomy decides the membership here, not a guess about what sounds
+# passkey-shaped. "FIDO2 security keys are device-bound passkeys stored on a physical
+# authenticator", so fido2SecurityKey and its older spelling fido are in. Device-bound
+# passkeys (Authenticator, Windows Hello) and synced passkeys (iCloud Keychain, Google
+# Password Manager) each have their own enum value, and all four are in.
+#
+# Deliberately NOT here, though all three are passwordless and all three survive the
+# retirement:
+#
+#   windowsHelloForBusiness            Graph carries a separate passKeyDeviceBoundWindowsHello
+#                                      value for Hello registered AS a passkey. Folding plain
+#                                      Hello in would make that distinction unreportable, and
+#                                      report a passkey the user has not registered.
+#   microsoftAuthenticatorPasswordless Passwordless phone sign-in, which predates passkeys and
+#                                      is not FIDO2. Microsoft lists it beside FIDO2 and Hello
+#                                      under isPasswordlessCapable, not under passkeys.
+#   macOsSecureEnclaveKey              The macOS Platform Credential. Hardware-backed and
+#                                      phishing-resistant, but Microsoft does not document it
+#                                      as a passkey type.
+#
+# Those users show blank in PasskeyMethods while still naming their method in
+# AllMethodsRegistered, so "no passkey" never silently reads as "no protection". This is
+# also why the column is not sourced from isPasswordlessCapable, which Microsoft defines as
+# covering FIDO2, Windows Hello for Business AND Authenticator passwordless together: as a
+# passkey answer it over-counts, and over-counting here marks a rollout finished when it is
+# not.
+$passkeyMethods = @(
+    'passKeyDeviceBound'
+    'passKeyDeviceBoundAuthenticator'
+    'passKeyDeviceBoundWindowsHello'
+    'passKeySynced'
+    'fido2SecurityKey'
+    'fido'
+)
+
 # Anything Microsoft adds later, or that this list has not caught up with, is treated as
 # NOT surviving, so an unrecognized method makes a user look more exposed rather than less.
 # Over-warning costs a review; under-warning costs somebody their Monday morning. The
@@ -2837,6 +2909,9 @@ $rows = foreach ($user in $enabledUsers) {
     $onlyPhoneBasedMfa = Test-OnlyPhoneBasedMfa -MethodsRegistered ([string[]]$methods) `
         -PhoneMethods $phoneMethods -SurvivingMfaMethods $survivingMfaMethods
 
+    $passkeyMethodList = Get-PasskeyMethodList -MethodsRegistered ([string[]]$methods) `
+        -PasskeyMethods $passkeyMethods
+
     # A different population from BlockedAtRetirement: not locked out -- a stronger method
     # is registered -- but still shown a text message by default today, with nothing
     # scheduled to change that before it stops working. The summary aggregates this from
@@ -2883,7 +2958,7 @@ $rows = foreach ($user in $enabledUsers) {
     # is stated in the column somebody actually reads.
     $allMethods = if ($registration) { ($methods -join '; ') } else { $script:NoReportRowMarker }
 
-    # Seventeen columns, chosen so the file is readable in Excel. The registration report
+    # Eighteen columns, chosen so the file is readable in Excel. The registration report
     # also returns isMfaCapable, isMfaRegistered, and a per-row timestamp; none of them
     # changed what anybody did with the file, and the evidence age is still reported once,
     # as OldestReportRowUtc in the summary. PreferredMethod is the one addition to that
@@ -2909,6 +2984,12 @@ $rows = foreach ($user in $enabledUsers) {
         DaysSinceLastSignIn   = $signInAge
         PhoneMethodsRegistered = $phoneMethodList
         AllMethodsRegistered  = $allMethods
+        # Beside the full list rather than next to the risk bands, because the question it
+        # answers is "what does this person hold", not "how exposed are they". Blank means
+        # no passkey; a blank on a row whose AllMethodsRegistered says
+        # '(no row in registration report)' means unknown, not none, which is why the
+        # marker is left to that column to state rather than repeated here.
+        PasskeyMethods        = $passkeyMethodList
         PreferredMethod       = $preferredMethod
         IsPasswordlessCapable = $isPasswordlessCapable
         UserId                = $id
@@ -3052,6 +3133,23 @@ $summary = [PSCustomObject][ordered]@{
     Moderate                   = @($candidateRows | Where-Object Risk -eq 'Moderate').Count
     Low                        = @($candidateRows | Where-Object Risk -eq 'Low').Count
     PasswordlessCapableInScope = @($candidateRows | Where-Object { ($_.InSmsPolicyScope -or $_.InVoicePolicyScope) -and $_.IsPasswordlessCapable }).Count
+    # Passkey adoption, counted over $rows -- every enabled user -- and not over
+    # $candidateRows like the risk bands above it. The rollout question is "who in this
+    # tenant still needs a passkey", and a user already off SMS entirely is still part of
+    # that denominator. Naming the population in the field name rather than leaving it to
+    # be inferred, because a numerator and a denominator drawn from different populations
+    # is how this script previously reported a tenant as further behind than it was.
+    #
+    # The two do not sum to EnabledUsersAssessed on their own. A user with no row in the
+    # registration report has an unknown passkey state, not an absent one, and counting
+    # them as missing a passkey would inflate the gap with users nobody can assess. They
+    # are the third term, already reported as UsersMissingFromReport, and the identity
+    # UsersWithPasskey + UsersWithoutPasskey + UsersMissingFromReport = EnabledUsersAssessed
+    # holds on every run.
+    UsersWithPasskey           = @($rows | Where-Object { $_.PasskeyMethods }).Count
+    UsersWithoutPasskey        = @($rows | Where-Object {
+        -not $_.PasskeyMethods -and $_.AllMethodsRegistered -ne $script:NoReportRowMarker
+    }).Count
     # The headline operational number: users who hit the blocking registration prompt on
     # 2027-02-01 because a phone is the only thing they have that satisfies MFA. Narrower
     # than the risk bands, and the one to drive to zero before the date.
@@ -3198,6 +3296,19 @@ elseif ($summary.BlockedWithNoDestination -gt 0) {
 elseif ($summary.BlockedAtRetirement -gt 0) {
     Write-Host "Every blocked user is in scope for passkeys or Microsoft Authenticator, so the campaign can reach all of them." -ForegroundColor Green
 }
+
+# Passkey adoption, which is the rollout's own progress bar rather than a retirement risk.
+# Printed after the lockout numbers because it is the slower, larger piece of work: driving
+# BlockedAtRetirement to zero only needs any surviving method, and Authenticator counts.
+Write-Host ''
+Write-Host "Passkeys: $($summary.UsersWithPasskey) of $($summary.EnabledUsersAssessed) enabled user(s) hold one; $($summary.UsersWithoutPasskey) do not." -ForegroundColor Cyan
+if ($summary.UsersMissingFromReport -gt 0) {
+    # Said rather than folded into the "do not" figure, because an unassessable user is a
+    # gap in the evidence and reading them as unregistered overstates the work by exactly
+    # the number of people nobody can see.
+    Write-Host "  $($summary.UsersMissingFromReport) more have no row in the registration report, so their passkey state is unknown rather than absent." -ForegroundColor Yellow
+}
+Write-Host '  Names are in the PasskeyMethods column of the CSV: blank is no passkey. Re-run with -IncludeUnaffected for every enabled user, not just migration candidates.' -ForegroundColor Cyan
 
 # A softer number than BlockedAtRetirement, but the one that explains support calls on the
 # day itself: these people are not locked out, but the prompt they are used to seeing
