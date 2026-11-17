@@ -60,6 +60,10 @@ Get-Module -ListAvailable Pester, PSScriptAnalyzer | Select-Object Name, Version
 
 PowerShell 7.0+, enforced by `#Requires`. `Microsoft.Graph.Authentication` is the only runtime dependency.
 
+Six delegated read scopes, requested by `Connect-AssessmentGraph` (the operator never runs `Connect-MgGraph`): `Policy.Read.All`, `AuditLog.Read.All`, `User.Read.All`, `GroupMember.Read.All`, `RoleManagement.Read.Directory`, `PrivilegedEligibilitySchedule.Read.AzureADGroup`. Recommended role is Global Reader; Security Reader is refused the PIM for Groups read on role-assignable groups. Never add a write scope.
+
+No test contacts a live tenant, and nothing here authorizes one: a live-tenant run needs the user's explicit go-ahead.
+
 ## Architecture
 
 ### The five scripts
@@ -78,7 +82,7 @@ The assessment always emits its `$summary` object on the pipeline as its last st
 
 This is why `PSAvoidUsingWriteHost` is excluded in `PSScriptAnalyzerSettings.psd1`. Console narration goes through `Write-Host` deliberately — switching to `Write-Output` would put narration into the pipeline and corrupt the object the sweep captures. Machine-readable output has its own channels: the pipeline object, the CSVs, the ticket queue, and the HTML report.
 
-Adding a summary field that the sweep should carry means three edits: the field on `$summary`, the field in the sweep's `New-SweepResultRow`, **and** the name in the sweep's `$columns` array. A field on the row but missing from `$columns` is written nowhere — that bug has shipped once already.
+Fields added late with `Add-Member` (the export paths and counts) are part of the same contract. Adding a summary field that the sweep should carry means three edits: the field on `$summary`, the field in the sweep's `New-SweepResultRow`, **and** the name in the sweep's `$columns` array. A field on the row but missing from `$columns` is written nowhere — that bug has shipped once already.
 
 ### How the sweep runs tenants concurrently
 
@@ -90,19 +94,47 @@ Sequential mode calls the assessment script in-process. Concurrent mode (`-Throt
 
 ### Method classification
 
-Three script-scope arrays in the assessment decide every number the tool reports:
+Four script-scope arrays in the assessment decide every number the tool reports:
 
 - `$phoneMethods` — the retiring methods, both generations of enum spellings (`mobilePhone`/`sms`, `mobileCall`, `officePhone`, `smsSignIn`, …). Which spelling a tenant's report returns is not something to discover on the day.
 - `$survivingMfaMethods` — methods that both survive the retirement *and* satisfy MFA alone. This list is the difference between "has no passkey" and "cannot sign in". Includes `externalAuthMethod` (third-party providers satisfy the Entra MFA requirement) and `passKeySynced`.
 - `$nonMfaMethods` — survives but does not satisfy MFA alone: `email`, `securityQuestion`, `temporaryAccessPass`, `temporaryAccessPassMultiUse`, `appPassword`, `qrCode`. Listed explicitly rather than left unrecognized, so `UnrecognizedMethods` stays a list of genuinely unknown spellings rather than known-and-classified ones.
+- `$passkeyMethods` — the passkey subset of the surviving list: the four `passKey*` values plus `fido2SecurityKey` and its older `fido` spelling. `windowsHelloForBusiness`, `microsoftAuthenticatorPasswordless` and `macOsSecureEnclaveKey` are deliberately **not** in it. Never substitute `$survivingMfaMethods` or Graph's `isPasswordlessCapable` for it: the first drops every Authenticator user, and the second counts Windows Hello and passwordless phone sign-in as passkeys.
 
-Anything unrecognized is treated as **not surviving**, so an unknown method makes a user look more exposed rather than less. Unrecognized names are surfaced in the summary as `UnrecognizedMethods` so the lists can be maintained.
+Anything unrecognized is treated as **not surviving** and **not a passkey**, so an unknown method makes a user look more exposed rather than less. Unrecognized names are surfaced in the summary as `UnrecognizedMethods` so the lists can be maintained.
 
-`tests/TestHelpers.ps1` exposes `Get-MethodListsFromScript`, which lifts these arrays out of the script by AST. Tests must use it rather than retyping the lists — a retyped copy passes while the real list says something else, which is exactly how a surviving method once stayed classified as a lockout.
+`tests/TestHelpers.ps1` exposes `Get-MethodListsFromScript`, which lifts these arrays out of the script by AST (and `Get-ScriptArrayVariable` for other script-scope arrays such as the export column list). Tests must use it rather than retyping the lists — a retyped copy passes while the real list says something else, which is exactly how a surviving method once stayed classified as a lockout.
+
+### The passkey outputs
+
+The assessment CSV is nineteen columns. `PasskeyMethods` (blank = no passkey) and `PrivilegeSource` (blank = no directory role found) follow the `PhoneMethodsRegistered` convention: a list column whose blank means none.
+
+Two actionable exports are written on every run by **one** function, `Get-NoPasskeyCandidate`, so their counts cannot diverge:
+
+| File | Population |
+|---|---|
+| `<stem>_NoPasskey_Nonprivileged.csv` | Known, enabled, in-scope nonprivileged users without a registered passkey. Not "everyone without a passkey": unknown registration status, privileged users and pattern-excluded users are outside it. |
+| `<stem>_SmsVoiceUsers_NoPasskey.csv` | The subset of the above who also hold a `$phoneMethods` method (`-RequirePhoneMethod`). Never the whole no-passkey population. |
+
+The function returns privileged users tagged rather than dropped; the caller splits kept from omitted off one evaluated collection, so kept + omitted = qualifying by construction and each file's omitted count holds only users who would otherwise have been on that file. Counts on `$summary` are taken from the collections that were written, never from a second filter.
+
+Neither file claims usage (registration only — nothing reads sign-in method) or lockout (`OtherSurvivingMfaMethods` is there to tell them apart). Do not add a "ready" or "compliant" label anywhere: nothing in a run verifies passkey use, policy scope, or a successful sign-in.
+
+### Privileged-account discovery
+
+`Get-PrivilegedUserSet` decides who is held out of the actionable exports. Detection is by role assignment only — never a naming pattern. It reads, all GET through `Get-GraphCollection`:
+
+- `/roleManagement/directory/roleAssignments` — active roles, direct or via a group (expanded with `transitiveMembers`).
+- `/roleManagement/directory/roleEligibilityScheduleInstances` — PIM-eligible roles.
+- `/identityGovernance/privilegedAccess/group/eligibilityScheduleInstances?$filter=groupId eq '…'` — PIM for Groups eligibility, member or owner, per group found holding a role, and only when such a group exists.
+
+It returns `Complete` and `Gaps` alongside the set. **An incomplete read is never an empty list.** The failure policy lives in one place in the Execution section: if `Complete` is false, neither targeting export is written, any stale file of either name is deleted, the related summary counts are `$null` (not 0), and every row's `PrivilegeSource` reads `(not determined)`. The assessment CSV, action list, tickets and HTML are still written. A 404 on a group expansion is an answer (the principal was not a group), not a gap; an empty eligibility collection is an answer too.
+
+`IsAdmin` (from the registration report) still drives risk scoring and is untouched by this; do not merge the two.
 
 ### Output hardening
 
-`Protect-CsvInjection` and `ConvertTo-SafeHtml` guard against attacker-influenceable display names reaching a file somebody else opens; both fail silently if broken, so both want a test with any change. `Protect-OutputFile` ACL-locks output to the owner (`-SkipAclHardening` opts out, used by the tests).
+`Protect-CsvInjection` and `ConvertTo-SafeHtml` guard against attacker-influenceable display names reaching a file somebody else opens; both fail silently if broken, so both want a test with any change. `Protect-OutputFile` ACL-locks output to the owner (`-SkipAclHardening` opts out, used by the tests). `Export-AssessmentCsv -HeaderWhenEmpty` writes a header-only file for an empty collection, because `Export-Csv` alone writes a bare byte-order mark.
 
 One asymmetry worth knowing: report CSVs get formula-prefix neutralization on the way out, but the *tenant list* the sweep reads back is an input, so a name that would open as a formula is rejected at entry in the GUI instead.
 
@@ -117,6 +149,10 @@ The assessment is a script, not a module — dot-sourcing it would run the Execu
 Graph is mocked by defining `Invoke-GraphGet` and `Get-GraphCollection` in the test scope — PowerShell resolves functions dynamically, so the lifted function calls the stub. See `tests/PolicyScope.Tests.ps1`.
 
 `tests/EndToEnd.Tests.ps1` is different: it runs the whole script in a child `pwsh` against a stub Graph module and captures stdout, the CSVs and the summary JSON. Use it to assert console lines and cross-file consistency.
+
+Role and PIM reads are stubbed the same way; `New-GraphError` builds an exception carrying a status code, which matters because the code tells a 404 (an answer) from a 403 (a gap). The end-to-end stub tenant is deliberately mixed — direct, group-derived, PIM-eligible and PIM-for-Groups-eligible privilege, a passkey holder with a role, a no-phone no-passkey user, a user missing from the report — and a second end-to-end run refuses the role reads to prove the exports are withheld.
+
+**Do not reassign shared `$script:` fixtures inside an `It`.** It leaks into later `Describe` blocks, where assertions then pass or fail by luck.
 
 **Pester v5+ scoping bites here.** Functions dot-sourced in `BeforeAll` are not visible inside `It` bodies, and neither are path helpers. Resolve what an `It` needs into `$script:` variables in `BeforeAll`.
 
@@ -139,6 +175,7 @@ The samples are also where behavioural distinctions are made visible before anyb
 These are the recurring failure modes in this repository; most have a test guarding them now.
 
 - **A numerator and denominator drawn from different populations.** Risk-band counts run over `$candidateRows` (migration candidates, excluding `Excluded`); tenant-wide figures run over `$rows` (every enabled user). Mixing them reported a tenant as further behind than it was. Name the population in the field name and assert which variable the expression reads.
+- **A failed read is not an empty answer.** The same idea as the next item, one level up: a refused or partial Graph read must surface as a gap and withhold what depends on it, never fall through as zero results.
 - **Unknown is not absent.** A user with no row in the registration report has an *unknown* state, not an empty one. Those rows read `(no row in registration report)` and are counted in `UsersMissingFromReport`, never folded into a "does not have X" figure.
 - **Dates that pass.** The deadlines are hardcoded and the code branches on the current date, so a test can pass the day it is written and fail months later with no commit to blame. Crossing 2026-09-01 broke the sample-reproducibility check. CI therefore runs weekly (`cron: '17 6 * * 1'`) as well as on push. When adding date-dependent wording, thread an injectable clock (`-Now`) through the function rather than calling `Get-Date` inside it, so tests and samples are reproducible.
 - **Paginating forever.** `Get-GraphCollection` tracks seen `@odata.nextLink` values in a `HashSet` and throws on a repeat, plus a `-MaxPages` ceiling.
