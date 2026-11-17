@@ -96,7 +96,10 @@
       Policy.Read.All, AuditLog.Read.All, User.Read.All, GroupMember.Read.All
 
     Recommended least-privileged Entra role for the signed-in operator:
-      Global Reader or Security Reader
+      Global Reader. Security Reader works unless a group holds a directory role: Microsoft
+      requires Global Reader or Privileged Role Administrator to read PIM for Groups
+      eligibility on a role-assignable group, and a refused read withholds the
+      actionable no-passkey exports.
 
     Data source limitations:
       - userRegistrationDetails does not return disabled users. This script reads
@@ -485,6 +488,15 @@ function Connect-AssessmentGraph {
         # RoleEligibilitySchedule.Read.Directory would otherwise be a second consent item
         # for the same question. Read-only, and it grants nothing over any other object.
         'RoleManagement.Read.Directory'
+
+        # PIM for Groups: who is ELIGIBLE to become a member or owner of a group that holds
+        # a directory role. Microsoft documents this as the least-privileged permission for
+        # /identityGovernance/privilegedAccess/group/eligibilityScheduleInstances, and no
+        # scope already requested satisfies that endpoint. Read-only. For role-assignable
+        # groups the signed-in user must also be Global Reader or Privileged Role
+        # Administrator -- Security Reader alone is refused, and a refusal withholds the
+        # actionable exports rather than guessing.
+        'PrivilegedEligibilitySchedule.Read.AzureADGroup'
     )
 
     if ($script:IsAppOnly) {
@@ -981,7 +993,12 @@ function Get-PrivilegeReadHint {
     # "Forbidden" in a warning tells nobody which consent is missing, and this warning is
     # the thing standing between a run and a published campaign list, so it has to say what
     # to fix.
-    param([Parameter(Mandatory)]$ErrorRecord)
+    param(
+        [Parameter(Mandatory)]$ErrorRecord,
+        # The consent the failed read needs, so the message names the right one.
+        [string]$Scope = 'RoleManagement.Read.Directory',
+        [string]$RoleNote = 'Global Reader or Security Reader can'
+    )
 
     $status = $null
     $responseProperty = $ErrorRecord.Exception.PSObject.Properties['Response']
@@ -990,8 +1007,8 @@ function Get-PrivilegeReadHint {
     $message = [string]$ErrorRecord.Exception.Message
 
     switch ($status) {
-        401 { return "$message -- the sign-in is not authorized for this read. Reconnect and consent to RoleManagement.Read.Directory." }
-        403 { return "$message -- RoleManagement.Read.Directory was not consented, or the signed-in role cannot read directory roles. Global Reader or Security Reader can; a Global Administrator may need to grant admin consent for the scope first." }
+        401 { return "$message -- the sign-in is not authorized for this read. Reconnect and consent to $Scope." }
+        403 { return "$message -- $Scope was not consented, or the signed-in role cannot make this read. $RoleNote; a Global Administrator may need to grant admin consent for the scope first." }
         404 { return "$message -- the endpoint was not found, which usually means this cloud or tenant does not expose it." }
         default {
             if ($status) { return "$message (HTTP $status)" }
@@ -1026,15 +1043,14 @@ function Get-PrivilegedUserSet {
     #            its enabled user members.
     #   Covered  PIM-eligible directory roles held directly by a user.
     #            /roleManagement/directory/roleEligibilityScheduleInstances
-    #   NOT      PIM for Groups: a user who is merely *eligible* to become a member of a
-    #   covered  role-assigned group. That lives under
-    #            /identityGovernance/privilegedAccess/group/eligibilityScheduleInstances and
-    #            needs PrivilegedEligibilitySchedule.Read.AzureADGroup, a scope this tool
-    #            does not request. It is a standing, declared limitation rather than a
-    #            failed read, so it is named everywhere the counts are shown and does not by
-    #            itself withhold the exports -- withholding them forever on a path that can
-    #            never be read with the permissions this tool asks for would leave the
-    #            feature unusable rather than safe.
+    #   Covered  PIM for Groups: a user eligible to become a member OR owner of any group
+    #            found holding a role above. Needs its own read-only scope,
+    #            PrivilegedEligibilitySchedule.Read.AzureADGroup, and for role-assignable
+    #            groups a Global Reader or Privileged Role Administrator sign-in.
+    #            /identityGovernance/privilegedAccess/group/eligibilityScheduleInstances
+    #
+    # Any of these reads failing withholds the actionable exports. Nothing is assumed
+    # nonprivileged because a read was refused.
     param(
         # Bounds the result to users this run actually assessed: a role assigned to a
         # service principal, a disabled account, or a deleted object is not a row in any
@@ -1049,6 +1065,8 @@ function Get-PrivilegedUserSet {
     $privileged = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     $sources = @{}
     $gaps = [System.Collections.Generic.List[string]]::new()
+    $roleGroups = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $groupQueue = [System.Collections.Generic.Queue[string]]::new()
 
     # Records how each user was found, so the assessment row can say why a name was held
     # back rather than leaving the operator to guess. A user found twice keeps both labels
@@ -1087,6 +1105,11 @@ function Get-PrivilegedUserSet {
             $gaps.Add("Members of role-holding group $PrincipalId could not be read: $(Get-PrivilegeReadHint -ErrorRecord $_)")
             return
         }
+
+        # Reached only when the principal really was a group. Remembered so its PIM for
+        # Groups eligibility can be read below: somebody eligible to JOIN this group is one
+        # activation away from the role it carries.
+        if (-not $roleGroups.Contains($PrincipalId)) { [void]$roleGroups.Add($PrincipalId); $groupQueue.Enqueue($PrincipalId) }
 
         foreach ($member in $members) {
             $memberId = [string](Get-PropertyValue $member 'id')
@@ -1143,6 +1166,44 @@ function Get-PrivilegedUserSet {
         $gaps.Add("PIM role eligibility could not be read: $(Get-PrivilegeReadHint -ErrorRecord $_)")
     }
 
+    # --- PIM for Groups. For every group found holding a role above, active or eligible:
+    #     who is eligible to become its member or owner. Read per group because the endpoint
+    #     requires a groupId or principalId filter, and only for role-holding groups, so a
+    #     tenant with no role-assigned groups makes no call here and cannot fail here.
+    #
+    #     Eligible OWNERS are held back too. Whether an owner of a role-assignable group can
+    #     always add themselves as a member is not something to settle by assumption on the
+    #     path that decides who is safe to bulk-target, so the conservative reading is taken:
+    #     reliably identifiable, one activation from control of a role-holding group, out.
+    #
+    #     A worklist rather than a loop, because an eligible principal can itself be a group,
+    #     whose own members and eligibilities then matter in turn. $roleGroups stops a cycle.
+    while ($groupQueue.Count -gt 0) {
+        $groupId = $groupQueue.Dequeue()
+        try {
+            $instances = Get-GraphCollection -Uri "$script:GraphBase/identityGovernance/privilegedAccess/group/eligibilityScheduleInstances?`$filter=groupId eq '$([uri]::EscapeDataString($groupId))'"
+            foreach ($instance in $instances) {
+                $principalId = [string](Get-PropertyValue $instance 'principalId')
+                if ([string]::IsNullOrWhiteSpace($principalId)) {
+                    $gaps.Add("A PIM for Groups eligibility on group $groupId was returned with no principalId and could not be attributed")
+                    continue
+                }
+                if (-not (Test-AssignmentWindowActive -Record $instance -Now $Now)) { continue }
+
+                $access = [string](Get-PropertyValue $instance 'accessId')
+                $label = if ($access -eq 'owner') { 'PIM for Groups eligible owner of role-holding group' } else { 'PIM for Groups eligible member of role-holding group' }
+
+                if ($EnabledUserIndex.ContainsKey($principalId)) { & $noteSource $principalId $label }
+                else { & $expandGroup $principalId $label }
+            }
+        }
+        catch {
+            $hint = Get-PrivilegeReadHint -ErrorRecord $_ -Scope 'PrivilegedEligibilitySchedule.Read.AzureADGroup' `
+                -RoleNote 'For role-assignable groups Microsoft requires Global Reader or Privileged Role Administrator; Security Reader alone is refused'
+            $gaps.Add("PIM for Groups eligibility for role-holding group $groupId could not be read: $hint")
+        }
+    }
+
     return [PSCustomObject]@{
         UserIds  = $privileged
         Sources  = $sources
@@ -1153,7 +1214,7 @@ function Get-PrivilegedUserSet {
         Gaps     = @($gaps)
         # Stated on every run, complete or not, because it changes what "nonprivileged"
         # means in a filename.
-        CoverageNote = 'Covers active directory roles held directly or through a role-assignable group, and directly held PIM-eligible roles. Does NOT cover PIM for Groups eligibility (a user eligible to join a role-assigned group), which needs a scope this tool does not request.'
+        CoverageNote = 'Covers directory roles held directly or through a group, active or PIM-eligible, and PIM for Groups eligibility (member or owner) on any group holding a role. Outside this definition: standing owners of a role-holding group, and roles scoped by anything other than Microsoft Entra directory role assignment (Azure RBAC, app roles).'
     }
 }
 
@@ -2267,7 +2328,10 @@ function Get-NoPasskeyCandidate {
     # why it would be held back from an actionable export. Two files are built from this
     # one function so their counts cannot diverge:
     #
-    #   -RequirePhoneMethod off  every known user without a passkey. The honest size of the
+    #   -RequirePhoneMethod off  known, enabled, in-scope users without a registered passkey
+    #                            (privileged ones tagged for the caller to hold back). Not
+    #                            "everyone without a passkey": unknown registration status and
+    #                            pattern-excluded users are outside it. The honest size of the
     #                            passkey rollout.
     #   -RequirePhoneMethod on   the subset who also hold a retiring phone method. The
     #                            registration-campaign targeting list, and a strict subset
@@ -3654,7 +3718,11 @@ Write-Host "Action list ($($actionListRows.Count) users, attach this to a ticket
 # The two actionable no-passkey exports, written on every run for the same reason the action
 # list is: both are derived from rows already in memory and cost no Graph call.
 #
-#   <stem>_NoPasskey_Nonprivileged.csv       every known user without a passkey.
+#   <stem>_NoPasskey_Nonprivileged.csv       known, enabled, in-scope nonprivileged users
+#                                            without a registered passkey. NOT everyone
+#                                            without one: users with unknown registration
+#                                            status, privileged users and pattern-excluded
+#                                            users are outside it, each counted elsewhere.
 #   <stem>_SmsVoiceUsers_NoPasskey.csv       the subset who also hold a retiring phone
 #                                            method -- the campaign targeting list.
 #

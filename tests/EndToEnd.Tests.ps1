@@ -30,7 +30,7 @@ function Get-MgContext {
     [PSCustomObject]@{
         TenantId = 'c0ffee00-1111-4222-8333-444455556666'
         Account  = 'analyst@fabrikam-example.com'
-        Scopes   = @('Policy.Read.All','AuditLog.Read.All','User.Read.All','GroupMember.Read.All','RoleManagement.Read.Directory')
+        Scopes   = @('Policy.Read.All','AuditLog.Read.All','User.Read.All','GroupMember.Read.All','RoleManagement.Read.Directory','PrivilegedEligibilitySchedule.Read.AzureADGroup')
     }
 }
 
@@ -41,7 +41,7 @@ function Get-MgContext {
 $script:LegacyMfaState = @{
     'u-admin'  = 'disabled'; 'u-member' = 'disabled'; 'u-safe' = 'disabled'
     'u-legacy' = 'enforced'; 'u-clear'  = 'enabled';  'u-svc'  = 'disabled'
-    'u-fine'   = 'disabled'
+    'u-fine'   = 'disabled'; 'u-nophone' = 'disabled'; 'u-pimgroup' = 'disabled'
 }
 $script:ThrottledOnce = @{}
 
@@ -100,6 +100,13 @@ function Invoke-MgGraphRequest {
             [PSCustomObject]@{ id='u-clear'; signInActivity=(& $act $recent);  displayName='Out Of Scope'; userPrincipalName='clear@fabrikam-example.com';  userType='Member'; accountEnabled=$true }
             [PSCustomObject]@{ id='u-svc';    displayName='Service Account - Scanner'; userPrincipalName='svc-scanner@fabrikam-example.com'; userType='Member'; accountEnabled=$true; signInActivity=(& $act $stale) }
             [PSCustomObject]@{ id='u-fine'; signInActivity=(& $act $recent);   displayName='Perfectly Fine'; userPrincipalName='fine@fabrikam-example.com'; userType='Member'; accountEnabled=$true }
+            # The acceptance shape for the wider export: enabled, nonprivileged, a known
+            # registration row, no passkey and NO phone method. On the no-passkey list, off
+            # the SMS/voice list.
+            [PSCustomObject]@{ id='u-nophone'; signInActivity=(& $act $recent); displayName='Tobias Lindqvist'; userPrincipalName='tobias@fabrikam-example.com'; userType='Member'; accountEnabled=$true }
+            # Holds no role and is in no role group today, but is PIM for Groups eligible to
+            # join g-helpdesk, which holds one. One activation from privileged.
+            [PSCustomObject]@{ id='u-pimgroup'; signInActivity=(& $act $recent); displayName='Ingrid Solberg'; userPrincipalName='ingrid@fabrikam-example.com'; userType='Member'; accountEnabled=$true }
             [PSCustomObject]@{ id='u-off';    displayName='Disabled Person'; userPrincipalName='off@fabrikam-example.com';   userType='Member'; accountEnabled=$false }
         )}
     }
@@ -138,6 +145,15 @@ function Invoke-MgGraphRequest {
             [PSCustomObject]@{ principalId='u-member'; roleDefinitionId='b0f54661-2d74-4c50-afa3-1ec803f12efe'
                                startDateTime='2026-01-01T00:00:00Z'; endDateTime='2026-02-01T00:00:00Z' }
         )}
+    }
+    if ($Uri -match '/identityGovernance/privilegedAccess/group/eligibilityScheduleInstances') {
+        if ($Uri -match 'g-helpdesk') {
+            return [PSCustomObject]@{ value = @(
+                [PSCustomObject]@{ principalId='u-pimgroup'; groupId='g-helpdesk'; accessId='member'
+                                   startDateTime='2026-01-01T00:00:00Z'; endDateTime=$null }
+            )}
+        }
+        return [PSCustomObject]@{ value = @() }
     }
     if ($Uri -match '/groups/g-helpdesk/transitiveMembers') {
         return [PSCustomObject]@{ value = @([PSCustomObject]@{ id='u-svc' }) }
@@ -242,6 +258,14 @@ function Invoke-MgGraphRequest {
                                lastUpdatedDateTime='2026-08-17T03:12:44Z' }
             [PSCustomObject]@{ id='u-fine';   isAdmin=$false; isMfaCapable=$true; isMfaRegistered=$true; isPasswordlessCapable=$true
                                methodsRegistered=@('passKeyDeviceBound'); systemPreferredAuthenticationMethods=@()
+                               isSystemPreferredAuthenticationMethodEnabled=$true
+                               lastUpdatedDateTime='2026-08-17T03:12:44Z' }
+            [PSCustomObject]@{ id='u-nophone'; isAdmin=$false; isMfaCapable=$true; isMfaRegistered=$true; isPasswordlessCapable=$false
+                               methodsRegistered=@('softwareOneTimePasscode'); systemPreferredAuthenticationMethods=@('oath')
+                               isSystemPreferredAuthenticationMethodEnabled=$true
+                               lastUpdatedDateTime='2026-08-17T03:12:44Z' }
+            [PSCustomObject]@{ id='u-pimgroup'; isAdmin=$false; isMfaCapable=$true; isMfaRegistered=$true; isPasswordlessCapable=$false
+                               methodsRegistered=@('mobilePhone','microsoftAuthenticatorPush'); systemPreferredAuthenticationMethods=@('push')
                                isSystemPreferredAuthenticationMethodEnabled=$true
                                lastUpdatedDateTime='2026-08-17T03:12:44Z' }
             [PSCustomObject]@{ id='u-svc';    isAdmin=$false; isMfaCapable=$true; isMfaRegistered=$true; isPasswordlessCapable=$false
@@ -632,6 +656,40 @@ Describe 'A default run against a stubbed tenant' {
             $script:Summary.UsersMissingFromReport) | Should -Be $script:Summary.EnabledUsersAssessed
     }
 
+    It 'puts a nonprivileged user with no phone method on the wider export only' {
+        # The acceptance shape: enabled, nonprivileged, a known registration row, no
+        # passkey, no SMS or voice method. Still needs a passkey; was never a campaign target.
+        $campaign = @(Import-Csv -LiteralPath (Join-Path $script:OutDir 'assessment_SmsVoiceUsers_NoPasskey.csv'))
+        $wider = @(Import-Csv -LiteralPath (Join-Path $script:OutDir 'assessment_NoPasskey_Nonprivileged.csv'))
+
+        $tobias = $wider | Where-Object UserPrincipalName -eq 'tobias@fabrikam-example.com'
+        $tobias | Should -Not -BeNullOrEmpty
+        $tobias.PhoneMethodsRegistered | Should -BeExactly ''
+        $tobias.OtherSurvivingMfaMethods | Should -BeExactly 'softwareOneTimePasscode'
+        $campaign.UserPrincipalName | Should -Not -Contain 'tobias@fabrikam-example.com'
+
+        # And the counts: he is in UsersWithoutPasskey and NoPasskeyNonprivileged, and is
+        # exactly the difference between the two files for this tenant's kept rows.
+        $script:Summary.NoPasskeyNonprivileged | Should -Be $wider.Count
+        $script:Summary.CampaignCandidates | Should -Be $campaign.Count
+        @($wider | Where-Object { -not $_.PhoneMethodsRegistered }).UserPrincipalName |
+            Should -Contain 'tobias@fabrikam-example.com'
+        $wider.Count | Should -BeGreaterThan $campaign.Count
+    }
+
+    It 'holds back a user who is only PIM for Groups eligible for a role-holding group' {
+        # u-pimgroup holds no role and is in no role group today. Eligible to join
+        # g-helpdesk, which holds one, so one activation from privileged -- and off both lists.
+        $campaign = @(Import-Csv -LiteralPath (Join-Path $script:OutDir 'assessment_SmsVoiceUsers_NoPasskey.csv'))
+        $wider = @(Import-Csv -LiteralPath (Join-Path $script:OutDir 'assessment_NoPasskey_Nonprivileged.csv'))
+        $assessment = @(Import-Csv -LiteralPath $script:CsvPath)
+
+        $campaign.UserPrincipalName | Should -Not -Contain 'ingrid@fabrikam-example.com'
+        $wider.UserPrincipalName | Should -Not -Contain 'ingrid@fabrikam-example.com'
+        ($assessment | Where-Object UserPrincipalName -eq 'ingrid@fabrikam-example.com').PrivilegeSource |
+            Should -BeExactly 'PIM for Groups eligible member of role-holding group'
+    }
+
     It 'reports the two omitted counts separately, and they can differ' {
         $script:Summary.PrivilegeDiscoveryComplete | Should -BeTrue
         $script:Summary.NoPasskeyPrivilegedOmitted | Should -BeGreaterThan 0
@@ -658,7 +716,7 @@ Describe 'A default run against a stubbed tenant' {
         $script:StdOut | Should -Match 'NOT lower risk'
         $script:StdOut | Should -Match 'Work those by hand'
         # And names the coverage limit rather than implying the detection is total.
-        $script:StdOut | Should -Match 'PIM for Groups'
+        $script:StdOut | Should -Match 'PIM for Groups eligibility \(member or owner\)'
     }
 
     It 'names the files from the customer when -OutputPath is not given' {

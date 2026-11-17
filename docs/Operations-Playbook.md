@@ -136,7 +136,7 @@ Two files are written on every run, and they answer different questions:
 
 | File | Use it for |
 |---|---|
-| `<stem>_NoPasskey_Nonprivileged.csv` | Sizing the rollout. Every known user without a passkey. |
+| `<stem>_NoPasskey_Nonprivileged.csv` | Sizing the actionable rollout. Known, enabled, in-scope nonprivileged users without a registered passkey — not everyone without one: unknown registration status, privileged users and pattern-excluded users are outside it and counted separately. |
 | `<stem>_SmsVoiceUsers_NoPasskey.csv` | Building the first campaign group. The subset who also hold a phone method. |
 
 The second is a strict subset of the first. Quoting the SMS/voice number as "users without passkeys" understates the work, sometimes badly.
@@ -148,9 +148,9 @@ Two readings to avoid in a client conversation, because both are wrong and both 
 
 **Both files are nonprivileged users only.** Directory-role holders are omitted and counted separately, because they are a hand-worked track. Say this plainly to a client, because the natural reading is the wrong one: omission is deferral, not safety — a privileged account without a passkey is the most exposed row in the tenant. Work those from the assessment CSV, filtering on `PrivilegeSource`.
 
-Detection covers active roles held directly or through a role-assignable group, and directly held PIM-eligible roles. It does **not** cover PIM for Groups eligibility, which needs a scope this tool does not request. If that is how the tenant grants roles, review the omitted population by hand first.
+Detection covers directory roles held directly or through a group, active or PIM-eligible, and PIM for Groups eligibility (member or owner) on any group holding a role. Sign in as **Global Reader**: Security Reader is refused the PIM for Groups read on role-assignable groups, and a refused read withholds the lists rather than guessing. Standing owners of a role-holding group, and privilege outside Entra directory roles (Azure RBAC, app roles), are outside the definition.
 
-**If the privilege read fails, no targeting list is produced at all** — the assessment, action list and report still are. The console names the failing read and the consent to grant (`RoleManagement.Read.Directory`). Do not work around it by reading an earlier export: the tool deletes a stale one for exactly that reason. Get the consent, re-run.
+**If the privilege read fails, no targeting list is produced at all** — the assessment, action list and report still are. The console names the failing read and the consent to grant (`RoleManagement.Read.Directory` or `PrivilegedEligibilitySchedule.Read.AzureADGroup`) or the role to sign in with. Do not work around it by reading an earlier export: the tool deletes a stale one for exactly that reason. Get the consent, re-run.
 
 The work after the file is manual and stays manual: review it, create the security group, add the members, confirm passkeys are enabled and the users are inside that policy's scope, then configure the registration campaign. This tool writes nothing to a tenant.
 

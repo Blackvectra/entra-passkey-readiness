@@ -66,6 +66,9 @@ Describe 'Privilege detection reads role assignments, never names' {
         $script:FailAssignments = $null
         $script:FailEligibility = $null
         $script:FailGroups = @{}
+        $script:GroupEligibility = @{}
+        $script:FailGroupEligibility = @{}
+        $script:GroupEligibilityCalls = 0
 
         function Get-GraphCollection {
             param([string]$Uri)
@@ -77,6 +80,13 @@ Describe 'Privilege detection reads role assignments, never names' {
             if ($Uri -match '/roleManagement/directory/roleEligibilityScheduleInstances') {
                 if ($script:FailEligibility) { throw $script:FailEligibility }
                 return $script:Eligibility
+            }
+            if ($Uri -match "privilegedAccess/group/eligibilityScheduleInstances\?\`$filter=groupId eq '([^']+)'") {
+                $groupId = $Matches[1]
+                $script:GroupEligibilityCalls++
+                if ($script:FailGroupEligibility.ContainsKey($groupId)) { throw $script:FailGroupEligibility[$groupId] }
+                if ($script:GroupEligibility.ContainsKey($groupId)) { return @($script:GroupEligibility[$groupId]) }
+                return @()
             }
             if ($Uri -match '/groups/([^/]+)/transitiveMembers') {
                 $groupId = $Matches[1]
@@ -157,17 +167,17 @@ Describe 'Privilege detection reads role assignments, never names' {
 
     It 'does not make a user privileged for having admin in their name' {
         # The whole point of reading assignments. Both of these hold no role.
-        $script:Users = @{ 'admin-reception@contoso-example.com' = 1; 'u-administrator' = 1 }
-        $result = Get-PrivilegedUserSet -EnabledUserIndex $script:Users -Now $script:Now
+        $localUsers = @{ 'admin-reception@contoso-example.com' = 1; 'u-administrator' = 1 }
+        $result = Get-PrivilegedUserSet -EnabledUserIndex $localUsers -Now $script:Now
 
         $result.Complete | Should -BeTrue
         $result.Count | Should -Be 0
     }
 
     It 'detects a privileged user whose name looks ordinary' {
-        $script:Users = @{ 'u-break-glass' = 1 }
+        $localUsers = @{ 'u-break-glass' = 1 }
         $script:Assignments = @([PSCustomObject]@{ principalId = 'u-break-glass'; roleDefinitionId = '62e90394-69f5-4237-9190-012177145e10' })
-        $result = Get-PrivilegedUserSet -EnabledUserIndex $script:Users -Now $script:Now
+        $result = Get-PrivilegedUserSet -EnabledUserIndex $localUsers -Now $script:Now
         $result.UserIds.Contains('u-break-glass') | Should -BeTrue
     }
 
@@ -182,11 +192,115 @@ Describe 'Privilege detection reads role assignments, never names' {
     }
 
     It 'matches a principal id whatever case it came back in' {
-        $script:Users = @{ 'U-Direct' = 1 }
+        $localUsers = @{ 'U-Direct' = 1 }
         $script:Assignments = @([PSCustomObject]@{ principalId = 'u-DIRECT'; roleDefinitionId = 'role-a' })
         # The index lookup is the production one; the set is case-insensitive either way.
-        $result = Get-PrivilegedUserSet -EnabledUserIndex $script:Users -Now $script:Now
+        $result = Get-PrivilegedUserSet -EnabledUserIndex $localUsers -Now $script:Now
         $result.UserIds.Contains('u-direct') | Should -BeTrue
+    }
+}
+
+Describe 'PIM for Groups eligibility on a role-holding group is privilege' {
+
+    BeforeEach {
+        $script:Assignments = @([PSCustomObject]@{ principalId = 'g-helpdesk'; roleDefinitionId = 'role-a' })
+        $script:Eligibility = @()
+        $script:GroupMembers = @{ 'g-helpdesk' = @('u-grouped') }
+        $script:FailAssignments = $null; $script:FailEligibility = $null
+        $script:FailGroups = @{}; $script:GroupEligibility = @{}; $script:FailGroupEligibility = @{}
+        $script:GroupEligibilityCalls = 0
+
+        function Get-GraphCollection {
+            param([string]$Uri)
+            if ($Uri -match '/roleManagement/directory/roleAssignments') { return $script:Assignments }
+            if ($Uri -match '/roleManagement/directory/roleEligibilityScheduleInstances') { return $script:Eligibility }
+            if ($Uri -match "privilegedAccess/group/eligibilityScheduleInstances\?\`$filter=groupId eq '([^']+)'") {
+                $groupId = $Matches[1]
+                $script:GroupEligibilityCalls++
+                if ($script:FailGroupEligibility.ContainsKey($groupId)) { throw $script:FailGroupEligibility[$groupId] }
+                if ($script:GroupEligibility.ContainsKey($groupId)) { return @($script:GroupEligibility[$groupId]) }
+                return @()
+            }
+            if ($Uri -match '/groups/([^/]+)/transitiveMembers') {
+                $groupId = $Matches[1]
+                if ($script:GroupMembers.ContainsKey($groupId)) {
+                    return @($script:GroupMembers[$groupId] | ForEach-Object { [PSCustomObject]@{ id = $_ } })
+                }
+                throw (New-GraphError -Status 404 -Message 'Request_ResourceNotFound')
+            }
+            throw "Unexpected URI: $Uri"
+        }
+    }
+
+    It 'classifies a user eligible to join a role-holding group as privileged' {
+        $script:GroupEligibility['g-helpdesk'] = @([PSCustomObject]@{ principalId = 'u-plain'; accessId = 'member'; startDateTime = '2026-01-01T00:00:00Z'; endDateTime = $null })
+        $result = Get-PrivilegedUserSet -EnabledUserIndex $script:Users -Now $script:Now
+
+        $result.Complete | Should -BeTrue
+        $result.UserIds.Contains('u-plain') | Should -BeTrue
+        $result.Sources['u-plain'] | Should -BeExactly 'PIM for Groups eligible member of role-holding group'
+    }
+
+    It 'holds back an eligible owner too, on the conservative reading' {
+        $script:GroupEligibility['g-helpdesk'] = @([PSCustomObject]@{ principalId = 'u-plain'; accessId = 'owner'; startDateTime = $null; endDateTime = $null })
+        $result = Get-PrivilegedUserSet -EnabledUserIndex $script:Users -Now $script:Now
+        $result.Sources['u-plain'] | Should -Match 'eligible owner'
+    }
+
+    It 'reads eligibility on a group that holds only a PIM-eligible role' {
+        $script:Assignments = @()
+        $script:Eligibility = @([PSCustomObject]@{ principalId = 'g-helpdesk'; roleDefinitionId = 'role-a'; startDateTime = $null; endDateTime = $null })
+        $script:GroupEligibility['g-helpdesk'] = @([PSCustomObject]@{ principalId = 'u-plain'; accessId = 'member' })
+        $result = Get-PrivilegedUserSet -EnabledUserIndex $script:Users -Now $script:Now
+        $result.UserIds.Contains('u-plain') | Should -BeTrue
+    }
+
+    It 'follows an eligible principal that is itself a group' {
+        $script:GroupEligibility['g-helpdesk'] = @([PSCustomObject]@{ principalId = 'g-nested'; accessId = 'member' })
+        $script:GroupMembers['g-nested'] = @('u-plain')
+        $result = Get-PrivilegedUserSet -EnabledUserIndex $script:Users -Now $script:Now
+
+        $result.Complete | Should -BeTrue
+        $result.UserIds.Contains('u-plain') | Should -BeTrue
+    }
+
+    It 'ignores an expired or future-dated group eligibility' {
+        $script:GroupEligibility['g-helpdesk'] = @(
+            [PSCustomObject]@{ principalId = 'u-plain'; accessId = 'member'; startDateTime = '2026-01-01T00:00:00Z'; endDateTime = '2026-02-01T00:00:00Z' }
+            [PSCustomObject]@{ principalId = 'u-pim'; accessId = 'member'; startDateTime = '2027-06-01T00:00:00Z'; endDateTime = $null }
+        )
+        $result = Get-PrivilegedUserSet -EnabledUserIndex $script:Users -Now $script:Now
+        $result.UserIds.Contains('u-plain') | Should -BeFalse
+        $result.UserIds.Contains('u-pim') | Should -BeFalse
+    }
+
+    It 'counts a user who is both an active member and eligible once' {
+        $script:GroupEligibility['g-helpdesk'] = @([PSCustomObject]@{ principalId = 'u-grouped'; accessId = 'owner' })
+        $result = Get-PrivilegedUserSet -EnabledUserIndex $script:Users -Now $script:Now
+        $result.Count | Should -Be 1
+    }
+
+    It 'reports incomplete when a group''s eligibility cannot be read, naming the consent and the role' {
+        $script:FailGroupEligibility['g-helpdesk'] = New-GraphError -Status 403 -Message 'Authorization_RequestDenied'
+        $result = Get-PrivilegedUserSet -EnabledUserIndex $script:Users -Now $script:Now
+
+        $result.Complete | Should -BeFalse
+        ($result.Gaps -join ' ') | Should -Match 'PIM for Groups eligibility for role-holding group g-helpdesk could not be read'
+        ($result.Gaps -join ' ') | Should -Match 'PrivilegedEligibilitySchedule\.Read\.AzureADGroup'
+        ($result.Gaps -join ' ') | Should -Match 'Global Reader or Privileged Role Administrator'
+    }
+
+    It 'reports incomplete for a group eligibility with no principal' {
+        $script:GroupEligibility['g-helpdesk'] = @([PSCustomObject]@{ principalId = ''; accessId = 'member' })
+        (Get-PrivilegedUserSet -EnabledUserIndex $script:Users -Now $script:Now).Complete | Should -BeFalse
+    }
+
+    It 'makes no PIM for Groups call in a tenant where no group holds a role' {
+        # So a tenant with only directly assigned roles cannot fail on this read.
+        $script:Assignments = @([PSCustomObject]@{ principalId = 'u-direct'; roleDefinitionId = 'role-a' })
+        $result = Get-PrivilegedUserSet -EnabledUserIndex $script:Users -Now $script:Now
+        $result.Complete | Should -BeTrue
+        $script:GroupEligibilityCalls | Should -Be 0
     }
 }
 
@@ -236,6 +350,9 @@ Describe 'Incomplete discovery is never silently nonprivileged' {
         $script:FailAssignments = $null
         $script:FailEligibility = $null
         $script:FailGroups = @{}
+        $script:GroupEligibility = @{}
+        $script:FailGroupEligibility = @{}
+        $script:GroupEligibilityCalls = 0
 
         function Get-GraphCollection {
             param([string]$Uri)
@@ -246,6 +363,13 @@ Describe 'Incomplete discovery is never silently nonprivileged' {
             if ($Uri -match '/roleManagement/directory/roleEligibilityScheduleInstances') {
                 if ($script:FailEligibility) { throw $script:FailEligibility }
                 return $script:Eligibility
+            }
+            if ($Uri -match "privilegedAccess/group/eligibilityScheduleInstances\?\`$filter=groupId eq '([^']+)'") {
+                $groupId = $Matches[1]
+                $script:GroupEligibilityCalls++
+                if ($script:FailGroupEligibility.ContainsKey($groupId)) { throw $script:FailGroupEligibility[$groupId] }
+                if ($script:GroupEligibility.ContainsKey($groupId)) { return @($script:GroupEligibility[$groupId]) }
+                return @()
             }
             if ($Uri -match '/groups/([^/]+)/transitiveMembers') {
                 $groupId = $Matches[1]
@@ -335,10 +459,9 @@ Describe 'Incomplete discovery is never silently nonprivileged' {
 
     It 'states its coverage on every run, complete or not' {
         $result = Get-PrivilegedUserSet -EnabledUserIndex $script:Users -Now $script:Now
-        # PIM for Groups eligibility is a declared, permanent limitation rather than a
-        # failed read, and must be named rather than left to be assumed covered.
-        $result.CoverageNote | Should -Match 'PIM for Groups'
-        $result.CoverageNote | Should -Match 'does NOT cover'
+        $result.CoverageNote | Should -Match 'PIM for Groups eligibility \(member or owner\)'
+        # What is outside the definition is named rather than left to be assumed covered.
+        $result.CoverageNote | Should -Match 'Outside this definition'
     }
 }
 
@@ -556,8 +679,10 @@ Describe 'The script applies one documented failure policy' {
         }
     }
 
-    It 'requests exactly one additional read scope for this' {
+    It 'requests exactly two additional read scopes for this, and no write scope' {
         $script:Text | Should -Match "'RoleManagement\.Read\.Directory'"
+        $script:Text | Should -Match "'PrivilegedEligibilitySchedule\.Read\.AzureADGroup'"
+        $script:Text | Should -Not -Match "'PrivilegedEligibilitySchedule\.ReadWrite\.AzureADGroup'"
         # Not the write scope, and not the broader directory read.
         $script:Text | Should -Not -Match "'RoleManagement\.ReadWrite\.Directory'"
         $script:Text | Should -Not -Match "'Directory\.Read\.All'"

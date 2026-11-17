@@ -92,7 +92,7 @@ Microsoft publishes [entra-sms-voice-usage-analyzer](https://github.com/microsof
 
 | | Microsoft's analyzer | This tool |
 |---|---|---|
-| Graph scopes | `Policy.Read.All`, `Group.Read.All` | `Policy.Read.All`, `AuditLog.Read.All`, `User.Read.All`, `GroupMember.Read.All`, `RoleManagement.Read.Directory` |
+| Graph scopes | `Policy.Read.All`, `Group.Read.All` | `Policy.Read.All`, `AuditLog.Read.All`, `User.Read.All`, `GroupMember.Read.All`, `RoleManagement.Read.Directory`, `PrivilegedEligibilitySchedule.Read.AzureADGroup` |
 | Modules required | 3 | 1 |
 | Resolves group targets to users | No | Yes, transitively |
 | Reads registration report | No | Yes |
@@ -143,7 +143,7 @@ Treat `Jan 28, 2027` as an artefact of Microsoft's analyzer rather than a publis
 |---|---|
 | PowerShell | 7.0 or later (enforced by `#Requires`) |
 | Module | `Microsoft.Graph.Authentication` (this is the only dependency) |
-| Entra role | Global Reader or Security Reader |
+| Entra role | Global Reader. Security Reader works for everything except one read: if any group holds a directory role, Microsoft requires Global Reader (or Privileged Role Administrator) to read that group's PIM for Groups eligibility, and without it the actionable exports are withheld. |
 | Network | Access to `graph.microsoft.com` |
 
 > [!IMPORTANT]
@@ -151,7 +151,7 @@ Treat `Jan 28, 2027` as an artefact of Microsoft's analyzer rather than a publis
 
 ### Delegated Graph permissions
 
-All five scopes are read-only. The script requests them at connect time and will not proceed without them.
+All six scopes are read-only. The script requests them at connect time and will not proceed without them.
 
 You do not need to run `Connect-MgGraph` yourself. The script connects if there is no usable session, reuses an existing one only after checking that its tenant and scopes match, and aborts rather than assess the wrong customer if an explicit `-TenantId` disagrees with the live context. It prints the connected tenant and the signed-in account before it reads anything.
 
@@ -161,9 +161,10 @@ You do not need to run `Connect-MgGraph` yourself. The script connects if there 
 | `AuditLog.Read.All` | `reports/authenticationMethods/userRegistrationDetails` |
 | `User.Read.All` | User objects, `accountEnabled`, `userType` |
 | `GroupMember.Read.All` | Transitive group membership for AMP include/exclude targets, and for role-assignable groups |
+| `PrivilegedEligibilitySchedule.Read.AzureADGroup` | PIM for Groups eligibility on groups that hold a directory role — `/identityGovernance/privilegedAccess/group/eligibilityScheduleInstances`. Microsoft documents this as the least-privileged permission for that endpoint. |
 | `RoleManagement.Read.Directory` | Who holds a Microsoft Entra directory role — `/roleManagement/directory/roleAssignments` and `/roleManagement/directory/roleEligibilityScheduleInstances` — so privileged accounts can be held out of the bulk registration exports. Microsoft documents this as the least-privileged permission for the first endpoint, and it also satisfies the second, so one consent item covers both. |
 
-If your tenant requires admin consent for delegated Graph scopes, have a Global Administrator or Privileged Role Administrator consent to these five before first run.
+If your tenant requires admin consent for delegated Graph scopes, have a Global Administrator or Privileged Role Administrator consent to these six before first run.
 
 ---
 
@@ -244,7 +245,7 @@ If step 5 shows a policy set at `MachinePolicy` or `UserPolicy` scope (Group Pol
 .\Get-EntraSmsVoiceMigrationImpact.ps1
 ```
 
-That is the whole thing. A browser opens, you sign in as Global Reader or Security Reader, and you get two spreadsheets in a folder named for the tenant:
+That is the whole thing. A browser opens, you sign in as Global Reader (Security Reader works unless a group holds a directory role — see [Prerequisites](#prerequisites)), and you get two spreadsheets in a folder named for the tenant:
 
 ```
 reports\Contoso\Contoso_2026-08-18.csv
@@ -485,13 +486,13 @@ Two files, written on every run beside the assessment CSV:
 
 ```powershell
 .\Get-EntraSmsVoiceMigrationImpact.ps1 -CustomerName 'Contoso' -OutputPath C:\Reports\Contoso.csv
-# -> C:\Reports\Contoso_NoPasskey_Nonprivileged.csv    every known user without a passkey
+# -> C:\Reports\Contoso_NoPasskey_Nonprivileged.csv    known, enabled, in-scope nonprivileged users without a registered passkey
 # -> C:\Reports\Contoso_SmsVoiceUsers_NoPasskey.csv     the subset who also hold a phone method
 ```
 
 | File | Answers |
 |---|---|
-| `_NoPasskey_Nonprivileged.csv` | **The honest size of the passkey rollout.** Every enabled, nonprivileged user whose registration could be read and who holds no passkey. |
+| `_NoPasskey_Nonprivileged.csv` | **The actionable size of the passkey rollout.** Known, enabled, in-scope nonprivileged users without a registered passkey. It is **not** everyone without a passkey: users with unknown registration status (`UsersMissingFromReport`), privileged users (the omitted counts) and users excluded by `-ExcludeUpnPattern` are outside it, and each stays visible in the assessment CSV and the summary. |
 | `_SmsVoiceUsers_NoPasskey.csv` | **Who the registration campaign should target first.** The subset of the above who also hold a retiring SMS or voice method. |
 
 The second is a **strict subset** of the first. A user with no phone number and no passkey is in the first file and not the second, and still needs a passkey — so never read the SMS/voice file as the whole no-passkey population.
@@ -543,9 +544,9 @@ Detection is by role assignment only — never from a naming pattern, a job titl
 | ✅ Active role assigned directly to a user | `/roleManagement/directory/roleAssignments` |
 | ✅ Active role assigned to a role-assignable group, expanded transitively to its enabled members | the same, plus `transitiveMembers` |
 | ✅ PIM-eligible directory role held directly by a user | `/roleManagement/directory/roleEligibilityScheduleInstances` |
-| ❌ **PIM for Groups**: a user merely *eligible* to become a member of a role-assigned group | needs `PrivilegedEligibilitySchedule.Read.AzureADGroup`, a scope this tool does not request |
+| ✅ **PIM for Groups**: a user eligible to become a member *or owner* of any group found holding a role (eligible owners are held back on the conservative reading) | `/identityGovernance/privilegedAccess/group/eligibilityScheduleInstances`, read per role-holding group; needs `PrivilegedEligibilitySchedule.Read.AzureADGroup` and, for role-assignable groups, a Global Reader or Privileged Role Administrator sign-in |
 
-That last row is a **standing, declared limitation**, not a failed read. It is named on the console, in the HTML report and here, and it does not withhold the exports — withholding them permanently on a path that can never be read with the permissions this tool asks for would leave the feature unusable rather than safe. If PIM for Groups is how your tenant grants roles, review the omitted population by hand before running a campaign.
+Outside this definition, and said so on the console: standing (non-PIM) owners of a role-holding group, and privilege granted by anything other than a Microsoft Entra directory role assignment, such as Azure RBAC or app roles. The PIM for Groups read is only made when a group actually holds a role, so a tenant with only directly assigned roles never depends on it. **If any of these reads is refused, nobody is assumed nonprivileged: the actionable exports are withheld.**
 
 **If privilege discovery does not complete, neither targeting export is written.** One policy, applied in one place:
 
