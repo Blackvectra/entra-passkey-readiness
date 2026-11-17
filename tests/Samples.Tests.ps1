@@ -26,6 +26,7 @@ BeforeAll {
     $script:Assessment = @(Import-Csv -LiteralPath (Join-Path $script:ExamplesDir 'Example-MigrationImpact.csv'))
     $script:ActionList = @(Import-Csv -LiteralPath (Join-Path $script:ExamplesDir 'Example-ActionList.csv'))
     $script:Tickets = @(Import-Csv -LiteralPath (Join-Path $script:ExamplesDir 'Example-Tickets.csv'))
+    $script:Campaign = @(Import-Csv -LiteralPath (Join-Path $script:ExamplesDir 'Example-SmsVoiceNoPasskey.csv'))
 
     $script:RiskOrder = @{ Critical = 0; High = 1; Moderate = 2; Low = 3; Informational = 4 }
 }
@@ -39,6 +40,23 @@ Describe 'Example-MigrationImpact.csv' {
         }
     }
 
+    It 'shows a passwordless user who holds no passkey' {
+        # The row the PasskeyMethods column exists for, carried in the published sample so
+        # the distinction is visible before anybody runs the tool. Windows Hello sets
+        # Microsoft's isPasswordlessCapable flag and is not a passkey, so a roster built
+        # from that flag would count this user as done.
+        $emeka = $script:Assessment | Where-Object UserPrincipalName -eq 'emeka.osondu@fabrikam-example.com'
+        $emeka | Should -Not -BeNullOrEmpty
+        $emeka.AllMethodsRegistered | Should -Match 'windowsHelloForBusiness'
+        $emeka.IsPasswordlessCapable | Should -Be 'True'
+        $emeka.PasskeyMethods | Should -BeExactly ''
+    }
+
+    It 'names the passkey a holder actually has' {
+        $nadia = $script:Assessment | Where-Object UserPrincipalName -eq 'nadia.ferreira@fabrikam-example.com'
+        $nadia.PasskeyMethods | Should -BeExactly 'passKeyDeviceBound'
+    }
+
     It 'leads with the four columns a reader needs before any detail' {
         $columns = $script:Assessment[0].PSObject.Properties.Name
         $columns[0..3] | Should -Be @('Risk', 'Reason', 'NextStep', 'BlockedAtRetirement')
@@ -46,11 +64,13 @@ Describe 'Example-MigrationImpact.csv' {
 
     It 'stays narrow enough to read in a spreadsheet' {
         # The registration report offers more fields than this. Most were dropped because
-        # none of them changed what anybody did with the file; PreferredMethod is the one
+        # none of them changed what anybody did with the file; PreferredMethod is one
         # exception, since a real tenant showed it answers a question BlockedAtRetirement
-        # does not -- what a safe user's sign-in prompt still defaults to.
+        # does not -- what a safe user's sign-in prompt still defaults to. PasskeyMethods
+        # is the other: who holds a passkey is the rollout's own question, and neither the
+        # risk bands nor IsPasswordlessCapable answers it without over-counting.
         $columns = $script:Assessment[0].PSObject.Properties.Name
-        $columns.Count | Should -BeLessOrEqual 17
+        $columns.Count | Should -BeLessOrEqual 19
         $columns | Should -Not -Contain 'IsMfaCapable'
         $columns | Should -Not -Contain 'RegistrationReportLastUpdatedUtc'
     }
@@ -152,6 +172,48 @@ Describe 'Example-ActionList.csv' {
         $actual = @($script:ActionList | ForEach-Object { $_.SignIn }) | Sort-Object
 
         $actual | Should -Be $expected
+    }
+}
+
+Describe 'Example-SmsVoiceNoPasskey.csv' {
+
+    It 'carries the passwordless user who holds no passkey' {
+        # The row the published sample exists to show. Windows Hello sets Microsoft's
+        # isPasswordlessCapable flag and is not a registered passkey, so a campaign list
+        # built from that flag would leave this user untargeted.
+        $emeka = $script:Campaign | Where-Object UserPrincipalName -eq 'emeka.osondu@fabrikam-example.com'
+        $emeka | Should -Not -BeNullOrEmpty
+        $emeka.OtherSurvivingMfaMethods | Should -Match 'windowsHelloForBusiness'
+    }
+
+    It 'leaves the passkey holders off' {
+        # Read out of the assessment sample rather than from a retyped list of names: a
+        # hardcoded name with a typo in it passes while asserting nothing, and a hardcoded
+        # name that is right still goes stale the moment the fixture changes.
+        $holders = @($script:Assessment | Where-Object { $_.PasskeyMethods }).UserPrincipalName
+        $holders.Count | Should -BeGreaterThan 0
+        foreach ($upn in $holders) {
+            $script:Campaign.UserPrincipalName | Should -Not -Contain $upn
+        }
+    }
+
+    It 'names only users who hold a phone method' {
+        foreach ($row in $script:Campaign) {
+            $row.PhoneMethodsRegistered | Should -Not -BeNullOrEmpty
+        }
+    }
+
+    It 'leaves excluded users off' {
+        $excluded = @($script:Assessment | Where-Object Risk -eq 'Excluded').UserPrincipalName
+        foreach ($upn in $excluded) {
+            $script:Campaign.UserPrincipalName | Should -Not -Contain $upn
+        }
+    }
+
+    It 'is ordered worst band first' {
+        $seen = @($script:Campaign.Risk | ForEach-Object { $script:RiskOrder[$_] })
+        $sorted = @($seen | Sort-Object)
+        $seen | Should -Be $sorted
     }
 }
 
@@ -272,6 +334,7 @@ Describe 'The samples are reproducible' {
         $samples = @(
             'Example-MigrationImpact.csv'
             'Example-ActionList.csv'
+            'Example-SmsVoiceNoPasskey.csv'
             'Example-Tickets.csv'
             'Example-Report.html'
         ) | ForEach-Object { Join-Path $script:ExamplesDir $_ }
