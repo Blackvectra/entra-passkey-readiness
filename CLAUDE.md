@@ -127,8 +127,11 @@ Neither file claims usage (registration only — nothing reads sign-in method) o
 - `/roleManagement/directory/roleAssignments` — active roles, direct or via a group (expanded with `transitiveMembers`).
 - `/roleManagement/directory/roleEligibilityScheduleInstances` — PIM-eligible roles.
 - `/identityGovernance/privilegedAccess/group/eligibilityScheduleInstances?$filter=groupId eq '…'` — PIM for Groups eligibility, member or owner, per group found holding a role, and only when such a group exists.
+- `/groups/{id}/owners` — standing owners, read only for a group that is itself the principal of an active or PIM-eligible role (`$roleHoldingGroups`, narrower than `$roleGroups`, which also holds groups merely eligible to join one). Covered by `GroupMember.Read.All`. This is a **conservative campaign exclusion, not a role**: the source is `RoleHoldingGroupOwner` and nothing may describe it as a role assignment. Owners of unrelated groups are never read and stay on the lists.
 
-It returns `Complete` and `Gaps` alongside the set. **An incomplete read is never an empty list.** The failure policy lives in one place in the Execution section: if `Complete` is false, neither targeting export is written, any stale file of either name is deleted, the related summary counts are `$null` (not 0), and every row's `PrivilegeSource` reads `(not determined)`. The assessment CSV, action list, tickets and HTML are still written. A 404 on a group expansion is an answer (the principal was not a group), not a gap; an empty eligibility collection is an answer too.
+A user with several sources is counted once, labels joined with ` + `. Outside the definition, and said so in `PrivilegeCoverageNote` and on the console: Azure RBAC and app roles. Do not grow this into a general entitlement inventory.
+
+It returns `Complete` and `Gaps` alongside the set. **An incomplete read is never an empty list.** The failure policy lives in one place in the Execution section: if `Complete` is false, neither targeting export is written, any stale file of either name is deleted, the related summary counts are `$null` (not 0), and every row's `PrivilegeSource` reads `(not determined)`. The assessment CSV, action list, tickets and HTML are still written. A 404 on a group expansion is an answer (the principal was not a group), not a gap; an empty eligibility collection is an answer too. A 404 on an owner read *is* a gap, because that group answered moments earlier; so is an owner record with no `id`.
 
 `IsAdmin` (from the registration report) still drives risk scoring and is untouched by this; do not merge the two.
 
@@ -150,7 +153,7 @@ Graph is mocked by defining `Invoke-GraphGet` and `Get-GraphCollection` in the t
 
 `tests/EndToEnd.Tests.ps1` is different: it runs the whole script in a child `pwsh` against a stub Graph module and captures stdout, the CSVs and the summary JSON. Use it to assert console lines and cross-file consistency.
 
-Role and PIM reads are stubbed the same way; `New-GraphError` builds an exception carrying a status code, which matters because the code tells a 404 (an answer) from a 403 (a gap). The end-to-end stub tenant is deliberately mixed — direct, group-derived, PIM-eligible and PIM-for-Groups-eligible privilege, a passkey holder with a role, a no-phone no-passkey user, a user missing from the report — and a second end-to-end run refuses the role reads to prove the exports are withheld.
+Role and PIM reads are stubbed the same way; `New-GraphError` builds an exception carrying a status code, which matters because the code tells a 404 (an answer) from a 403 (a gap). The end-to-end stub tenant is deliberately mixed — direct, group-derived, PIM-eligible and PIM-for-Groups-eligible privilege, a passkey holder with a role, a no-phone no-passkey user, a standing owner of a role-holding group, a user missing from the report — and two more end-to-end runs prove the exports are withheld: one refuses the role reads, the other lets them succeed and refuses only the PIM for Groups read (it also pre-seeds stale export files and checks they are removed).
 
 **Do not reassign shared `$script:` fixtures inside an `It`.** It leaks into later `Describe` blocks, where assertions then pass or fail by luck.
 
