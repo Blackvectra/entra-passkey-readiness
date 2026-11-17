@@ -155,7 +155,10 @@ $directory = @(
     @{ Name = 'Sofia Marchetti'; Upn = 'sofia.marchetti@fabrikam-example.com'
         Type = 'Member'; IsAdmin = $false; Sms = $false; Voice = $false
         Methods = @('mobilePhone'); Passwordless = $false; LegacyMfa = 'disabled'; SignInAge = 4
-        PreferredRaw = 'sms' }
+        PreferredRaw = 'sms'
+        # Holds no directory role, but is a standing owner of a group that does. Held out of
+        # both actionable exports as a conservative campaign exclusion, not as a role holder.
+        Privilege = 'RoleHoldingGroupOwner' }
 
     @{ Name = 'Service Account - Scanner'; Upn = 'svc-scanner@fabrikam-example.com'
         Type = 'Member'; IsAdmin = $false; Sms = $false; Voice = $false

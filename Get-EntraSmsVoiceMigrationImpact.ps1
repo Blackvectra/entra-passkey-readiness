@@ -1049,6 +1049,11 @@ function Get-PrivilegedUserSet {
     #            groups a Global Reader or Privileged Role Administrator sign-in.
     #            /identityGovernance/privilegedAccess/group/eligibilityScheduleInstances
     #
+    #   Held     Standing owners of a group that is itself the principal of an active or
+    #   back     PIM-eligible role. NOT a role assignment and never labeled as one: a
+    #            conservative campaign exclusion, recorded as RoleHoldingGroupOwner.
+    #            /groups/{id}/owners, under the GroupMember.Read.All already requested.
+    #
     # Any of these reads failing withholds the actionable exports. Nothing is assumed
     # nonprivileged because a read was refused.
     param(
@@ -1066,6 +1071,11 @@ function Get-PrivilegedUserSet {
     $sources = @{}
     $gaps = [System.Collections.Generic.List[string]]::new()
     $roleGroups = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    # The narrower set: groups that are themselves the principal of an active or PIM-eligible
+    # directory role assignment. Only these have their standing owners held back. A group
+    # merely eligible to JOIN one of them is followed for eligibility, but its owners are
+    # not read -- that would start widening into owners of owners of anything nearby.
+    $roleHoldingGroups = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     $groupQueue = [System.Collections.Generic.Queue[string]]::new()
 
     # Records how each user was found, so the assessment row can say why a name was held
@@ -1110,6 +1120,7 @@ function Get-PrivilegedUserSet {
         # Groups eligibility can be read below: somebody eligible to JOIN this group is one
         # activation away from the role it carries.
         if (-not $roleGroups.Contains($PrincipalId)) { [void]$roleGroups.Add($PrincipalId); $groupQueue.Enqueue($PrincipalId) }
+        if ($Source -in @('Active role via group', 'PIM-eligible role via group')) { [void]$roleHoldingGroups.Add($PrincipalId) }
 
         foreach ($member in $members) {
             $memberId = [string](Get-PropertyValue $member 'id')
@@ -1180,6 +1191,38 @@ function Get-PrivilegedUserSet {
     #     whose own members and eligibilities then matter in turn. $roleGroups stops a cycle.
     while ($groupQueue.Count -gt 0) {
         $groupId = $groupQueue.Dequeue()
+
+        # Standing owners of a group that holds a directory role. Ownership is NOT a role
+        # assignment and is never described as one; it is a conservative campaign exclusion.
+        # An owner can manage that group's membership, which for a role-holding group is a
+        # short path to the role, and this first campaign would rather leave such accounts to
+        # the hand-worked track than bulk-target one by accident. Owners of unrelated groups
+        # are never read. GroupMember.Read.All, already requested, is the least-privileged
+        # permission Microsoft documents for this read. No $select: on this endpoint any
+        # query parameter but $expand needs advanced-query headers.
+        if ($roleHoldingGroups.Contains($groupId)) {
+            try {
+                $owners = Get-GraphCollection -Uri "$script:GraphBase/groups/$([uri]::EscapeDataString($groupId))/owners"
+                foreach ($owner in $owners) {
+                    $ownerId = [string](Get-PropertyValue $owner 'id')
+                    if ([string]::IsNullOrWhiteSpace($ownerId)) {
+                        $gaps.Add("An owner of role-holding group $groupId was returned with no id and could not be attributed")
+                        continue
+                    }
+                    # A service principal, a disabled user or a deleted object owns nothing
+                    # any export could name, so only this run's enabled users are recorded.
+                    if ($EnabledUserIndex.ContainsKey($ownerId)) { & $noteSource $ownerId 'RoleHoldingGroupOwner' }
+                }
+            }
+            catch {
+                # Including a 404: the group answered a moment ago, so its owners going
+                # missing is a failed read, not an empty one.
+                $hint = Get-PrivilegeReadHint -ErrorRecord $_ -Scope 'GroupMember.Read.All' `
+                    -RoleNote 'Global Reader can read group owners'
+                $gaps.Add("Owners of role-holding group $groupId could not be read: $hint")
+            }
+        }
+
         try {
             $instances = Get-GraphCollection -Uri "$script:GraphBase/identityGovernance/privilegedAccess/group/eligibilityScheduleInstances?`$filter=groupId eq '$([uri]::EscapeDataString($groupId))'"
             foreach ($instance in $instances) {
@@ -1214,7 +1257,7 @@ function Get-PrivilegedUserSet {
         Gaps     = @($gaps)
         # Stated on every run, complete or not, because it changes what "nonprivileged"
         # means in a filename.
-        CoverageNote = 'Covers directory roles held directly or through a group, active or PIM-eligible, and PIM for Groups eligibility (member or owner) on any group holding a role. Outside this definition: standing owners of a role-holding group, and roles scoped by anything other than Microsoft Entra directory role assignment (Azure RBAC, app roles).'
+        CoverageNote = 'Held back: directory roles held directly or through a group, active or PIM-eligible; PIM for Groups eligibility (member or owner) on any group holding a role; and, as a conservative campaign exclusion rather than a role assignment, standing owners of a group that holds an active or PIM-eligible role. Not covered: privilege outside Microsoft Entra directory roles, such as Azure RBAC and app roles.'
     }
 }
 
@@ -3946,7 +3989,10 @@ if (-not $privilegeSet.Complete) {
 }
 else {
     Write-Host ''
-    Write-Host "Privileged accounts: $($privilegeSet.Count) enabled user(s) hold a directory role." -ForegroundColor Cyan
+    # Not "hold a directory role": the set includes standing owners of role-holding groups,
+    # who are held back as a conservative exclusion without holding a role themselves.
+    $ownerOnly = @($privilegeSet.Sources.Values | Where-Object { $_ -eq 'RoleHoldingGroupOwner' }).Count
+    Write-Host "Held back as privileged: $($privilegeSet.Count) enabled user(s), of whom $ownerOnly are held back only for standing ownership of a role-holding group (a conservative exclusion, not a role)." -ForegroundColor Cyan
     Write-Host "  Omitted from the no-passkey export: $($noPasskeyOmitted.Count). Omitted from the SMS/voice campaign list: $($campaignOmitted.Count)." -ForegroundColor Cyan
     Write-Host '  Omitted means handled separately, NOT lower risk and NOT "does not need a passkey" -- a privileged account without one is the most exposed row in the tenant. Work those by hand from the assessment CSV, where PrivilegeSource names why each was held back.' -ForegroundColor Yellow
     Write-Host "  Coverage: $($privilegeSet.CoverageNote)" -ForegroundColor DarkGray

@@ -160,7 +160,7 @@ You do not need to run `Connect-MgGraph` yourself. The script connects if there 
 | `Policy.Read.All` | Authentication Methods Policy (method configuration, campaign and migration state), legacy per-user MFA state, authentication strengths, Conditional Access policies |
 | `AuditLog.Read.All` | `reports/authenticationMethods/userRegistrationDetails` |
 | `User.Read.All` | User objects, `accountEnabled`, `userType` |
-| `GroupMember.Read.All` | Transitive group membership for AMP include/exclude targets, and for role-assignable groups |
+| `GroupMember.Read.All` | Transitive group membership for AMP include/exclude targets and role-holding groups, and the standing owners of role-holding groups (`/groups/{id}/owners`, for which Microsoft documents this as least privileged) |
 | `PrivilegedEligibilitySchedule.Read.AzureADGroup` | PIM for Groups eligibility on groups that hold a directory role — `/identityGovernance/privilegedAccess/group/eligibilityScheduleInstances`. Microsoft documents this as the least-privileged permission for that endpoint. |
 | `RoleManagement.Read.Directory` | Who holds a Microsoft Entra directory role — `/roleManagement/directory/roleAssignments` and `/roleManagement/directory/roleEligibilityScheduleInstances` — so privileged accounts can be held out of the bulk registration exports. Microsoft documents this as the least-privileged permission for the first endpoint, and it also satisfies the second, so one consent item covers both. |
 
@@ -532,6 +532,8 @@ See [examples/Example-NoPasskeyNonprivileged.csv](examples/Example-NoPasskeyNonp
 
 Both files are **nonprivileged users only**. A user holding any Microsoft Entra directory role is omitted and counted separately, because privileged remediation is a hand-worked track: an administrator does not belong in a bulk registration campaign.
 
+One further group is held back **as a conservative campaign exclusion, not as a role holder**: standing owners of a group that itself holds an active or PIM-eligible directory role. An owner can manage that group's membership, which is a short path to the role, so for this first campaign those accounts go to the hand-worked track too. Their `PrivilegeSource` reads `RoleHoldingGroupOwner`, never a role name. Owners of groups that hold no role are not read and stay on the lists.
+
 > [!WARNING]
 > **Omitted is not safe, and not low risk.** A privileged account without a passkey is the most exposed row in the tenant. Omission defers it to a separate workflow; it does not excuse it. Work those by hand from the assessment CSV, where `PrivilegeSource` names why each was held back.
 
@@ -544,9 +546,10 @@ Detection is by role assignment only — never from a naming pattern, a job titl
 | ✅ Active role assigned directly to a user | `/roleManagement/directory/roleAssignments` |
 | ✅ Active role assigned to a role-assignable group, expanded transitively to its enabled members | the same, plus `transitiveMembers` |
 | ✅ PIM-eligible directory role held directly by a user | `/roleManagement/directory/roleEligibilityScheduleInstances` |
+| ✅ **Standing owner of a group holding an active or PIM-eligible role** — conservative exclusion, recorded as `RoleHoldingGroupOwner` | `/groups/{id}/owners`, read only for those groups; covered by `GroupMember.Read.All`, already requested |
 | ✅ **PIM for Groups**: a user eligible to become a member *or owner* of any group found holding a role (eligible owners are held back on the conservative reading) | `/identityGovernance/privilegedAccess/group/eligibilityScheduleInstances`, read per role-holding group; needs `PrivilegedEligibilitySchedule.Read.AzureADGroup` and, for role-assignable groups, a Global Reader or Privileged Role Administrator sign-in |
 
-Outside this definition, and said so on the console: standing (non-PIM) owners of a role-holding group, and privilege granted by anything other than a Microsoft Entra directory role assignment, such as Azure RBAC or app roles. The PIM for Groups read is only made when a group actually holds a role, so a tenant with only directly assigned roles never depends on it. **If any of these reads is refused, nobody is assumed nonprivileged: the actionable exports are withheld.**
+Still outside this definition, and said so on the console: privilege granted by anything other than a Microsoft Entra directory role, such as Azure RBAC or app roles. The PIM for Groups and owner reads are only made when a group actually holds a role, so a tenant with only directly assigned roles never depends on them. **If any of these reads is refused or incomplete, nobody is assumed nonprivileged: the actionable exports are withheld.**
 
 **If privilege discovery does not complete, neither targeting export is written.** One policy, applied in one place:
 

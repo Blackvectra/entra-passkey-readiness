@@ -66,6 +66,7 @@ Describe 'Privilege detection reads role assignments, never names' {
         $script:FailAssignments = $null
         $script:FailEligibility = $null
         $script:FailGroups = @{}
+        $script:GroupOwners = @{}; $script:FailOwners = @{}; $script:OwnerCalls = [System.Collections.Generic.List[string]]::new()
         $script:GroupEligibility = @{}
         $script:FailGroupEligibility = @{}
         $script:GroupEligibilityCalls = 0
@@ -86,6 +87,15 @@ Describe 'Privilege detection reads role assignments, never names' {
                 $script:GroupEligibilityCalls++
                 if ($script:FailGroupEligibility.ContainsKey($groupId)) { throw $script:FailGroupEligibility[$groupId] }
                 if ($script:GroupEligibility.ContainsKey($groupId)) { return @($script:GroupEligibility[$groupId]) }
+                return @()
+            }
+            if ($Uri -match '/groups/([^/]+)/owners$') {
+                $groupId = $Matches[1]
+                $script:OwnerCalls.Add($groupId)
+                if ($script:FailOwners.ContainsKey($groupId)) { throw $script:FailOwners[$groupId] }
+                if ($script:GroupOwners.ContainsKey($groupId)) {
+                    return @($script:GroupOwners[$groupId] | ForEach-Object { [PSCustomObject]@{ id = $_ } })
+                }
                 return @()
             }
             if ($Uri -match '/groups/([^/]+)/transitiveMembers') {
@@ -208,6 +218,7 @@ Describe 'PIM for Groups eligibility on a role-holding group is privilege' {
         $script:GroupMembers = @{ 'g-helpdesk' = @('u-grouped') }
         $script:FailAssignments = $null; $script:FailEligibility = $null
         $script:FailGroups = @{}; $script:GroupEligibility = @{}; $script:FailGroupEligibility = @{}
+        $script:GroupOwners = @{}; $script:FailOwners = @{}; $script:OwnerCalls = [System.Collections.Generic.List[string]]::new()
         $script:GroupEligibilityCalls = 0
 
         function Get-GraphCollection {
@@ -219,6 +230,15 @@ Describe 'PIM for Groups eligibility on a role-holding group is privilege' {
                 $script:GroupEligibilityCalls++
                 if ($script:FailGroupEligibility.ContainsKey($groupId)) { throw $script:FailGroupEligibility[$groupId] }
                 if ($script:GroupEligibility.ContainsKey($groupId)) { return @($script:GroupEligibility[$groupId]) }
+                return @()
+            }
+            if ($Uri -match '/groups/([^/]+)/owners$') {
+                $groupId = $Matches[1]
+                $script:OwnerCalls.Add($groupId)
+                if ($script:FailOwners.ContainsKey($groupId)) { throw $script:FailOwners[$groupId] }
+                if ($script:GroupOwners.ContainsKey($groupId)) {
+                    return @($script:GroupOwners[$groupId] | ForEach-Object { [PSCustomObject]@{ id = $_ } })
+                }
                 return @()
             }
             if ($Uri -match '/groups/([^/]+)/transitiveMembers') {
@@ -304,6 +324,209 @@ Describe 'PIM for Groups eligibility on a role-holding group is privilege' {
     }
 }
 
+Describe 'Standing owners of a role-holding group are held back' {
+
+    # A conservative campaign exclusion, not a role assignment: an owner can manage the
+    # membership of a group that holds a directory role, so for this first campaign they go
+    # to the hand-worked track rather than risk being bulk-targeted.
+
+    BeforeEach {
+        $script:Assignments = @(); $script:Eligibility = @()
+        $script:GroupMembers = @{}; $script:FailGroups = @{}
+        $script:GroupEligibility = @{}; $script:FailGroupEligibility = @{}; $script:GroupEligibilityCalls = 0
+        $script:GroupOwners = @{}; $script:FailOwners = @{}; $script:OwnerCalls = [System.Collections.Generic.List[string]]::new()
+
+        function Get-GraphCollection {
+            param([string]$Uri)
+            if ($Uri -match '/roleManagement/directory/roleAssignments') { return $script:Assignments }
+            if ($Uri -match '/roleManagement/directory/roleEligibilityScheduleInstances') { return $script:Eligibility }
+            if ($Uri -match "privilegedAccess/group/eligibilityScheduleInstances\?\`$filter=groupId eq '([^']+)'") {
+                $groupId = $Matches[1]
+                if ($script:GroupEligibility.ContainsKey($groupId)) { return @($script:GroupEligibility[$groupId]) }
+                return @()
+            }
+            if ($Uri -match '/groups/([^/]+)/owners$') {
+                $groupId = $Matches[1]
+                $script:OwnerCalls.Add($groupId)
+                if ($script:FailOwners.ContainsKey($groupId)) { throw $script:FailOwners[$groupId] }
+                if ($script:GroupOwners.ContainsKey($groupId)) {
+                    return @($script:GroupOwners[$groupId] | ForEach-Object { [PSCustomObject]@{ id = $_ } })
+                }
+                return @()
+            }
+            if ($Uri -match '/groups/([^/]+)/transitiveMembers') {
+                $groupId = $Matches[1]
+                if ($script:GroupMembers.ContainsKey($groupId)) {
+                    return @($script:GroupMembers[$groupId] | ForEach-Object { [PSCustomObject]@{ id = $_ } })
+                }
+                throw (New-GraphError -Status 404 -Message 'Request_ResourceNotFound')
+            }
+            throw "Unexpected URI: $Uri"
+        }
+    }
+
+    It 'holds back a standing owner of a group holding an active role' {
+        $script:Assignments = @([PSCustomObject]@{ principalId = 'g-helpdesk'; roleDefinitionId = 'role-a' })
+        $script:GroupMembers['g-helpdesk'] = @('u-grouped')
+        $script:GroupOwners['g-helpdesk'] = @('u-plain')
+        $result = Get-PrivilegedUserSet -EnabledUserIndex $script:Users -Now $script:Now
+
+        $result.Complete | Should -BeTrue
+        $result.UserIds.Contains('u-plain') | Should -BeTrue
+        $result.Sources['u-plain'] | Should -BeExactly 'RoleHoldingGroupOwner'
+    }
+
+    It 'holds back a standing owner of a group holding a PIM-eligible role' {
+        $script:Eligibility = @([PSCustomObject]@{ principalId = 'g-tier0'; roleDefinitionId = 'role-a'; startDateTime = $null; endDateTime = $null })
+        $script:GroupMembers['g-tier0'] = @()
+        $script:GroupOwners['g-tier0'] = @('u-plain')
+        $result = Get-PrivilegedUserSet -EnabledUserIndex $script:Users -Now $script:Now
+
+        $result.Complete | Should -BeTrue
+        $result.Sources['u-plain'] | Should -BeExactly 'RoleHoldingGroupOwner'
+    }
+
+    It 'never describes ownership as a directory role' {
+        $script:Assignments = @([PSCustomObject]@{ principalId = 'g-helpdesk'; roleDefinitionId = 'role-a' })
+        $script:GroupMembers['g-helpdesk'] = @()
+        $script:GroupOwners['g-helpdesk'] = @('u-plain')
+        $result = Get-PrivilegedUserSet -EnabledUserIndex $script:Users -Now $script:Now
+        $result.Sources['u-plain'] | Should -Not -Match 'role assign|Active role|PIM-eligible role'
+    }
+
+    It 'leaves the owner of an unrelated group eligible, and never reads its owners' {
+        # g-marketing holds no role. Its owners are not read at all, so its owner stays
+        # nonprivileged and stays on the campaign list.
+        $script:Assignments = @([PSCustomObject]@{ principalId = 'u-direct'; roleDefinitionId = 'role-a' })
+        $script:GroupOwners['g-marketing'] = @('u-plain')
+        $result = Get-PrivilegedUserSet -EnabledUserIndex $script:Users -Now $script:Now
+
+        $result.Complete | Should -BeTrue
+        $result.UserIds.Contains('u-plain') | Should -BeFalse
+        $script:OwnerCalls | Should -Not -Contain 'g-marketing'
+    }
+
+    It 'does not read the owners of a group that is only eligible to join a role-holding group' {
+        # Followed for its own eligibility, but its owners are one step further out than
+        # this exclusion is scoped to.
+        $script:Assignments = @([PSCustomObject]@{ principalId = 'g-helpdesk'; roleDefinitionId = 'role-a' })
+        $script:GroupMembers['g-helpdesk'] = @()
+        $script:GroupEligibility['g-helpdesk'] = @([PSCustomObject]@{ principalId = 'g-nested'; accessId = 'member' })
+        $script:GroupMembers['g-nested'] = @()
+        $script:GroupOwners['g-nested'] = @('u-plain')
+        $result = Get-PrivilegedUserSet -EnabledUserIndex $script:Users -Now $script:Now
+
+        $result.UserIds.Contains('u-plain') | Should -BeFalse
+        $script:OwnerCalls | Should -Contain 'g-helpdesk'
+        $script:OwnerCalls | Should -Not -Contain 'g-nested'
+    }
+
+    It 'counts a user who is both an owner and a role assignee once, naming both' {
+        $script:Assignments = @(
+            [PSCustomObject]@{ principalId = 'u-both'; roleDefinitionId = 'role-a' }
+            [PSCustomObject]@{ principalId = 'g-helpdesk'; roleDefinitionId = 'role-b' }
+        )
+        $script:GroupMembers['g-helpdesk'] = @()
+        $script:GroupOwners['g-helpdesk'] = @('u-both')
+        $result = Get-PrivilegedUserSet -EnabledUserIndex $script:Users -Now $script:Now
+
+        $result.Count | Should -Be 1
+        $result.Sources['u-both'] | Should -Match 'Active role'
+        $result.Sources['u-both'] | Should -Match 'RoleHoldingGroupOwner'
+    }
+
+    It 'counts an owner of two role-holding groups once' {
+        $script:Assignments = @(
+            [PSCustomObject]@{ principalId = 'g-one'; roleDefinitionId = 'role-a' }
+            [PSCustomObject]@{ principalId = 'g-two'; roleDefinitionId = 'role-b' }
+        )
+        $script:GroupMembers['g-one'] = @(); $script:GroupMembers['g-two'] = @()
+        $script:GroupOwners['g-one'] = @('u-plain'); $script:GroupOwners['g-two'] = @('u-plain')
+        $result = Get-PrivilegedUserSet -EnabledUserIndex $script:Users -Now $script:Now
+
+        $result.Count | Should -Be 1
+        $result.Sources['u-plain'] | Should -BeExactly 'RoleHoldingGroupOwner'
+    }
+
+    It 'ignores an owner that is not one of this run''s enabled users' {
+        $script:Assignments = @([PSCustomObject]@{ principalId = 'g-helpdesk'; roleDefinitionId = 'role-a' })
+        $script:GroupMembers['g-helpdesk'] = @()
+        $script:GroupOwners['g-helpdesk'] = @('u-disabled-or-sp')
+        $result = Get-PrivilegedUserSet -EnabledUserIndex $script:Users -Now $script:Now
+
+        $result.Complete | Should -BeTrue
+        $result.Count | Should -Be 0
+    }
+
+    It 'reports incomplete when ownership is refused, naming the scope' {
+        $script:Assignments = @([PSCustomObject]@{ principalId = 'g-helpdesk'; roleDefinitionId = 'role-a' })
+        $script:GroupMembers['g-helpdesk'] = @('u-grouped')
+        $script:FailOwners['g-helpdesk'] = New-GraphError -Status 403 -Message 'Authorization_RequestDenied'
+        $result = Get-PrivilegedUserSet -EnabledUserIndex $script:Users -Now $script:Now
+
+        $result.Complete | Should -BeFalse
+        ($result.Gaps -join ' ') | Should -Match 'Owners of role-holding group g-helpdesk could not be read'
+        ($result.Gaps -join ' ') | Should -Match 'GroupMember\.Read\.All'
+    }
+
+    It 'reports incomplete when ownership comes back 404 rather than reading it as no owners' {
+        $script:Assignments = @([PSCustomObject]@{ principalId = 'g-helpdesk'; roleDefinitionId = 'role-a' })
+        $script:GroupMembers['g-helpdesk'] = @()
+        $script:FailOwners['g-helpdesk'] = New-GraphError -Status 404 -Message 'Request_ResourceNotFound'
+        (Get-PrivilegedUserSet -EnabledUserIndex $script:Users -Now $script:Now).Complete | Should -BeFalse
+    }
+
+    It 'reports incomplete for an owner record with no id' {
+        $script:Assignments = @([PSCustomObject]@{ principalId = 'g-helpdesk'; roleDefinitionId = 'role-a' })
+        $script:GroupMembers['g-helpdesk'] = @()
+        $script:GroupOwners['g-helpdesk'] = @('')
+        (Get-PrivilegedUserSet -EnabledUserIndex $script:Users -Now $script:Now).Complete | Should -BeFalse
+    }
+
+    It 'keeps going after one group''s ownership fails, and still marks the run incomplete' {
+        $script:Assignments = @(
+            [PSCustomObject]@{ principalId = 'g-one'; roleDefinitionId = 'role-a' }
+            [PSCustomObject]@{ principalId = 'g-two'; roleDefinitionId = 'role-b' }
+        )
+        $script:GroupMembers['g-one'] = @(); $script:GroupMembers['g-two'] = @()
+        $script:FailOwners['g-one'] = New-GraphError -Status 500 -Message 'InternalServerError'
+        $script:GroupOwners['g-two'] = @('u-plain')
+        $result = Get-PrivilegedUserSet -EnabledUserIndex $script:Users -Now $script:Now
+
+        $result.Complete | Should -BeFalse
+        $result.UserIds.Contains('u-plain') | Should -BeTrue
+    }
+
+    It 'names ownership in the coverage note as an exclusion, and the remaining limit' {
+        $result = Get-PrivilegedUserSet -EnabledUserIndex $script:Users -Now $script:Now
+        $result.CoverageNote | Should -Match 'standing owners of a group that holds an active or PIM-eligible role'
+        $result.CoverageNote | Should -Match 'conservative campaign exclusion rather than a role assignment'
+        $result.CoverageNote | Should -Match 'Azure RBAC and app roles'
+    }
+}
+
+Describe 'An owner is held out of both exports and kept in the assessment' {
+
+    It 'omits a RoleHoldingGroupOwner from both exports while an unrelated owner stays' {
+        $rows = @(
+            [PSCustomObject]@{ Risk = 'High'; DisplayName = 'Owner'; UserPrincipalName = 'owner@contoso-example.com'; UserType = 'Member'; UserId = 'u-owner'; AllMethodsRegistered = 'mobilePhone' }
+            [PSCustomObject]@{ Risk = 'High'; DisplayName = 'Other'; UserPrincipalName = 'other@contoso-example.com'; UserType = 'Member'; UserId = 'u-other'; AllMethodsRegistered = 'mobilePhone' }
+        )
+        $ids = [System.Collections.Generic.HashSet[string]]::new([string[]]@('u-owner'), [System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($phoneOnly in @($true, $false)) {
+            $splat = @{
+                Rows = $rows; PhoneMethods = $script:Lists.PhoneMethods; PasskeyMethods = $script:Lists.PasskeyMethods
+                SurvivingMfaMethods = $script:Lists.SurvivingMfaMethods
+                PrivilegedUserIds = $ids; PrivilegeSources = @{ 'u-owner' = 'RoleHoldingGroupOwner' }
+            }
+            if ($phoneOnly) { $splat.RequirePhoneMethod = $true }
+            $all = @(Get-NoPasskeyCandidate @splat)
+            @($all | Where-Object { -not $_.PrivilegeSource }).UserId | Should -Be @('u-other')
+            ($all | Where-Object UserId -eq 'u-owner').PrivilegeSource | Should -BeExactly 'RoleHoldingGroupOwner'
+        }
+    }
+}
+
 Describe 'Assignment windows are read, not assumed' {
 
     It 'treats a record with no end date as permanent' {
@@ -350,6 +573,7 @@ Describe 'Incomplete discovery is never silently nonprivileged' {
         $script:FailAssignments = $null
         $script:FailEligibility = $null
         $script:FailGroups = @{}
+        $script:GroupOwners = @{}; $script:FailOwners = @{}; $script:OwnerCalls = [System.Collections.Generic.List[string]]::new()
         $script:GroupEligibility = @{}
         $script:FailGroupEligibility = @{}
         $script:GroupEligibilityCalls = 0
@@ -369,6 +593,15 @@ Describe 'Incomplete discovery is never silently nonprivileged' {
                 $script:GroupEligibilityCalls++
                 if ($script:FailGroupEligibility.ContainsKey($groupId)) { throw $script:FailGroupEligibility[$groupId] }
                 if ($script:GroupEligibility.ContainsKey($groupId)) { return @($script:GroupEligibility[$groupId]) }
+                return @()
+            }
+            if ($Uri -match '/groups/([^/]+)/owners$') {
+                $groupId = $Matches[1]
+                $script:OwnerCalls.Add($groupId)
+                if ($script:FailOwners.ContainsKey($groupId)) { throw $script:FailOwners[$groupId] }
+                if ($script:GroupOwners.ContainsKey($groupId)) {
+                    return @($script:GroupOwners[$groupId] | ForEach-Object { [PSCustomObject]@{ id = $_ } })
+                }
                 return @()
             }
             if ($Uri -match '/groups/([^/]+)/transitiveMembers') {
@@ -461,7 +694,7 @@ Describe 'Incomplete discovery is never silently nonprivileged' {
         $result = Get-PrivilegedUserSet -EnabledUserIndex $script:Users -Now $script:Now
         $result.CoverageNote | Should -Match 'PIM for Groups eligibility \(member or owner\)'
         # What is outside the definition is named rather than left to be assumed covered.
-        $result.CoverageNote | Should -Match 'Outside this definition'
+        $result.CoverageNote | Should -Match 'Not covered: privilege outside Microsoft Entra directory roles'
     }
 }
 
