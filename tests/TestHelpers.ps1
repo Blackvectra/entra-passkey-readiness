@@ -60,6 +60,41 @@ function Get-SweepGuiScriptPath {
     Join-Path (Split-Path -Parent $PSScriptRoot) 'Show-EntraSmsVoiceSweepGui.ps1'
 }
 
+function Get-ScriptArrayVariable {
+    <#
+    .SYNOPSIS
+        Returns one script-scope array literal from a .ps1 file, by name.
+    .DESCRIPTION
+        The general form of Get-MethodListsFromScript below, for an array that is part of a
+        function's contract rather than part of the method classification -- currently
+        $script:CampaignCandidateColumns, the campaign file's header.
+
+        A test or a sample generator that retyped such a list would pass while the shipped
+        file carried different columns, which is the whole failure mode the AST lift exists
+        to remove. Matches the bare name and the $script: form, because the assignment may
+        carry either prefix.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Name
+    )
+
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+        (Resolve-Path -LiteralPath $Path).Path, [ref]$null, [ref]$null)
+
+    $assignment = $ast.FindAll({
+            $args[0] -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+            $args[0].Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+            $args[0].Left.VariablePath.UserPath -in @($Name, "script:$Name")
+        }, $true) | Select-Object -First 1
+
+    if (-not $assignment) { throw "Array '`$$Name' was not found in $Path." }
+
+    # An array literal of constant strings, so evaluating the right-hand side alone keeps
+    # this to data with nothing from the script body running.
+    return @([scriptblock]::Create($assignment.Right.Extent.Text).Invoke())
+}
+
 function Get-MethodListsFromScript {
     <#
     .SYNOPSIS

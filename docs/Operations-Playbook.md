@@ -130,6 +130,19 @@ Two populations inside it deserve separate handling:
 | `Improved` / `Resolved` in bulk | The campaign is working. Report the number and keep going. |
 | Nothing moved | The campaign is not reaching people. Change the communication, not the cadence. |
 
+### 3b. Target the campaign
+
+`<stem>_SmsVoiceUsers_NoPasskey.csv` is written on every run and is the list the registration campaign is built from: users with a phone method registered and no passkey. It is a different population from the action list, and larger — the action list is who needs work now, this is everybody the campaign should eventually reach.
+
+Two readings to avoid in a client conversation, because both are wrong and both are easy:
+
+- **It is registration, not usage.** A name on it means a phone number is registered against that account. It does not mean the person signed in with SMS last week. Nothing in this tool reads sign-in method, and the registration report carries no usage data. If a client asks "how many are actually using SMS", the honest answer is that this file does not say, and the sign-in logs do.
+- **It is not a lockout list.** Check `OtherSurvivingMfaMethods`. A blank there, beside a phone method, is the same population as `BlockedAtRetirement`. Anything listed means the user is safe on the date and still needs a passkey. A tenant can genuinely have `BlockedAtRetirement` at zero and hundreds of campaign candidates.
+
+The work after the file is manual and stays manual: review it, create the security group, add the members, confirm passkeys are enabled and the users are inside that policy's scope, then configure the registration campaign. This tool writes nothing to a tenant, so none of those four steps happen by running it again.
+
+For an estate, rank on the sweep summary's `CampaignCandidates` column to see which customers carry the most work before committing to a campaign schedule.
+
 ### 4. Report
 
 The per-tenant HTML report is client-ready as generated. Send it, or print it to PDF and attach it to your monthly report.

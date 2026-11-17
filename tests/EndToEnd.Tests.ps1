@@ -485,6 +485,60 @@ Describe 'A default run against a stubbed tenant' {
             Should -Be $script:Summary.EnabledUsersAssessed
     }
 
+    It 'writes the campaign targeting list beside the other exports' {
+        # The deliverable: an operator runs the assessment and finds this file without
+        # asking for it. Asserted against a real run of the whole script, not the function.
+        $path = Join-Path $script:OutDir 'assessment_SmsVoiceUsers_NoPasskey.csv'
+        $path | Should -Exist
+
+        $rows = @(Import-Csv -LiteralPath $path)
+        $rows[0].PSObject.Properties.Name | Should -Be @(
+            'TenantId', 'Risk', 'DisplayName', 'UserPrincipalName', 'UserType',
+            'PhoneMethodsRegistered', 'OtherSurvivingMfaMethods', 'AllMethodsRegistered', 'UserId'
+        )
+
+        # The console line, the summary field and the file must be the same number.
+        $script:Summary.CampaignCandidates | Should -Be $rows.Count
+        $script:StdOut | Should -Match "Campaign candidates \($($rows.Count) users with SMS or voice registered and no passkey\)"
+        $script:Summary.CampaignCandidateListPath | Should -BeExactly (Resolve-Path -LiteralPath $path).Path
+    }
+
+    It 'targets the phone holders without a passkey and nobody else' {
+        # u-safe and u-fine hold passKeyDeviceBound, u-clear a fido2SecurityKey: all three
+        # are off the list however exposed they look elsewhere. Everybody on it holds a
+        # phone method and no passkey.
+        $rows = @(Import-Csv -LiteralPath (Join-Path $script:OutDir 'assessment_SmsVoiceUsers_NoPasskey.csv'))
+        $assessment = @(Import-Csv -LiteralPath $script:CsvPath)
+
+        foreach ($row in $rows) {
+            $row.PhoneMethodsRegistered | Should -Not -BeNullOrEmpty
+            $row.AllMethodsRegistered | Should -Not -Match 'passKey|fido'
+            $row.AllMethodsRegistered | Should -Not -BeExactly '(no row in registration report)'
+        }
+
+        # Nobody with a passkey slipped on, read from the assessment CSV's own column.
+        $withPasskey = @($assessment | Where-Object { $_.PasskeyMethods }) | ForEach-Object { $_.UserPrincipalName }
+        foreach ($upn in $withPasskey) {
+            $rows.UserPrincipalName | Should -Not -Contain $upn
+        }
+    }
+
+    It 'carries the tenant identifier so an estate of these files can be pooled' {
+        $rows = @(Import-Csv -LiteralPath (Join-Path $script:OutDir 'assessment_SmsVoiceUsers_NoPasskey.csv'))
+        foreach ($row in $rows) {
+            $row.TenantId | Should -Not -BeNullOrEmpty
+            $row.TenantId | Should -BeExactly $script:Summary.TenantId
+        }
+    }
+
+    It 'says what the list does not claim' {
+        # The filename invites two wrong readings -- recent SMS usage, and guaranteed
+        # lockout -- so the run says so where the operator is already looking.
+        $script:StdOut | Should -Match 'Registration, not usage'
+        $script:StdOut | Should -Match 'Not a lockout list'
+        $script:StdOut | Should -Match 'create the group and configure the campaign by hand'
+    }
+
     It 'names the files from the customer when -OutputPath is not given' {
         # -OutputPath was supplied here, so only the derived names are checked; the
         # customer-derived default is covered by the naming rules in the script.

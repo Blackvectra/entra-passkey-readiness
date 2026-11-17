@@ -2015,6 +2015,121 @@ function New-ActionList {
         Select-Object Priority, User, SignIn, LastSignIn, Has, Problem, DoThis)
 }
 
+function Get-CampaignCandidate {
+    # The registration-campaign targeting list: users who hold a retiring phone method and
+    # have not registered a passkey. An operator takes this file, reviews it, and builds the
+    # security group by hand -- creating the group and configuring the campaign are writes,
+    # and this tool does not write.
+    #
+    # This is a different question from every other output here, and the difference is the
+    # reason it exists as its own file:
+    #
+    #   BlockedAtRetirement  can this user still sign in on 2027-02-01. Microsoft
+    #                        Authenticator satisfies it with no passkey in the tenant, so
+    #                        driving it to zero does not move passkey adoption at all.
+    #   The action list      who needs work now, ranked by exposure. A user safely on
+    #                        Authenticator is not on it and still needs a passkey.
+    #   This file            who the campaign should target. A user with Authenticator and
+    #                        a phone number belongs here precisely because they are safe:
+    #                        nothing else in this tool will ever name them.
+    #
+    # What the file does NOT claim, stated here because the filename invites both readings:
+    # it is registration, not usage. A row means "a phone method is registered", not "this
+    # person signed in with SMS recently" -- the registration report carries no usage, and
+    # nothing in this tool reads sign-in method. And it is not a lockout list: a row says
+    # nothing about whether the user has another surviving method, which is why
+    # OtherSurvivingMfaMethods is on it.
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Rows,
+
+        # The three classifications, passed in rather than read from script scope: these
+        # file-building helpers are lifted into tests and into examples/New-ExampleOutput.ps1,
+        # where an ambient read is a variable nobody can see being consulted.
+        [Parameter(Mandatory)][string[]]$PhoneMethods,
+        [Parameter(Mandatory)][string[]]$PasskeyMethods,
+        [Parameter(Mandatory)][string[]]$SurvivingMfaMethods,
+
+        # Carried onto every row so an estate's worth of these files can be concatenated and
+        # still say which tenant each name came from. The assessment CSV omits it because it
+        # is only ever read inside its own per-tenant folder; this file is built to be pooled.
+        [string]$TenantId = ''
+    )
+
+    $candidates = foreach ($row in $Rows) {
+        # Excluded is an explicit operator decision, made with -ExcludeUpnPattern, and it
+        # keeps the same meaning here as everywhere else in this script: the row stays in
+        # the assessment CSV as a record of what the pattern removed, and is counted in no
+        # number and targeted by no campaign.
+        if ([string](Get-PropertyValue $row 'Risk') -eq 'Excluded') { continue }
+
+        # Through Get-PropertyValue, not a dot: these helpers are handed rows from an older
+        # export in examples/ and in the HTML path, and under StrictMode a direct read of a
+        # column that export predates throws rather than skipping the row.
+        $allMethods = [string](Get-PropertyValue $row 'AllMethodsRegistered')
+
+        # A user with no registration-report row has an UNKNOWN passkey state, not an absent
+        # one. Targeting them would put people in a campaign on the strength of data nobody
+        # has; they stay counted in UsersMissingFromReport, which is where that gap belongs.
+        if ([string]::IsNullOrWhiteSpace($allMethods) -or $allMethods -eq $script:NoReportRowMarker) { continue }
+
+        $methods = @($allMethods -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+
+        # -in is case-insensitive, which is deliberate rather than incidental: a live tenant
+        # has already returned a spelling whose capitalization did not match the enum.
+        $phone = @($methods | Where-Object { $_ -in $PhoneMethods } | Sort-Object -Unique)
+        if ($phone.Count -eq 0) { continue }
+
+        # Applied from $passkeyMethods, the same list Get-PasskeyMethodList uses, so this
+        # file and the PasskeyMethods column cannot disagree about who holds one. NOT from
+        # $survivingMfaMethods, which is a different category and would drop every user on
+        # Authenticator -- the bulk of a real campaign; and NOT from isPasswordlessCapable,
+        # which Microsoft defines as covering Windows Hello for Business and Authenticator
+        # passwordless phone sign-in alongside FIDO2, so reading it as a passkey answer
+        # empties the campaign list for an Entra-joined estate that holds no passkeys.
+        $passkeys = @($methods | Where-Object { $_ -in $PasskeyMethods })
+        if ($passkeys.Count -gt 0) { continue }
+
+        # What they already hold that survives and satisfies MFA on its own, phone methods
+        # and passkeys taken out. Blank here plus a phone method is the shape that is also
+        # BlockedAtRetirement; anything listed means this user is a campaign target but not
+        # a lockout, and a reviewer triages the two differently.
+        $otherSurviving = @($methods |
+            Where-Object { $_ -in $SurvivingMfaMethods -and $_ -notin $PhoneMethods -and $_ -notin $PasskeyMethods } |
+            Sort-Object -Unique)
+
+        [PSCustomObject][ordered]@{
+            TenantId                 = $TenantId
+            Risk                     = [string](Get-PropertyValue $row 'Risk')
+            DisplayName              = [string](Get-PropertyValue $row 'DisplayName')
+            UserPrincipalName        = [string](Get-PropertyValue $row 'UserPrincipalName')
+            UserType                 = [string](Get-PropertyValue $row 'UserType')
+            PhoneMethodsRegistered   = ($phone -join '; ')
+            OtherSurvivingMfaMethods = ($otherSurviving -join '; ')
+            AllMethodsRegistered     = $allMethods
+            # Last, like the assessment CSV: a join key, not something anybody reads, and
+            # the tie-breaker that makes the sort below total.
+            UserId                   = [string](Get-PropertyValue $row 'UserId')
+        }
+    }
+
+    # Worst band first so a reviewer working top-down meets the most exposed names first,
+    # then UPN, then UserId. UserId is the explicit final tie-breaker: it is unique per
+    # user, so two runs over the same tenant cannot order the file differently, and
+    # Compare-EntraSmsVoiceAssessment cannot read a reshuffle as movement.
+    $order = @{ Critical = 0; High = 1; Moderate = 2; Low = 3; Informational = 4 }
+    return @($candidates | Sort-Object `
+        @{ Expression = { if ($order.Contains([string]$_.Risk)) { $order[[string]$_.Risk] } else { 99 } }; Ascending = $true }, `
+        @{ Expression = 'UserPrincipalName'; Ascending = $true }, `
+        @{ Expression = 'UserId'; Ascending = $true })
+}
+
+# The campaign file's column order, named once. Export-AssessmentCsv needs it to write a
+# header for a tenant with no candidates, where there is no row to take property names from.
+$script:CampaignCandidateColumns = @(
+    'TenantId', 'Risk', 'DisplayName', 'UserPrincipalName', 'UserType',
+    'PhoneMethodsRegistered', 'OtherSurvivingMfaMethods', 'AllMethodsRegistered', 'UserId'
+)
+
 function Get-TicketNextStep {
     # The row already carries NextStep. Recomputing is the fallback for rows handed in
     # from an export that predates the column, so the ticket queue never silently loses
@@ -2590,10 +2705,28 @@ function Export-AssessmentCsv {
         # helpers are lifted into tests and into examples/New-ExampleOutput.ps1, where an
         # ambient read is a variable nobody can see being consulted -- and static analysis
         # flags it as dead in the caller, which is how it reached CI twice.
-        [switch]$SkipAclHardening
+        [switch]$SkipAclHardening,
+
+        # The column names to write when $Data is empty. Export-Csv takes its header from
+        # the first object, so an empty collection produces a file containing nothing but a
+        # byte-order mark -- which Import-Csv reads as zero rows with zero columns, and a
+        # spreadsheet opens as blank. For the campaign list that is the wrong answer to the
+        # best possible outcome: a tenant where nobody needs targeting should hand back an
+        # empty list with the expected headers, not a file that looks like a failed run.
+        #
+        # Optional, so every existing caller keeps its current behaviour exactly.
+        [string[]]$HeaderWhenEmpty = @()
     )
 
-    $Data | Protect-CsvInjection | Export-Csv -LiteralPath $Path -NoTypeInformation -Encoding utf8BOM
+    if ($Data.Count -eq 0 -and $HeaderWhenEmpty.Count -gt 0) {
+        # Quoted every field, matching what Export-Csv itself writes, so the header a
+        # zero-row file carries is byte-identical to the header a one-row file carries.
+        $header = (($HeaderWhenEmpty | ForEach-Object { '"' + ($_ -replace '"', '""') + '"' }) -join ',')
+        Set-Content -LiteralPath $Path -Value $header -Encoding utf8BOM
+    }
+    else {
+        $Data | Protect-CsvInjection | Export-Csv -LiteralPath $Path -NoTypeInformation -Encoding utf8BOM
+    }
     if (-not $SkipAclHardening) { Protect-OutputFile -Path $Path }
 }
 
@@ -3219,6 +3352,40 @@ $actionListRows = @(New-ActionList -Rows $rows)
 Export-AssessmentCsv -Data $actionListRows -Path $actionListPath -SkipAclHardening:$SkipAclHardening
 $summary | Add-Member -NotePropertyName ActionListPath -NotePropertyValue (Resolve-Path -LiteralPath $actionListPath).Path
 Write-Host "Action list ($($actionListRows.Count) users, attach this to a ticket): $actionListPath" -ForegroundColor Green
+
+# The registration-campaign targeting list, written on every run for the same reason the
+# action list is: it is derived from rows already in memory and costs no Graph call.
+#
+# Built from $rows rather than $affectedRows or $candidateRows. A user already off phone
+# methods entirely is not a migration candidate and is correctly absent from the default
+# assessment export, but the campaign population is "everyone enabled who holds a phone
+# method and no passkey", and that question is asked of the whole tenant. Every row in
+# $rows is an enabled user: the user read filters on accountEnabled, so enablement is
+# settled upstream and this file inherits it rather than re-testing a column that does
+# not exist. Guests are included and named by UserType, matching the assessment CSV --
+# a guest with a phone number is targeted by the retirement exactly like a member.
+#
+# Emitting the list is read-only. Creating the security group, adding members, and
+# configuring the registration campaign all stay manual, because all three are writes.
+$campaignListPath = [System.IO.Path]::ChangeExtension($OutputPath, $null).TrimEnd('.') + '_SmsVoiceUsers_NoPasskey.csv'
+# @() for the same reason as the action list above: an empty result unrolls to $null on
+# assignment and fails Export-AssessmentCsv's parameter binding. Here the empty case is the
+# outcome the whole project works toward, so it is the one that must not crash.
+$campaignRows = @(Get-CampaignCandidate -Rows $rows `
+        -PhoneMethods $phoneMethods -PasskeyMethods $passkeyMethods `
+        -SurvivingMfaMethods $survivingMfaMethods -TenantId ([string]$summary.TenantId))
+
+Export-AssessmentCsv -Data $campaignRows -Path $campaignListPath `
+    -HeaderWhenEmpty $script:CampaignCandidateColumns -SkipAclHardening:$SkipAclHardening
+
+# The count comes off the same collection that was just written, not from a second filter
+# over $rows. Two expressions that are meant to agree and are evaluated separately is how
+# this script previously printed a number the file did not contain.
+$summary | Add-Member -NotePropertyName CampaignCandidates -NotePropertyValue $campaignRows.Count
+$summary | Add-Member -NotePropertyName CampaignCandidateListPath -NotePropertyValue (Resolve-Path -LiteralPath $campaignListPath).Path
+Write-Host "Campaign candidates ($($campaignRows.Count) users with SMS or voice registered and no passkey): $campaignListPath" -ForegroundColor Green
+Write-Host '  Registration, not usage: a row means a phone method is registered, not that the user signed in with it. Not a lockout list either -- check OtherSurvivingMfaMethods.' -ForegroundColor Cyan
+Write-Host '  Review it, then create the group and configure the campaign by hand. This tool does not write to the tenant.' -ForegroundColor Cyan
 
 if ($ExportFixScript) {
     $fixPath = [System.IO.Path]::ChangeExtension($OutputPath, $null).TrimEnd('.') + '_Remediation.ps1'

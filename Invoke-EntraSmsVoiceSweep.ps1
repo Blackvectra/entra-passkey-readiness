@@ -357,6 +357,12 @@ end {
             # tenant to tenant without needing their candidate counts to match.
             UsersWithPasskey           = & $get 'UsersWithPasskey'
             UsersWithoutPasskey        = & $get 'UsersWithoutPasskey'
+            # How many users that tenant's campaign would target. Narrower than
+            # UsersWithoutPasskey, which counts everyone without one: this counts only
+            # those who also hold a retiring phone method, so it sizes the actual work.
+            # The per-tenant file itself sits beside that tenant's ReportPath, which is
+            # already a column, so the path is not duplicated here.
+            CampaignCandidates         = & $get 'CampaignCandidates'
             OldestReportRowUtc         = & $get 'OldestReportRowUtc'
             # When this tenant was actually assessed, which is not the same as when the
             # summary file was written. -Resume copies a successful row forward verbatim
@@ -630,7 +636,7 @@ end {
         'PolicyMigrationState', 'SmsPolicyState', 'VoicePolicyState', 'EnabledUsersAssessed',
         'MigrationCandidates', 'Critical', 'High', 'Moderate', 'Low', 'BlockedAtRetirement',
         'BlockedAdminsAtRetirement', 'PasswordlessCapableInScope',
-        'UsersWithPasskey', 'UsersWithoutPasskey', 'OldestReportRowUtc',
+        'UsersWithPasskey', 'UsersWithoutPasskey', 'CampaignCandidates', 'OldestReportRowUtc',
         'AssessmentTimeUtc', 'ReportPath', 'Error'
     )
 

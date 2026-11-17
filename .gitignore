@@ -70,6 +70,10 @@ TicketHistory.json
 *_Tickets.csv
 !examples/Example-Tickets.csv
 
+# The registration-campaign targeting list: every name on it is a user who holds a
+# retiring phone method and no passkey, which is a list of who to phish first.
+*_SmsVoiceUsers_NoPasskey.csv
+
 # -ExportFixScript writes a remediation script naming real users, and
 # Compare-EntraSmsVoiceAssessment writes its diff beside the exports it compared.
 # Both land wherever -OutputPath points, which is not always under reports/.

@@ -39,6 +39,7 @@ $examplesDir = $PSScriptRoot
         'Get-RemediationStep'
         'Test-OnlyPhoneBasedMfa'
         'Get-PasskeyMethodList'
+        'Get-CampaignCandidate'
         'ConvertTo-SafeHtml'
         'Get-ExecutiveSummary'
         'New-HtmlReport'
@@ -88,6 +89,10 @@ $survivingMfaMethods = @(
 # what the published sample says about passkey adoption, and a copy that drifted would
 # publish a figure the tool does not produce.
 $passkeyMethods = (Get-MethodListsFromScript -Path (Join-Path $repoRoot 'Get-EntraSmsVoiceMigrationImpact.ps1')).PasskeyMethods
+# The campaign file's header, lifted rather than retyped for the same reason: a sample whose
+# columns differ from the tool's is a mapping somebody builds a PSA import against and then
+# finds the wrong data in the wrong field.
+$campaignColumns = Get-ScriptArrayVariable -Path (Join-Path $repoRoot 'Get-EntraSmsVoiceMigrationImpact.ps1') -Name 'CampaignCandidateColumns'
 
 # The fictional tenant. Every name and domain is invented; example.com-style domains are
 # used deliberately so a published sample cannot be mistaken for a real client's evidence.
@@ -255,6 +260,9 @@ $summary = [PSCustomObject][ordered]@{
     UsersWithoutPasskey        = @($rows | Where-Object {
         -not $_.PasskeyMethods -and $_.AllMethodsRegistered -ne $script:NoReportRowMarker
     }).Count
+    # Backfilled below, once the campaign list has actually been built, so the sample
+    # cannot claim a count its own published CSV does not contain.
+    CampaignCandidates         = 0
     BlockedAtRetirement        = @($candidates | Where-Object BlockedAtRetirement).Count
     BlockedAdminsAtRetirement  = @($candidates | Where-Object { $_.BlockedAtRetirement -and $_.IsAdmin }).Count
     UsersDefaultingToPhonePrompt = @($rows | Where-Object {
@@ -283,6 +291,16 @@ Export-AssessmentCsv -Data $rows -Path $assessmentPath -SkipAclHardening
 
 $actionListPath = Join-Path $examplesDir 'Example-ActionList.csv'
 Export-AssessmentCsv -Data @(New-ActionList -Rows $rows) -Path $actionListPath -SkipAclHardening
+
+# The campaign targeting list, built through the same function a real run calls and with
+# the script's own classification arrays, so the published sample cannot drift from the tool.
+$campaignPath = Join-Path $examplesDir 'Example-SmsVoiceNoPasskey.csv'
+$campaignRows = @(Get-CampaignCandidate -Rows $rows `
+        -PhoneMethods $phoneMethods -PasskeyMethods $passkeyMethods `
+        -SurvivingMfaMethods $survivingMfaMethods -TenantId '00000000-0000-0000-0000-000000000000')
+Export-AssessmentCsv -Data $campaignRows -Path $campaignPath `
+    -HeaderWhenEmpty $campaignColumns -SkipAclHardening
+$summary.CampaignCandidates = $campaignRows.Count
 
 $ticketPath = Join-Path $examplesDir 'Example-Tickets.csv'
 $null = New-TicketExport -Rows $rows -Path $ticketPath -Customer $customer -MaxIndividual 50 -History @{} -SkipAclHardening
@@ -337,7 +355,7 @@ New-EstateReportHtml -Rollup (Get-EstateRollup -Rows $estateRows -GeneratedAt ([
     Out-File -LiteralPath $estatePath -Encoding utf8 -Force
 
 Write-Host 'Regenerated:' -ForegroundColor Green
-foreach ($path in @($assessmentPath, $actionListPath, $ticketPath, $reportPath, $estatePath)) {
+foreach ($path in @($assessmentPath, $actionListPath, $campaignPath, $ticketPath, $reportPath, $estatePath)) {
     Write-Host "  $path"
 }
 $rows | Format-Table Risk, DisplayName, PerUserMfaState, BlockedAtRetirement -AutoSize

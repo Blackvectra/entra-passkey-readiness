@@ -20,6 +20,7 @@ BeforeAll {
         '_ActionList\.csv$'
         '_RemediationGroup\.csv$'
         '_Tickets\.csv$'
+        '_SmsVoiceUsers_NoPasskey\.csv$'
         '_TicketHistory\.json$'
         '^TicketHistory\.json$'
     )
@@ -165,7 +166,7 @@ Describe 'Evidence hygiene' {
         $literals = [System.Collections.Generic.HashSet[string]]::new()
         foreach ($file in Get-ChildItem -Path $script:RepoRoot -Filter '*.ps1' -File) {
             $content = Get-Content -LiteralPath $file.FullName -Raw
-            foreach ($match in [regex]::Matches($content, "'(?<s>_[A-Za-z]+\.(?:csv|json))'")) {
+            foreach ($match in [regex]::Matches($content, "'(?<s>_[A-Za-z][A-Za-z_]*\.(?:csv|json))'")) {
                 [void]$literals.Add($match.Groups['s'].Value)
             }
         }
