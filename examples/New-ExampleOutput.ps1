@@ -39,7 +39,7 @@ $examplesDir = $PSScriptRoot
         'Get-RemediationStep'
         'Test-OnlyPhoneBasedMfa'
         'Get-PasskeyMethodList'
-        'Get-CampaignCandidate'
+        'Get-NoPasskeyCandidate'
         'ConvertTo-SafeHtml'
         'Get-ExecutiveSummary'
         'New-HtmlReport'
@@ -92,7 +92,14 @@ $passkeyMethods = (Get-MethodListsFromScript -Path (Join-Path $repoRoot 'Get-Ent
 # The campaign file's header, lifted rather than retyped for the same reason: a sample whose
 # columns differ from the tool's is a mapping somebody builds a PSA import against and then
 # finds the wrong data in the wrong field.
-$campaignColumns = Get-ScriptArrayVariable -Path (Join-Path $repoRoot 'Get-EntraSmsVoiceMigrationImpact.ps1') -Name 'CampaignCandidateColumns'
+$campaignColumns = Get-ScriptArrayVariable -Path (Join-Path $repoRoot 'Get-EntraSmsVoiceMigrationImpact.ps1') -Name 'NoPasskeyCandidateColumns'
+# The fictional tenant's privileged accounts, stated as data rather than discovered: this
+# generator never reaches Graph. Marguerite holds a directory role directly and Tobias
+# through a role-assignable group, so the published samples show both an omitted row and
+# the counts that go with it.
+$script:PrivilegeNotDetermined = '(not determined)'
+$samplePrivilegedIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$samplePrivilegeSources = @{}
 
 # The fictional tenant. Every name and domain is invented; example.com-style domains are
 # used deliberately so a published sample cannot be mistaken for a real client's evidence.
@@ -110,7 +117,10 @@ $directory = @(
     @{ Name = 'Priya Raghunathan'; Upn = 'priya.raghunathan@fabrikam-example.com'
         Type = 'Member'; IsAdmin = $true; Sms = $true; Voice = $false
         Methods = @('mobilePhone', 'officePhone'); Passwordless = $false; LegacyMfa = 'disabled'; SignInAge = 4
-        PreferredRaw = 'sms' }
+        PreferredRaw = 'sms'
+        # Holds a directory role directly, and a phone method, so she is omitted from both
+        # actionable exports -- the shape that makes the two omitted counts non-zero.
+        Privilege = 'Active role' }
 
     # In neither modern policy scope. Without the legacy read she is Moderate and the
     # instruction is "go and check a portal"; with it she is High and actually actionable.
@@ -134,7 +144,11 @@ $directory = @(
     @{ Name = 'Tobias Lindqvist'; Upn = 'tobias.lindqvist@fabrikam-example.com'
         Type = 'Member'; IsAdmin = $false; Sms = $true; Voice = $true
         Methods = @('softwareOneTimePasscode'); Passwordless = $false; LegacyMfa = 'disabled'; SignInAge = 4
-        PreferredRaw = 'oath' }
+        PreferredRaw = 'oath'
+        # Privileged through a role-assignable group, and holding no phone method: omitted
+        # from the wider no-passkey export and never a candidate for the campaign list, so
+        # the two files' omitted counts differ in the published sample.
+        Privilege = 'Active role via group' }
 
     # The other half of the Moderate band: a phone registration with the legacy state read
     # and found disabled, so it is stale rather than a live sign-in path.
@@ -211,6 +225,9 @@ $rows = foreach ($person in $directory) {
         AllMethodsRegistered   = ($person.Methods -join '; ')
         PasskeyMethods         = Get-PasskeyMethodList -MethodsRegistered ([string[]]$person.Methods) `
             -PasskeyMethods $passkeyMethods
+        # ContainsKey, not a dot: StrictMode Latest throws on a missing hashtable key, and
+        # most of the fixture people deliberately have no Privilege entry.
+        PrivilegeSource        = if ($person.ContainsKey('Privilege')) { [string]$person['Privilege'] } else { '' }
         PreferredMethod        = Get-FriendlyMethodName ([string]$person.PreferredRaw)
         IsPasswordlessCapable  = $person.Passwordless
         UserId                 = ('11111111-aaaa-4bbb-8ccc-{0:d12}' -f $index)
@@ -292,15 +309,46 @@ Export-AssessmentCsv -Data $rows -Path $assessmentPath -SkipAclHardening
 $actionListPath = Join-Path $examplesDir 'Example-ActionList.csv'
 Export-AssessmentCsv -Data @(New-ActionList -Rows $rows) -Path $actionListPath -SkipAclHardening
 
-# The campaign targeting list, built through the same function a real run calls and with
-# the script's own classification arrays, so the published sample cannot drift from the tool.
-$campaignPath = Join-Path $examplesDir 'Example-SmsVoiceNoPasskey.csv'
-$campaignRows = @(Get-CampaignCandidate -Rows $rows `
-        -PhoneMethods $phoneMethods -PasskeyMethods $passkeyMethods `
-        -SurvivingMfaMethods $survivingMfaMethods -TenantId '00000000-0000-0000-0000-000000000000')
-Export-AssessmentCsv -Data $campaignRows -Path $campaignPath `
+# The two actionable no-passkey exports, built through the same function a real run calls
+# and with the script's own classification arrays, so the published samples cannot drift
+# from the tool. The privilege set is read back off the rows rather than restated, so the
+# fixture and the exports cannot disagree about who is privileged.
+foreach ($row in $rows) {
+    if ($row.PrivilegeSource) {
+        [void]$samplePrivilegedIds.Add([string]$row.UserId)
+        $samplePrivilegeSources[[string]$row.UserId] = [string]$row.PrivilegeSource
+    }
+}
+
+$noPasskeyArgs = @{
+    Rows                = $rows
+    PhoneMethods        = $phoneMethods
+    PasskeyMethods      = $passkeyMethods
+    SurvivingMfaMethods = $survivingMfaMethods
+    PrivilegedUserIds   = $samplePrivilegedIds
+    PrivilegeSources    = $samplePrivilegeSources
+    TenantId            = '00000000-0000-0000-0000-000000000000'
+}
+$allNoPasskey = @(Get-NoPasskeyCandidate @noPasskeyArgs)
+$allCampaign = @(Get-NoPasskeyCandidate @noPasskeyArgs -RequirePhoneMethod)
+
+$noPasskeyRows = @($allNoPasskey | Where-Object { -not $_.PrivilegeSource })
+$campaignRows = @($allCampaign | Where-Object { -not $_.PrivilegeSource })
+
+$noPasskeyPath = Join-Path $examplesDir 'Example-NoPasskeyNonprivileged.csv'
+Export-AssessmentCsv -Data @($noPasskeyRows | Select-Object $campaignColumns) -Path $noPasskeyPath `
     -HeaderWhenEmpty $campaignColumns -SkipAclHardening
+
+$campaignPath = Join-Path $examplesDir 'Example-SmsVoiceNoPasskey.csv'
+Export-AssessmentCsv -Data @($campaignRows | Select-Object $campaignColumns) -Path $campaignPath `
+    -HeaderWhenEmpty $campaignColumns -SkipAclHardening
+
 $summary.CampaignCandidates = $campaignRows.Count
+$summary | Add-Member -NotePropertyName NoPasskeyNonprivileged -NotePropertyValue $noPasskeyRows.Count
+$summary | Add-Member -NotePropertyName NoPasskeyPrivilegedOmitted -NotePropertyValue @($allNoPasskey | Where-Object { $_.PrivilegeSource }).Count
+$summary | Add-Member -NotePropertyName CampaignPrivilegedOmitted -NotePropertyValue @($allCampaign | Where-Object { $_.PrivilegeSource }).Count
+$summary | Add-Member -NotePropertyName PrivilegeDiscoveryComplete -NotePropertyValue $true
+$summary | Add-Member -NotePropertyName PrivilegeDiscoveryGaps -NotePropertyValue ''
 
 $ticketPath = Join-Path $examplesDir 'Example-Tickets.csv'
 $null = New-TicketExport -Rows $rows -Path $ticketPath -Customer $customer -MaxIndividual 50 -History @{} -SkipAclHardening
@@ -355,7 +403,7 @@ New-EstateReportHtml -Rollup (Get-EstateRollup -Rows $estateRows -GeneratedAt ([
     Out-File -LiteralPath $estatePath -Encoding utf8 -Force
 
 Write-Host 'Regenerated:' -ForegroundColor Green
-foreach ($path in @($assessmentPath, $actionListPath, $campaignPath, $ticketPath, $reportPath, $estatePath)) {
+foreach ($path in @($assessmentPath, $actionListPath, $noPasskeyPath, $campaignPath, $ticketPath, $reportPath, $estatePath)) {
     Write-Host "  $path"
 }
 $rows | Format-Table Risk, DisplayName, PerUserMfaState, BlockedAtRetirement -AutoSize

@@ -130,18 +130,31 @@ Two populations inside it deserve separate handling:
 | `Improved` / `Resolved` in bulk | The campaign is working. Report the number and keep going. |
 | Nothing moved | The campaign is not reaching people. Change the communication, not the cadence. |
 
-### 3b. Target the campaign
+### 3b. Target the rollout
 
-`<stem>_SmsVoiceUsers_NoPasskey.csv` is written on every run and is the list the registration campaign is built from: users with a phone method registered and no passkey. It is a different population from the action list, and larger — the action list is who needs work now, this is everybody the campaign should eventually reach.
+Two files are written on every run, and they answer different questions:
+
+| File | Use it for |
+|---|---|
+| `<stem>_NoPasskey_Nonprivileged.csv` | Sizing the rollout. Every known user without a passkey. |
+| `<stem>_SmsVoiceUsers_NoPasskey.csv` | Building the first campaign group. The subset who also hold a phone method. |
+
+The second is a strict subset of the first. Quoting the SMS/voice number as "users without passkeys" understates the work, sometimes badly.
 
 Two readings to avoid in a client conversation, because both are wrong and both are easy:
 
-- **It is registration, not usage.** A name on it means a phone number is registered against that account. It does not mean the person signed in with SMS last week. Nothing in this tool reads sign-in method, and the registration report carries no usage data. If a client asks "how many are actually using SMS", the honest answer is that this file does not say, and the sign-in logs do.
-- **It is not a lockout list.** Check `OtherSurvivingMfaMethods`. A blank there, beside a phone method, is the same population as `BlockedAtRetirement`. Anything listed means the user is safe on the date and still needs a passkey. A tenant can genuinely have `BlockedAtRetirement` at zero and hundreds of campaign candidates.
+- **It is registration, not usage.** A name on these files means a method is registered against the account. It does not mean the person used it last week. Nothing in this tool reads sign-in method. If a client asks "how many are actually using SMS", the honest answer is that these files do not say and the sign-in logs do.
+- **Neither is a lockout list.** Check `OtherSurvivingMfaMethods`. Blank there, beside a phone method, is the same population as `BlockedAtRetirement`. Anything listed means the user is safe on the date and still needs a passkey.
 
-The work after the file is manual and stays manual: review it, create the security group, add the members, confirm passkeys are enabled and the users are inside that policy's scope, then configure the registration campaign. This tool writes nothing to a tenant, so none of those four steps happen by running it again.
+**Both files are nonprivileged users only.** Directory-role holders are omitted and counted separately, because they are a hand-worked track. Say this plainly to a client, because the natural reading is the wrong one: omission is deferral, not safety — a privileged account without a passkey is the most exposed row in the tenant. Work those from the assessment CSV, filtering on `PrivilegeSource`.
 
-For an estate, rank on the sweep summary's `CampaignCandidates` column to see which customers carry the most work before committing to a campaign schedule.
+Detection covers active roles held directly or through a role-assignable group, and directly held PIM-eligible roles. It does **not** cover PIM for Groups eligibility, which needs a scope this tool does not request. If that is how the tenant grants roles, review the omitted population by hand first.
+
+**If the privilege read fails, no targeting list is produced at all** — the assessment, action list and report still are. The console names the failing read and the consent to grant (`RoleManagement.Read.Directory`). Do not work around it by reading an earlier export: the tool deletes a stale one for exactly that reason. Get the consent, re-run.
+
+The work after the file is manual and stays manual: review it, create the security group, add the members, confirm passkeys are enabled and the users are inside that policy's scope, then configure the registration campaign. This tool writes nothing to a tenant.
+
+For an estate, rank on the sweep summary's `NoPasskeyNonprivileged` and `CampaignCandidates`, and check `PrivilegeDiscoveryComplete` before trusting either — a tenant whose detection failed shows blank, not zero.
 
 ### 4. Report
 

@@ -21,7 +21,7 @@ BeforeAll {
     . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
     . (Import-ScriptFunction -Path (Get-AssessmentScriptPath) -Name @(
             'Get-PropertyValue'
-            'Get-CampaignCandidate'
+            'Get-NoPasskeyCandidate'
             'Get-PasskeyMethodList'
             'Protect-CsvInjection'
             'Export-AssessmentCsv'
@@ -35,7 +35,7 @@ BeforeAll {
     # Read from the script, never retyped: a retyped copy passes while the shipped list
     # says something else, which is the exact bug the AST lift exists to prevent.
     $script:Lists = Get-MethodListsFromScript -Path (Get-AssessmentScriptPath)
-    $script:Columns = Get-ScriptArrayVariable -Path (Get-AssessmentScriptPath) -Name 'CampaignCandidateColumns'
+    $script:Columns = Get-ScriptArrayVariable -Path (Get-AssessmentScriptPath) -Name 'NoPasskeyCandidateColumns'
 
     # A row carrying only what Get-CampaignCandidate reads, so a test cannot accidentally
     # depend on a column the function has no business consulting.
@@ -60,12 +60,36 @@ BeforeAll {
     }
 
     function Get-CandidateList {
-        param([object[]]$Rows, [string]$TenantId = '')
-        Get-CampaignCandidate -Rows @($Rows) `
-            -PhoneMethods $script:Lists.PhoneMethods `
-            -PasskeyMethods $script:Lists.PasskeyMethods `
-            -SurvivingMfaMethods $script:Lists.SurvivingMfaMethods `
-            -TenantId $TenantId
+        param(
+            [object[]]$Rows,
+            [string]$TenantId = '',
+            # Off means the wider no-passkey population; on means the SMS/voice subset.
+            # The subset is the default so every assertion written before the wider export
+            # existed still asserts exactly what it asserted then.
+            [switch]$AnyMethod,
+            $PrivilegedUserIds = $null,
+            $PrivilegeSources = $null
+        )
+        $splat = @{
+            Rows                = @($Rows)
+            PhoneMethods        = $script:Lists.PhoneMethods
+            PasskeyMethods      = $script:Lists.PasskeyMethods
+            SurvivingMfaMethods = $script:Lists.SurvivingMfaMethods
+            PrivilegedUserIds   = $PrivilegedUserIds
+            PrivilegeSources    = $PrivilegeSources
+            TenantId            = $TenantId
+        }
+        if (-not $AnyMethod) { $splat.RequirePhoneMethod = $true }
+        Get-NoPasskeyCandidate @splat
+    }
+
+    # Built the way the production code builds one -- a case-insensitive HashSet -- so these
+    # tests exercise the real membership semantics rather than a list's.
+    function New-PrivilegeSet {
+        param([hashtable]$Sources = @{})
+        $set = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($key in $Sources.Keys) { [void]$set.Add($key) }
+        return @{ Ids = $set; Sources = $Sources }
     }
 }
 
@@ -365,7 +389,10 @@ Describe 'The exported file' {
     It 'carries the columns the script names, in that order' {
         $path = Join-Path $script:OutDir 'one.csv'
         $rows = @(Get-CandidateList (New-Row -Methods @('mobilePhone')) -TenantId 'tenant-guid')
-        Export-AssessmentCsv -Data $rows -Path $path -HeaderWhenEmpty $script:Columns -SkipAclHardening
+        # Select-Object exactly as the script does: PrivilegeSource is an internal tag the
+        # caller splits on and then drops, so it must not reach the published file.
+        Export-AssessmentCsv -Data @($rows | Select-Object $script:Columns) -Path $path `
+            -HeaderWhenEmpty $script:Columns -SkipAclHardening
 
         @(Import-Csv -LiteralPath $path)[0].PSObject.Properties.Name | Should -Be $script:Columns
     }
@@ -399,7 +426,8 @@ Describe 'The exported file' {
         # profile edits, and this file is opened in Excel by a human doing a review.
         $path = Join-Path $script:OutDir 'injection.csv'
         $rows = @(Get-CandidateList (New-Row -Methods @('mobilePhone') -Name '=cmd|'' /C calc''!A0'))
-        Export-AssessmentCsv -Data $rows -Path $path -HeaderWhenEmpty $script:Columns -SkipAclHardening
+        Export-AssessmentCsv -Data @($rows | Select-Object $script:Columns) -Path $path `
+            -HeaderWhenEmpty $script:Columns -SkipAclHardening
 
         $written = @(Import-Csv -LiteralPath $path)[0].DisplayName
         $written | Should -Not -Match '^='
@@ -414,19 +442,23 @@ Describe 'The campaign count travels with the file' {
         # printed a number its own file did not contain.
         $text = Get-Content -LiteralPath $script:AssessmentPath -Raw
         $text | Should -Match 'CampaignCandidates -NotePropertyValue \$campaignRows\.Count'
-        $text | Should -Match '\$\(\$campaignRows\.Count\) users with SMS or voice registered and no passkey'
+        $text | Should -Match 'NoPasskeyNonprivileged -NotePropertyValue \$noPasskeyRows\.Count'
+        # Kept and omitted split from one evaluated collection, so they sum by construction
+        # and the omitted count can only hold users who would otherwise have qualified.
+        $text | Should -Match '\$campaignRows = @\(\$allCampaign \| Where-Object \{ -not \$_\.PrivilegeSource \}\)'
+        $text | Should -Match '\$campaignOmitted = @\(\$allCampaign \| Where-Object \{ \$_\.PrivilegeSource \}\)'
     }
 
     It 'builds the list from every enabled user, not just migration candidates' {
         # A user already off phone methods is not a migration candidate, but the campaign
         # question is asked of the whole tenant.
         $text = Get-Content -LiteralPath $script:AssessmentPath -Raw
-        $text | Should -Match 'Get-CampaignCandidate -Rows \$rows'
+        $text | Should -Match 'Rows\s+= \$rows'
     }
 
     It 'writes the file through the choke point that hardens it' {
         $text = Get-Content -LiteralPath $script:AssessmentPath -Raw
-        $text | Should -Match 'Export-AssessmentCsv -Data \$campaignRows'
+        $text | Should -Match 'Export-AssessmentCsv -Data @\(\$campaignRows \| Select-Object'
         $text | Should -Match '-SkipAclHardening:\$SkipAclHardening'
     }
 

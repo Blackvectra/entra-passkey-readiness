@@ -60,6 +60,41 @@ function Get-SweepGuiScriptPath {
     Join-Path (Split-Path -Parent $PSScriptRoot) 'Show-EntraSmsVoiceSweepGui.ps1'
 }
 
+function New-GraphError {
+    <#
+    .SYNOPSIS
+        An exception shaped like the one Invoke-MgGraphRequest throws, carrying a status code.
+    .DESCRIPTION
+        The production code reads the status off $_.Exception.Response.StatusCode to tell an
+        answer (404: the principal was not a group) from a gap (403: the read was refused).
+        A bare [Exception] has no Response, so a test that threw one would exercise only the
+        default branch and the 404-is-not-a-gap path would never be covered.
+    #>
+    param(
+        [Parameter(Mandatory)][int]$Status,
+        [Parameter(Mandatory)][string]$Message
+    )
+
+    $exception = [System.Exception]::new($Message)
+    $exception | Add-Member -NotePropertyName Response -NotePropertyValue ([PSCustomObject]@{ StatusCode = $Status }) -Force
+    return $exception
+}
+
+function New-ErrorRecord {
+    <#
+    .SYNOPSIS
+        An ErrorRecord wrapping New-GraphError, for functions that take $_ rather than an exception.
+    #>
+    param(
+        [Parameter(Mandatory)][int]$Status,
+        [Parameter(Mandatory)][string]$Message
+    )
+
+    return [System.Management.Automation.ErrorRecord]::new(
+        (New-GraphError -Status $Status -Message $Message), 'GraphError',
+        [System.Management.Automation.ErrorCategory]::InvalidResult, $null)
+}
+
 function Get-ScriptArrayVariable {
     <#
     .SYNOPSIS

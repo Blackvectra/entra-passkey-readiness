@@ -92,7 +92,7 @@ Microsoft publishes [entra-sms-voice-usage-analyzer](https://github.com/microsof
 
 | | Microsoft's analyzer | This tool |
 |---|---|---|
-| Graph scopes | `Policy.Read.All`, `Group.Read.All` | `Policy.Read.All`, `AuditLog.Read.All`, `User.Read.All`, `GroupMember.Read.All` |
+| Graph scopes | `Policy.Read.All`, `Group.Read.All` | `Policy.Read.All`, `AuditLog.Read.All`, `User.Read.All`, `GroupMember.Read.All`, `RoleManagement.Read.Directory` |
 | Modules required | 3 | 1 |
 | Resolves group targets to users | No | Yes, transitively |
 | Reads registration report | No | Yes |
@@ -151,16 +151,19 @@ Treat `Jan 28, 2027` as an artefact of Microsoft's analyzer rather than a publis
 
 ### Delegated Graph permissions
 
-All four scopes are read-only. The script requests them at connect time and will not proceed without them.
+All five scopes are read-only. The script requests them at connect time and will not proceed without them.
+
+You do not need to run `Connect-MgGraph` yourself. The script connects if there is no usable session, reuses an existing one only after checking that its tenant and scopes match, and aborts rather than assess the wrong customer if an explicit `-TenantId` disagrees with the live context. It prints the connected tenant and the signed-in account before it reads anything.
 
 | Scope | Used for |
 |---|---|
 | `Policy.Read.All` | Authentication Methods Policy (method configuration, campaign and migration state), legacy per-user MFA state, authentication strengths, Conditional Access policies |
 | `AuditLog.Read.All` | `reports/authenticationMethods/userRegistrationDetails` |
 | `User.Read.All` | User objects, `accountEnabled`, `userType` |
-| `GroupMember.Read.All` | Transitive group membership for AMP include/exclude targets |
+| `GroupMember.Read.All` | Transitive group membership for AMP include/exclude targets, and for role-assignable groups |
+| `RoleManagement.Read.Directory` | Who holds a Microsoft Entra directory role — `/roleManagement/directory/roleAssignments` and `/roleManagement/directory/roleEligibilityScheduleInstances` — so privileged accounts can be held out of the bulk registration exports. Microsoft documents this as the least-privileged permission for the first endpoint, and it also satisfies the second, so one consent item covers both. |
 
-If your tenant requires admin consent for delegated Graph scopes, have a Global Administrator or Privileged Role Administrator consent to these four before first run.
+If your tenant requires admin consent for delegated Graph scopes, have a Global Administrator or Privileged Role Administrator consent to these five before first run.
 
 ---
 
@@ -344,7 +347,7 @@ One row per tenant in `SweepSummary_<timestamp>.csv`. This is the file the [esta
 | `BlockedAdminsAtRetirement` | How many of those hold a privileged role |
 | `PasswordlessCapableInScope` | In-scope users who already hold a surviving method |
 | `UsersWithPasskey` / `UsersWithoutPasskey` | Passkey adoption in that tenant, counted over every enabled user rather than over migration candidates, so the figures compare tenant to tenant. See [Who has a passkey](#who-has-a-passkey). |
-| `CampaignCandidates` | How many users that tenant's registration campaign would target: a phone method registered and no passkey. Narrower than `UsersWithoutPasskey`, so it sizes the actual work. See [The campaign candidate list](#the-campaign-candidate-list). |
+| `CampaignCandidates` | How many users that tenant's registration campaign would target: a phone method registered and no passkey. Narrower than `UsersWithoutPasskey`, so it sizes the actual work. See [The campaign candidate list](#the-no-passkey-exports). |
 | `OldestReportRowUtc` | Age of the oldest registration-report row behind the figures |
 | `AssessmentTimeUtc` | When this tenant was actually assessed. Differs from the file's timestamp for rows `-Resume` carried forward. |
 | `ReportPath` | Where that tenant's per-user export was written |
@@ -470,68 +473,89 @@ The action list is written on every run. It contains just the Critical, High, an
 - **The file you attach to a ticket you raised yourself.** Seven columns, in plain language rather than Graph's enum spellings, and no object IDs: `Priority`, `User`, `SignIn`, `LastSignIn`, `Has`, `Problem`, `DoThis`. `Has` reads `Phone + Authenticator` instead of `mobilePhone; microsoftAuthenticatorPush`. `Priority` sorts the queue: `1 - Lockout` (stops working 2027-02-01) ahead of `2 - Admin`, `3 - Migrate`, and `4 - Likely leaver` (stale or never signed in — check before chasing). Everything a technician needs to work the queue top-down, and none of the diagnostic columns that make the full export wide.
 - **The membership list** for the migration security group Microsoft's guidance tells you to create as step one, ready for bulk import on `SignIn` (the user's sign-in name/UPN).
 
-See [examples/Example-ActionList.csv](examples/Example-ActionList.csv). The [campaign candidate list](#the-campaign-candidate-list) is written beside it on every run and answers a different question: not who needs work now, but who the registration campaign should target.
+See [examples/Example-ActionList.csv](examples/Example-ActionList.csv). The [campaign candidate list](#the-no-passkey-exports) is written beside it on every run and answers a different question: not who needs work now, but who the registration campaign should target.
 
 Producing the list is read-only. Creating and populating the group stays a deliberate manual action, because that is a write and this tool does not write.
 
 **If you raise tickets yourself, this is the file you want, and you can skip `-ExportTickets` entirely.** Nothing is created in any external system by either switch — every output is a file on disk.
 
-### The campaign candidate list
+### The no-passkey exports
 
-Written on every run, beside the assessment CSV:
+Two files, written on every run beside the assessment CSV:
 
 ```powershell
 .\Get-EntraSmsVoiceMigrationImpact.ps1 -CustomerName 'Contoso' -OutputPath C:\Reports\Contoso.csv
-# -> C:\Reports\Contoso_SmsVoiceUsers_NoPasskey.csv
+# -> C:\Reports\Contoso_NoPasskey_Nonprivileged.csv    every known user without a passkey
+# -> C:\Reports\Contoso_SmsVoiceUsers_NoPasskey.csv     the subset who also hold a phone method
 ```
 
-The run prints the count and the path:
-
-```
-Campaign candidates (184 users with SMS or voice registered and no passkey): C:\Reports\Contoso_SmsVoiceUsers_NoPasskey.csv
-```
-
-This is the file you review before building the registration-campaign group. **Read what it is carefully, because the name invites two wrong readings:**
-
-| It means | It does not mean |
+| File | Answers |
 |---|---|
-| A phone method is **registered** against the user | That the user has signed in with SMS or voice recently. The registration report carries no usage data, and nothing in this tool reads sign-in method. |
-| No **passkey** is registered | That the user has no surviving MFA method, or that they will be locked out on 2027-02-01. Check `OtherSurvivingMfaMethods`: a user on Microsoft Authenticator is perfectly safe and still belongs on this list. |
+| `_NoPasskey_Nonprivileged.csv` | **The honest size of the passkey rollout.** Every enabled, nonprivileged user whose registration could be read and who holds no passkey. |
+| `_SmsVoiceUsers_NoPasskey.csv` | **Who the registration campaign should target first.** The subset of the above who also hold a retiring SMS or voice method. |
 
-That second row is the point of the file. `BlockedAtRetirement` can be zero across the whole tenant while this list has hundreds of names on it — Authenticator keeps everybody signed in without a single passkey being registered anywhere.
+The second is a **strict subset** of the first. A user with no phone number and no passkey is in the first file and not the second, and still needs a passkey — so never read the SMS/voice file as the whole no-passkey population.
+
+**Read what these files are carefully, because both names invite two wrong readings:**
+
+| They mean | They do not mean |
+|---|---|
+| A method is **registered** against the user | That the user has signed in with it recently. The registration report carries no usage data, and nothing in this tool reads sign-in method. |
+| No **passkey** is registered | That the user has no surviving MFA method, or that they will be locked out on 2027-02-01. Check `OtherSurvivingMfaMethods`: a user on Microsoft Authenticator is perfectly safe and still belongs on these lists. |
+
+That second row is the point. `BlockedAtRetirement` can be zero across the whole tenant while these files have hundreds of names on them.
 
 **Selection rules**, in order:
 
 | Rule | Detail |
 |---|---|
-| Enabled | Every row is an enabled user already: the assessment reads `accountEnabled` and assesses enabled users only, so this file inherits that rather than re-testing it. |
-| Has a registration-report row | A user with no row has an **unknown** passkey state, not an absent one. Targeting them would put a name in a campaign on the strength of data nobody has, so they are left off and stay counted in `UsersMissingFromReport`. |
-| Holds a phone method | At least one registered method in the assessment's `$phoneMethods` classification — both generations of enum spellings, matched case-insensitively. |
-| Holds no passkey | No registered method in `$passkeyMethods`. See [Who has a passkey](#who-has-a-passkey) for exactly which spellings count, and which passwordless methods deliberately do not. |
+| Enabled | Every row is an enabled user already: the assessment reads `accountEnabled` and assesses enabled users only, so these files inherit that rather than re-testing it. |
+| Has a registration-report row | A user with no row has an **unknown** passkey state, not an absent one, so they are left off and stay counted in `UsersMissingFromReport`. |
+| Holds no passkey | No registered method in `$passkeyMethods`. See [Who has a passkey](#who-has-a-passkey) for which spellings count and which passwordless methods deliberately do not. |
+| Holds a phone method | SMS/voice file only. At least one method in `$phoneMethods`, both enum generations, matched case-insensitively. |
 | Not excluded by pattern | A user matched by `-ExcludeUpnPattern` keeps its `Excluded` row in the assessment CSV as a record of what the pattern removed, and appears in no count and no campaign. |
+| **Not privileged** | See below. |
 
-Guests are **included**, and named by `UserType`. A guest with a phone number is targeted by the retirement exactly like a member; whether your campaign should reach them is your call to make from the file, not one the tool makes by dropping the row.
+Guests are **included**, and named by `UserType`. A guest with a phone number is targeted by the retirement exactly like a member; whether your campaign should reach them is your call to make from the file.
 
-**Columns:**
+**Columns:** `TenantId`, `Risk`, `DisplayName`, `UserPrincipalName`, `UserType`, `PhoneMethodsRegistered`, `OtherSurvivingMfaMethods`, `AllMethodsRegistered`, `UserId`. Both files share the schema.
 
-| Column | Detail |
-|---|---|
-| `TenantId` | So an estate's worth of these files can be concatenated and still say which customer each name came from. The assessment CSV omits it because it is only ever read inside its own per-tenant folder. |
-| `Risk` | The existing risk band, so the file is ordered worst-first and a reviewer can triage. |
-| `DisplayName`, `UserPrincipalName`, `UserType` | Who. Import on `UserPrincipalName`. |
-| `PhoneMethodsRegistered` | The retiring methods this user actually holds — the match that put them on the list. |
-| `OtherSurvivingMfaMethods` | What else they hold that survives and satisfies MFA alone. **Blank here plus a phone method is the shape that is also `BlockedAtRetirement`**; anything listed means campaign target, not lockout. |
-| `AllMethodsRegistered` | Everything registered, semicolon-separated, as the assessment CSV reports it. |
-| `UserId` | Object ID. Last, because it is a join key rather than something you read. |
+`TenantId` is on them so an estate's worth can be concatenated and still say which customer each name came from; the assessment CSV omits it because it is only ever read inside its own per-tenant folder. Ordered worst band first, then UPN, then `UserId` as an explicit final tie-breaker, so two runs over an unchanged tenant produce identically ordered files. A tenant with no candidates still gets a CSV with these headers rather than an empty file.
 
-Ordered worst band first, then UPN, then `UserId` as an explicit final tie-breaker, so two runs over an unchanged tenant produce an identically ordered file. A tenant with no candidates still gets a CSV with these headers rather than an empty file.
-
-See [examples/Example-SmsVoiceNoPasskey.csv](examples/Example-SmsVoiceNoPasskey.csv).
+See [examples/Example-NoPasskeyNonprivileged.csv](examples/Example-NoPasskeyNonprivileged.csv) and [examples/Example-SmsVoiceNoPasskey.csv](examples/Example-SmsVoiceNoPasskey.csv).
 
 > [!IMPORTANT]
-> Producing the list is read-only. **Creating the security group, adding the members, enabling authentication methods, and configuring the registration campaign all stay manual.** This tool makes no write of any kind to a tenant.
+> Producing these lists is read-only. **Creating the security group, adding the members, enabling authentication methods, and configuring the registration campaign all stay manual.** This tool makes no write of any kind to a tenant.
 
-For a whole estate, `Invoke-EntraSmsVoiceSweep.ps1` carries a `CampaignCandidates` count per tenant in its summary CSV, and each tenant's own file sits beside that tenant's `ReportPath`.
+#### Privileged accounts are held back, on purpose
+
+Both files are **nonprivileged users only**. A user holding any Microsoft Entra directory role is omitted and counted separately, because privileged remediation is a hand-worked track: an administrator does not belong in a bulk registration campaign.
+
+> [!WARNING]
+> **Omitted is not safe, and not low risk.** A privileged account without a passkey is the most exposed row in the tenant. Omission defers it to a separate workflow; it does not excuse it. Work those by hand from the assessment CSV, where `PrivilegeSource` names why each was held back.
+
+Privileged accounts stay **visible** in the tenant-wide assessment CSV and in every tenant-wide figure, so the overall passkey picture is still accurate.
+
+Detection is by role assignment only — never from a naming pattern, a job title, or an `admin` substring in a UPN. A break-glass account called `svc-monitor` is privileged; a shared mailbox called `admin-reception` is not.
+
+| Coverage | Source |
+|---|---|
+| ✅ Active role assigned directly to a user | `/roleManagement/directory/roleAssignments` |
+| ✅ Active role assigned to a role-assignable group, expanded transitively to its enabled members | the same, plus `transitiveMembers` |
+| ✅ PIM-eligible directory role held directly by a user | `/roleManagement/directory/roleEligibilityScheduleInstances` |
+| ❌ **PIM for Groups**: a user merely *eligible* to become a member of a role-assigned group | needs `PrivilegedEligibilitySchedule.Read.AzureADGroup`, a scope this tool does not request |
+
+That last row is a **standing, declared limitation**, not a failed read. It is named on the console, in the HTML report and here, and it does not withhold the exports — withholding them permanently on a path that can never be read with the permissions this tool asks for would leave the feature unusable rather than safe. If PIM for Groups is how your tenant grants roles, review the omitted population by hand before running a campaign.
+
+**If privilege discovery does not complete, neither targeting export is written.** One policy, applied in one place:
+
+- The assessment CSV, action list, ticket queue and HTML report are still written — they describe the tenant and claim no safe targeting population.
+- Any file of either targeting name from an **earlier** run is deleted, so a stale list cannot sit beside today's fresh assessment and be read as current.
+- `CampaignCandidates`, `NoPasskeyNonprivileged` and the omitted counts read **blank, not zero** — a zero would look like a measured result.
+- Every assessment row reads `PrivilegeSource` = `(not determined)` rather than blank, so no row asserts a user is unprivileged.
+- The console and the summary name the failing read and the consent to grant.
+
+For a whole estate, the sweep summary carries `NoPasskeyNonprivileged`, `CampaignCandidates`, both omitted counts, and `PrivilegeDiscoveryComplete` per tenant — so a tenant whose detection failed is visibly different from one with nothing to do.
 
 ### Ticket queue for your PSA
 
@@ -666,7 +690,7 @@ Accepts and passes through `-IncludeUnaffected`, `-SkipLegacyPerUserMfa`, `-Excl
 | `Critical` / `High` / `Moderate` / `Low` | Risk-band counts across migration candidates |
 | `PasswordlessCapableInScope` | In-scope users who already have a surviving method |
 | `UsersWithPasskey` / `UsersWithoutPasskey` | Passkey adoption across every enabled user, not just migration candidates. With `UsersMissingFromReport` they sum to `EnabledUsersAssessed`. See [Who has a passkey](#who-has-a-passkey). |
-| `CampaignCandidates` | Rows in the campaign candidate list: a phone method registered, no passkey, not excluded. Always equal to the row count of the file `CampaignCandidateListPath` names. See [The campaign candidate list](#the-campaign-candidate-list). |
+| `CampaignCandidates` | Rows in the campaign candidate list: a phone method registered, no passkey, not excluded. Always equal to the row count of the file `CampaignCandidateListPath` names. See [The campaign candidate list](#the-no-passkey-exports). |
 | `BlockedAtRetirement` | **Users stopped at sign-in on 2027-02-01.** A phone is their only method that satisfies MFA. The number to drive to zero. |
 | `BlockedAdminsAtRetirement` | How many of those hold a privileged role |
 | `UnrecognizedMethods` | Any registered method name this tool does not classify. Treated as not surviving, so affected users read as more exposed. |

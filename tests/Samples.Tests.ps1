@@ -70,7 +70,7 @@ Describe 'Example-MigrationImpact.csv' {
         # is the other: who holds a passkey is the rollout's own question, and neither the
         # risk bands nor IsPasswordlessCapable answers it without over-counting.
         $columns = $script:Assessment[0].PSObject.Properties.Name
-        $columns.Count | Should -BeLessOrEqual 18
+        $columns.Count | Should -BeLessOrEqual 19
         $columns | Should -Not -Contain 'IsMfaCapable'
         $columns | Should -Not -Contain 'RegistrationReportLastUpdatedUtc'
     }

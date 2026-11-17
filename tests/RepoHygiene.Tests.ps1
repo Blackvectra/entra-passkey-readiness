@@ -21,6 +21,7 @@ BeforeAll {
         '_RemediationGroup\.csv$'
         '_Tickets\.csv$'
         '_SmsVoiceUsers_NoPasskey\.csv$'
+        '_NoPasskey_Nonprivileged\.csv$'
         '_TicketHistory\.json$'
         '^TicketHistory\.json$'
     )

@@ -363,6 +363,17 @@ end {
             # The per-tenant file itself sits beside that tenant's ReportPath, which is
             # already a column, so the path is not duplicated here.
             CampaignCandidates         = & $get 'CampaignCandidates'
+            # The wider rollout figure, and the two omitted counts, which differ: a
+            # privileged user with no phone method is held back from the no-passkey list
+            # and was never a candidate for the campaign list.
+            NoPasskeyNonprivileged     = & $get 'NoPasskeyNonprivileged'
+            NoPasskeyPrivilegedOmitted = & $get 'NoPasskeyPrivilegedOmitted'
+            CampaignPrivilegedOmitted  = & $get 'CampaignPrivilegedOmitted'
+            # Whether the two counts above can be trusted at all. A tenant whose role reads
+            # failed publishes no targeting list, and its campaign columns read blank rather
+            # than 0 -- so this column is what tells an estate reader which it is.
+            PrivilegeDiscoveryComplete = & $get 'PrivilegeDiscoveryComplete'
+            PrivilegeDiscoveryGaps     = & $get 'PrivilegeDiscoveryGaps'
             OldestReportRowUtc         = & $get 'OldestReportRowUtc'
             # When this tenant was actually assessed, which is not the same as when the
             # summary file was written. -Resume copies a successful row forward verbatim
@@ -636,7 +647,9 @@ end {
         'PolicyMigrationState', 'SmsPolicyState', 'VoicePolicyState', 'EnabledUsersAssessed',
         'MigrationCandidates', 'Critical', 'High', 'Moderate', 'Low', 'BlockedAtRetirement',
         'BlockedAdminsAtRetirement', 'PasswordlessCapableInScope',
-        'UsersWithPasskey', 'UsersWithoutPasskey', 'CampaignCandidates', 'OldestReportRowUtc',
+        'UsersWithPasskey', 'UsersWithoutPasskey', 'NoPasskeyNonprivileged',
+        'CampaignCandidates', 'NoPasskeyPrivilegedOmitted', 'CampaignPrivilegedOmitted',
+        'PrivilegeDiscoveryComplete', 'PrivilegeDiscoveryGaps', 'OldestReportRowUtc',
         'AssessmentTimeUtc', 'ReportPath', 'Error'
     )
 
