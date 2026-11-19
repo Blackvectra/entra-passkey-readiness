@@ -60,7 +60,9 @@ Get-Module -ListAvailable Pester, PSScriptAnalyzer | Select-Object Name, Version
 
 PowerShell 7.0+, enforced by `#Requires`. `Microsoft.Graph.Authentication` is the only runtime dependency.
 
-Six delegated read scopes, requested by `Connect-AssessmentGraph` (the operator never runs `Connect-MgGraph`): `Policy.Read.All`, `AuditLog.Read.All`, `User.Read.All`, `GroupMember.Read.All`, `RoleManagement.Read.Directory`, `PrivilegedEligibilitySchedule.Read.AzureADGroup`. Recommended role is Global Reader; Security Reader is refused the PIM for Groups read on role-assignable groups. Never add a write scope.
+Six delegated read scopes, requested by `Connect-AssessmentGraph` (the operator never runs `Connect-MgGraph`): `Policy.Read.All`, `AuditLog.Read.All`, `User.Read.All`, `GroupMember.Read.All`, `RoleManagement.Read.Directory`, `PrivilegedEligibilitySchedule.Read.AzureADGroup`. Recommended role is Global Reader; Security Reader is refused the PIM for Groups read on role-assignable groups. App-only runs need the same six as application permissions; a test keeps the README, playbook and sweep help in step with the list in the script. Never add a write scope.
+
+An existing Graph session is reused only when its tenant GUID equals `-TenantId`. A domain passed as `-TenantId` always signs in fresh: matching on the account's domain once accepted a guest session in another customer's tenant.
 
 No test contacts a live tenant, and nothing here authorizes one: a live-tenant run needs the user's explicit go-ahead.
 
@@ -86,7 +88,7 @@ Fields added late with `Add-Member` (the export paths and counts) are part of th
 
 ### How the sweep runs tenants concurrently
 
-Sequential mode calls the assessment script in-process. Concurrent mode (`-ThrottleLimit`) cannot, because each tenant needs its own Graph session: it writes each job's splatted arguments to a JSON file in an ACL-hardened temp handoff directory, launches a child `pwsh` per tenant via `Start-Process`, and reads back the summary as JSON. Paths are embedded in the child command string, so apostrophes in operator-supplied paths are doubled before interpolation.
+Sequential mode calls the assessment script in-process. Concurrent mode (`-ThrottleLimit`) cannot, because each tenant needs its own Graph session: it writes each job's splatted arguments to a JSON file in an ACL-hardened temp handoff directory, launches a child `pwsh` per tenant via `Start-Process`, and reads back the summary as JSON. Paths are embedded in the child command string, so they are escaped with `CodeGeneration.EscapeSingleQuotedStringContent` before interpolation — not by doubling the ASCII apostrophe alone, because PowerShell also ends a single-quoted string at the typographic quotes U+2018 to U+201B.
 
 ### StrictMode and Graph reads
 
@@ -131,13 +133,15 @@ Neither file claims usage (registration only — nothing reads sign-in method) o
 
 A user with several sources is counted once, labels joined with ` + `. Outside the definition, and said so in `PrivilegeCoverageNote` and on the console: Azure RBAC and app roles. Do not grow this into a general entitlement inventory.
 
-It returns `Complete` and `Gaps` alongside the set. **An incomplete read is never an empty list.** The failure policy lives in one place in the Execution section: if `Complete` is false, neither targeting export is written, any stale file of either name is deleted, the related summary counts are `$null` (not 0), and every row's `PrivilegeSource` reads `(not determined)`. The assessment CSV, action list, tickets and HTML are still written. A 404 on a group expansion is an answer (the principal was not a group), not a gap; an empty eligibility collection is an answer too. A 404 on an owner read *is* a gap, because that group answered moments earlier; so is an owner record with no `id`.
+It returns `Complete` and `Gaps` alongside the set. **An incomplete read is never an empty list.** The failure policy lives in one place in the Execution section: if `Complete` is false, neither targeting export is written, the related summary counts are `$null` (not 0), and every row's `PrivilegeSource` reads `(not determined)`. The assessment CSV, action list, tickets and HTML are still written. A 404 on a group expansion is an answer (the principal was not a group), not a gap; an empty eligibility collection is an answer too. A 404 on an owner read *is* a gap, because that group answered moments earlier; so is an owner record with no `id`.
 
-`IsAdmin` (from the registration report) still drives risk scoring and is untouched by this; do not merge the two.
+On **every** run, any earlier file of either targeting name is removed before the first write (just before the assessment CSV). If one cannot be removed, the run throws there with nothing written; never report a removal you have not confirmed with `Test-Path`.
+
+`IsAdmin` (from the registration report) still drives risk scoring. It is also a second opinion for the exports, never a substitute for discovery: a user it marks admin whom discovery did not find is held back with `PrivilegeSource` = `Admin per registration report`, on the row and in `Get-NoPasskeyCandidate`. The selector also throws on a `$null` privileged set (pass an empty set) and holds back a row with no `UserId` as `(not determined)`.
 
 ### Output hardening
 
-`Protect-CsvInjection` and `ConvertTo-SafeHtml` guard against attacker-influenceable display names reaching a file somebody else opens; both fail silently if broken, so both want a test with any change. `Protect-OutputFile` ACL-locks output to the owner (`-SkipAclHardening` opts out, used by the tests). `Export-AssessmentCsv -HeaderWhenEmpty` writes a header-only file for an empty collection, because `Export-Csv` alone writes a bare byte-order mark.
+`Protect-CsvInjection` and `ConvertTo-SafeHtml` guard against attacker-influenceable display names reaching a file somebody else opens; both fail silently if broken, so both want a test with any change. `Protect-OutputFile` ACL-locks output to the owner (`-SkipAclHardening` opts out, used by the tests). Every file the assessment writes goes through `Write-ProtectedFile`: a private temporary file beside the target, written by the scriptblock you pass it, then renamed into place with `File.Move`. Write to the `$Destination` the writer is handed, never to the final path; a test fails the build on any `Export-Csv`, `Set-Content` or `Out-File` that does not. Lifting a writer into a test or `examples/New-ExampleOutput.ps1` means lifting `Write-ProtectedFile` too. `Export-AssessmentCsv -HeaderWhenEmpty` writes a header-only file for an empty collection, because `Export-Csv` alone writes a bare byte-order mark.
 
 One asymmetry worth knowing: report CSVs get formula-prefix neutralization on the way out, but the *tenant list* the sweep reads back is an input, so a name that would open as a formula is rejected at entry in the GUI instead.
 
@@ -153,7 +157,7 @@ Graph is mocked by defining `Invoke-GraphGet` and `Get-GraphCollection` in the t
 
 `tests/EndToEnd.Tests.ps1` is different: it runs the whole script in a child `pwsh` against a stub Graph module and captures stdout, the CSVs and the summary JSON. Use it to assert console lines and cross-file consistency.
 
-Role and PIM reads are stubbed the same way; `New-GraphError` builds an exception carrying a status code, which matters because the code tells a 404 (an answer) from a 403 (a gap). The end-to-end stub tenant is deliberately mixed — direct, group-derived, PIM-eligible and PIM-for-Groups-eligible privilege, a passkey holder with a role, a no-phone no-passkey user, a standing owner of a role-holding group, a user missing from the report — and two more end-to-end runs prove the exports are withheld: one refuses the role reads, the other lets them succeed and refuses only the PIM for Groups read (it also pre-seeds stale export files and checks they are removed).
+Role and PIM reads are stubbed the same way; `New-GraphError` builds an exception carrying a status code, which matters because the code tells a 404 (an answer) from a 403 (a gap). The end-to-end stub tenant is deliberately mixed — direct, group-derived, PIM-eligible and PIM-for-Groups-eligible privilege, a passkey holder with a role, a no-phone no-passkey user, a standing owner of a role-holding group, a user missing from the report — and two more end-to-end runs prove the exports are withheld: one refuses the role reads, the other lets them succeed and refuses only the PIM for Groups read (it also pre-seeds stale export files and checks they are removed). A further pair pre-seeds earlier lists and checks that one that cannot be deleted stops the run before anything is written, and that a run stopped part-way has already removed them.
 
 **Do not reassign shared `$script:` fixtures inside an `It`.** It leaks into later `Describe` blocks, where assertions then pass or fail by luck.
 
