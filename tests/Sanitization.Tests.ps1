@@ -220,11 +220,13 @@ Describe 'Every CSV the project writes uses the same guard' {
         $script:Reference = Get-GuardText -Path (Get-AssessmentScriptPath)
     }
 
+    # File names, not helper calls: test cases are built during discovery, before BeforeAll
+    # has defined the helpers.
     It 'defines an identical guard in <Name>' -TestCases @(
-        @{ Name = 'the sweep'; Path = (Get-SweepScriptPath) }
-        @{ Name = 'the comparison script'; Path = (Get-CompareScriptPath) }
+        @{ Name = 'the sweep'; Script = 'Invoke-EntraSmsVoiceSweep.ps1' }
+        @{ Name = 'the comparison script'; Script = 'Compare-EntraSmsVoiceAssessment.ps1' }
     ) {
-        Get-GuardText -Path $Path | Should -Be $script:Reference
+        Get-GuardText -Path (Join-Path (Split-Path -Parent $PSScriptRoot) $Script) | Should -Be $script:Reference
     }
 
     It 'routes the sweep summary through it' {
