@@ -54,6 +54,7 @@ $examplesDir = $PSScriptRoot
         'New-TicketExport'
         'Protect-CsvInjection'
         'Export-AssessmentCsv'
+        'Write-ProtectedFile'
     ))
 # PreferredRaw is hand-supplied per fictional person below rather than derived through
 # Get-PreferredAuthenticationMethod, which expects a real registration-report object this
@@ -230,7 +231,10 @@ $rows = foreach ($person in $directory) {
             -PasskeyMethods $passkeyMethods
         # ContainsKey, not a dot: StrictMode Latest throws on a missing hashtable key, and
         # most of the fixture people deliberately have no Privilege entry.
-        PrivilegeSource        = if ($person.ContainsKey('Privilege')) { [string]$person['Privilege'] } else { '' }
+        # The script also holds back a registration-report admin that role discovery did not
+        # find, and names the reason on the row; mirrored here so the samples match a run.
+        PrivilegeSource        = if ($person.ContainsKey('Privilege')) { [string]$person['Privilege'] }
+                                 elseif ($person.IsAdmin) { 'Admin per registration report' } else { '' }
         PreferredMethod        = Get-FriendlyMethodName ([string]$person.PreferredRaw)
         IsPasswordlessCapable  = $person.Passwordless
         UserId                 = ('11111111-aaaa-4bbb-8ccc-{0:d12}' -f $index)

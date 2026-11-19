@@ -428,7 +428,7 @@ $changes | Where-Object Movement -eq 'Regressed' | Format-Table DisplayName, Bas
 
 ### Unattended authentication
 
-App-only runs need the same four Graph permissions granted as **application** permissions with admin consent in each tenant, and a certificate registered on the app registration.
+App-only runs need the same six Graph permissions granted as **application** permissions with admin consent in each tenant, and a certificate registered on the app registration. Without `RoleManagement.Read.Directory` and `PrivilegedEligibilitySchedule.Read.AzureADGroup`, privileged-account discovery cannot complete and every tenant's targeting exports are withheld.
 
 ```powershell
 .\Get-EntraSmsVoiceMigrationImpact.ps1 `
@@ -532,6 +532,8 @@ See [examples/Example-NoPasskeyNonprivileged.csv](examples/Example-NoPasskeyNonp
 
 Both files are **nonprivileged users only**. A user holding any Microsoft Entra directory role is omitted and counted separately, because privileged remediation is a hand-worked track: an administrator does not belong in a bulk registration campaign.
 
+A user the registration report itself marks as an admin (`isAdmin`) whom role discovery did not find is held back too, with `PrivilegeSource` = `Admin per registration report`: the two reads disagreeing means one of them is wrong, and the safe reading keeps an administrator out of a bulk campaign.
+
 One further group is held back **as a conservative campaign exclusion, not as a role holder**: standing owners of a group that itself holds an active or PIM-eligible directory role. An owner can manage that group's membership, which is a short path to the role, so for this first campaign those accounts go to the hand-worked track too. Their `PrivilegeSource` reads `RoleHoldingGroupOwner`, never a role name. Owners of groups that hold no role are not read and stay on the lists.
 
 > [!WARNING]
@@ -554,7 +556,7 @@ Still outside this definition, and said so on the console: privilege granted by 
 **If privilege discovery does not complete, neither targeting export is written.** One policy, applied in one place:
 
 - The assessment CSV, action list, ticket queue and HTML report are still written — they describe the tenant and claim no safe targeting population.
-- Any file of either targeting name from an **earlier** run is deleted, so a stale list cannot sit beside today's fresh assessment and be read as current.
+- Any file of either targeting name from an **earlier** run is deleted **before this run writes anything**, on every run. If it cannot be deleted (open in Excel, say), the run stops at that point having written nothing, rather than leave a stale list beside today's fresh assessment.
 - `CampaignCandidates`, `NoPasskeyNonprivileged` and the omitted counts read **blank, not zero** — a zero would look like a measured result.
 - Every assessment row reads `PrivilegeSource` = `(not determined)` rather than blank, so no row asserts a user is unprivileged.
 - The console and the summary name the failing read and the consent to grant.

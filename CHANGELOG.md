@@ -26,7 +26,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
   Each file reports its own omitted count, and the two differ: a privileged user with no phone method is held back from the wider export and was never a campaign candidate. Kept and omitted are split from one evaluated collection, so they sum to the qualifying population by construction and an omitted count can only ever contain users who would otherwise have been on that file.
 
-  **One documented failure policy, applied in one place.** If privilege discovery does not complete, neither targeting export is written; the assessment CSV, action list, tickets and HTML report still are, because they describe the tenant and claim no safe targeting population. A file of either targeting name from an earlier run is deleted, so a stale list cannot sit beside today's assessment and be read as current. The withheld counts read blank, not zero. Every row reads `PrivilegeSource` = `(not determined)` rather than blank, because a blank would assert the one thing such a run cannot say. The console names the failing read and the consent to grant.
+  **One documented failure policy, applied in one place.** If privilege discovery does not complete, neither targeting export is written; the assessment CSV, action list, tickets and HTML report still are, because they describe the tenant and claim no safe targeting population. A file of either targeting name from an earlier run is deleted before the run writes anything, and the run stops there if it cannot be, so a stale list cannot sit beside today's assessment and be read as current. The withheld counts read blank, not zero. Every row reads `PrivilegeSource` = `(not determined)` rather than blank, because a blank would assert the one thing such a run cannot say. The console names the failing read and the consent to grant.
 
 - **The console answers the operator's questions in the order they are asked**: enabled users assessed, with a passkey, without one, unknown registration status, and SMS/voice without a passkey — each naming its own population, with the three known populations' sum printed so the arithmetic is checkable, and adoption and report coverage quoted as separate percentages against stated denominators. Deliberately no "ready" or "compliant" label: nothing in a run verifies that a registered passkey has been used, that the user is inside the passkey policy's scope, or that any sign-in succeeded, and a label implying any of that would be a claim the tool has not earned. The HTML report gains the matching tiles and renders a summary that predates them as "not available" rather than 0.
 
@@ -131,6 +131,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - GitHub Actions CI running PSScriptAnalyzer and Pester on every push and pull request, with analyzer findings annotated onto the diff.
 
 - `PSScriptAnalyzerSettings.psd1`, `CONTRIBUTING.md`, a pull request template, and issue templates for bugs and feature requests. Two analyzer rules are excluded with the reasoning written out rather than suppressed inline.
+
+### Security
+
+Fixes from a pre-merge security review of the passkey exports. No new Graph call and no new scope; every request is still a GET, plus the read-only `$batch`.
+
+- **A refused deletion no longer reports success.** When privilege discovery was incomplete, an earlier run's targeting list that could not be deleted — typically because it was open in Excel — stayed where today's list would go while the console said it had been removed. Earlier copies are now removed before the run writes anything, on every run, and a copy that cannot be removed stops the run with nothing written.
+- **No report file is visible half-written or readable before it is restricted.** Every CSV, the HTML report, the ticket history and the remediation script are written to a private temporary file beside the target — created `0600` on Linux and macOS, and restricted while still empty everywhere — then renamed into place once complete. Previously each file took the default permissions (`0644` on most Linux hosts) and was narrowed only after the data was in it, and a run stopped mid-write left a truncated CSV under its final name.
+- **A domain passed as `-TenantId` always signs in fresh.** An existing Graph session was reused when the signed-in account's name ended in that domain, which a guest session in a different customer's tenant also satisfies, so that tenant was read and filed under the requested customer. The tenant GUID is now the only thing an existing session is matched on.
+- **The targeting exports fail closed on their own inputs.** The selector refuses a missing privileged-user set rather than treating it as "nobody is privileged", holds back a row with no user ID, and holds back a user the registration report marks `isAdmin` whom role discovery did not find (`PrivilegeSource` = `Admin per registration report`).
+- **App-only setup lists all six application permissions.** The README, playbook and sweep help still listed four, so an app-only sweep set up from them had every tenant's exports withheld.
+- **The parallel sweep quotes paths with PowerShell's own escaping.** A typographic apostrophe in a path ended the child command's string early.
 
 ### Changed
 

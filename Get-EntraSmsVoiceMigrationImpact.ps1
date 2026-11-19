@@ -472,7 +472,7 @@ function Connect-AssessmentGraph {
     #
     # Least-privilege read permissions only. Nothing here grants write access to any object.
     # Delegated: these are requested as scopes.
-    # App-only: the same four must be granted as APPLICATION permissions on the app registration.
+    # App-only: the same six must be granted as APPLICATION permissions on the app registration.
     $requiredScopes = @(
         'Policy.Read.All'
         'AuditLog.Read.All'
@@ -513,7 +513,13 @@ function Connect-AssessmentGraph {
 
         # A stale session from a previous tenant is the most common cross-tenant reporting error,
         # so an explicit -TenantId must match the live context or a fresh sign-in is forced.
-        $correctTenant = (-not $TenantId) -or ($context -and (($context.TenantId -eq $TenantId) -or ($context.Account -like "*@$TenantId")))
+        #
+        # Matched on the tenant ID only. A domain passed as -TenantId cannot be compared with
+        # the context's tenant GUID, so it always signs in fresh. It used to be accepted when
+        # the signed-in account's name ended in that domain -- but a guest (B2B) session is
+        # exactly that: alice@contoso.com signed in to a DIFFERENT customer's tenant. Reusing
+        # it read that other tenant and filed the result under this customer's name.
+        $correctTenant = (-not $TenantId) -or ($context -and ($context.TenantId -eq $TenantId))
 
         if (-not ($hasScopes -and $correctTenant)) {
             $connect = @{ Scopes = $requiredScopes; NoWelcome = $true }
@@ -2146,8 +2152,10 @@ Timeline dates are per Microsoft Learn: passkeys by default and retirement of Mi
 </html>
 "@
 
-    $html | Out-File -LiteralPath $Path -Encoding utf8 -Force
-    if (-not $SkipAclHardening) { Protect-OutputFile -Path $Path }
+    Write-ProtectedFile -TargetPath $Path -SkipAclHardening:$SkipAclHardening -Writer {
+        param([string]$Destination)
+        $html | Out-File -LiteralPath $Destination -Encoding utf8 -Force
+    }
     return $Path
 }
 
@@ -2414,6 +2422,12 @@ function Get-NoPasskeyCandidate {
         [string]$TenantId = ''
     )
 
+    # No set is not an empty set. Treating $null as "nobody is privileged" would publish every
+    # administrator; a caller that genuinely found nobody passes an empty set.
+    if ($null -eq $PrivilegedUserIds) {
+        throw 'Get-NoPasskeyCandidate needs the privileged-user set. Pass an empty set when discovery found nobody; $null is not a result.'
+    }
+
     $candidates = foreach ($row in $Rows) {
         # Excluded is an explicit operator decision, made with -ExcludeUpnPattern, and it
         # keeps the same meaning here as everywhere else: the row stays in the assessment
@@ -2458,14 +2472,25 @@ function Get-NoPasskeyCandidate {
         # Inline rather than through a closure: PSScriptAnalyzer cannot see a parameter
         # used only inside a scriptblock and reports it unused, which has reached CI here
         # twice before.
-        $hasRole = ($null -ne $PrivilegedUserIds) -and (-not [string]::IsNullOrEmpty($userId)) -and
-            $PrivilegedUserIds.Contains($userId)
-        $privilegeSource = if ($hasRole) {
+        $hasRole = (-not [string]::IsNullOrEmpty($userId)) -and $PrivilegedUserIds.Contains($userId)
+        # The registration report's own isAdmin flag, as a second opinion. A user it marks as
+        # holding an admin role whom role discovery did not find is held back rather than
+        # targeted: the disagreement means one of the two reads is wrong, and the safe reading
+        # is the one that keeps an administrator out of a bulk campaign. Read as text as well
+        # as a bool, because rows from an exported CSV carry 'True'.
+        $adminFlag = Get-PropertyValue $row 'IsAdmin'
+        $flaggedAdmin = ($adminFlag -eq $true) -or ([string]$adminFlag -eq 'True')
+        $privilegeSource = if ([string]::IsNullOrEmpty($userId)) {
+            # A row that cannot be matched against the set cannot be shown to be unprivileged.
+            '(not determined)'
+        }
+        elseif ($hasRole) {
             if ($null -ne $PrivilegeSources -and $PrivilegeSources.ContainsKey($userId)) {
                 [string]$PrivilegeSources[$userId]
             }
             else { 'Directory role' }
         }
+        elseif ($flaggedAdmin) { 'Admin per registration report' }
         else { '' }
 
         [PSCustomObject][ordered]@{
@@ -2573,13 +2598,16 @@ function Save-TicketHistory {
 
     # Object ids and risk bands only. No names, no UPNs: this file sits wherever the
     # operator points it and does not need to carry identifying data to do its job.
-    [PSCustomObject]@{
+    $json = [PSCustomObject]@{
         Schema      = 1
         UpdatedUtc  = (Get-Date).ToUniversalTime().ToString('o')
         Ticketed    = $History
-    } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Path -Encoding utf8
+    } | ConvertTo-Json -Depth 4
 
-    if (-not $SkipAclHardening) { Protect-OutputFile -Path $Path }
+    Write-ProtectedFile -TargetPath $Path -SkipAclHardening:$SkipAclHardening -Writer {
+        param([string]$Destination)
+        Set-Content -LiteralPath $Destination -Value $json -Encoding utf8
+    }
 }
 
 function Test-NeedsTicket {
@@ -2984,9 +3012,74 @@ function New-RemediationScript {
     if ($directory -and -not (Test-Path -LiteralPath $directory)) {
         New-Item -ItemType Directory -Path $directory -Force | Out-Null
     }
-    Set-Content -LiteralPath $Path -Value $content -Encoding utf8
-    if (-not $SkipAclHardening) { Protect-OutputFile -Path $Path }
+    Write-ProtectedFile -TargetPath $Path -SkipAclHardening:$SkipAclHardening -Writer {
+        param([string]$Destination)
+        Set-Content -LiteralPath $Destination -Value $content -Encoding utf8
+    }
     return (Resolve-Path -LiteralPath $Path).Path
+}
+
+function Write-ProtectedFile {
+    # Every report file is written through here, so none is ever readable by another local
+    # account, and none is ever visible under its real name half-written.
+    #
+    # Two failures this closes. A file created by Export-Csv or Set-Content takes the umask
+    # (0644 on most Linux hosts, inherited ACLs on a Windows share), and used to be narrowed
+    # only after every row was already in it -- anyone who opened it in that window kept the
+    # handle and could read the lot. And a run stopped mid-write left a truncated CSV under
+    # the final name, which looks exactly like a complete one.
+    #
+    # So: create an empty temporary file beside the target, private from the moment it
+    # exists (0600 at creation where .NET can do that, then Protect-OutputFile), write into
+    # it, and rename it over the target only once the write has finished. A rename within
+    # one folder replaces the old file in one step and keeps the new file's permissions.
+    param(
+        [Parameter(Mandatory)][string]$TargetPath,
+        # Receives the temporary path and writes the content to it. Must not refer to
+        # $TargetPath: the caller's own variables are visible to it, this one is not its own.
+        [Parameter(Mandatory)][scriptblock]$Writer,
+        [switch]$SkipAclHardening
+    )
+
+    # Resolved to a full path first: the .NET calls below resolve a relative path against the
+    # process directory, which is not PowerShell's current location.
+    $target = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($TargetPath)
+    if (Test-Path -LiteralPath $target -PathType Container) {
+        throw "Cannot write $target`: a folder already has that name."
+    }
+    $directory = Split-Path -Parent $target
+    if (-not (Test-Path -LiteralPath $directory)) {
+        New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    }
+    $temp = Join-Path $directory ('.{0}.{1}.partial' -f [System.IO.Path]::GetFileName($target), [guid]::NewGuid().ToString('n'))
+
+    # Created 0600 rather than narrowed afterwards where the runtime allows it (.NET 7, so
+    # PowerShell 7.3+). Resolved by name so this still parses on an older PowerShell.
+    $optionsType = 'System.IO.FileStreamOptions' -as [type]
+    $modeType = 'System.IO.UnixFileMode' -as [type]
+    if (-not $IsWindows -and -not $SkipAclHardening -and $optionsType -and $modeType -and $optionsType.GetProperty('UnixCreateMode')) {
+        $options = $optionsType::new()
+        $options.Mode = [System.IO.FileMode]::CreateNew
+        $options.Access = [System.IO.FileAccess]::Write
+        $options.UnixCreateMode = [Enum]::ToObject($modeType, 384)
+        [System.IO.FileStream]::new($temp, $options).Dispose()
+    }
+    else {
+        [System.IO.File]::Open($temp, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write).Dispose()
+    }
+
+    try {
+        # Narrowed while still empty. Writing into an existing file keeps its permissions.
+        if (-not $SkipAclHardening) { Protect-OutputFile -Path $temp }
+        & $Writer $temp
+        # File.Move rather than Move-Item: Move-Item puts the file INSIDE a folder of that
+        # name instead of failing, and overwrite:$true is a single rename on the same volume.
+        [System.IO.File]::Move($temp, $target, $true)
+    }
+    catch {
+        Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
+        throw
+    }
 }
 
 function Protect-CsvInjection {
@@ -3094,16 +3187,18 @@ function Export-AssessmentCsv {
         [string[]]$HeaderWhenEmpty = @()
     )
 
+    # Prepared here rather than inside the writer, so the parameters are visibly used.
     if ($Data.Count -eq 0 -and $HeaderWhenEmpty.Count -gt 0) {
         # Quoted every field, matching what Export-Csv itself writes, so the header a
         # zero-row file carries is byte-identical to the header a one-row file carries.
         $header = (($HeaderWhenEmpty | ForEach-Object { '"' + ($_ -replace '"', '""') + '"' }) -join ',')
-        Set-Content -LiteralPath $Path -Value $header -Encoding utf8BOM
+        $writeCsv = { param([string]$Destination) Set-Content -LiteralPath $Destination -Value $header -Encoding utf8BOM }
     }
     else {
-        $Data | Protect-CsvInjection | Export-Csv -LiteralPath $Path -NoTypeInformation -Encoding utf8BOM
+        $guardedRows = @($Data | Protect-CsvInjection)
+        $writeCsv = { param([string]$Destination) $guardedRows | Export-Csv -LiteralPath $Destination -NoTypeInformation -Encoding utf8BOM }
     }
-    if (-not $SkipAclHardening) { Protect-OutputFile -Path $Path }
+    Write-ProtectedFile -TargetPath $Path -Writer $writeCsv -SkipAclHardening:$SkipAclHardening
 }
 
 # ---------------------------------------------------------------------------
@@ -3438,6 +3533,9 @@ $rows = foreach ($user in $enabledUsers) {
     elseif ($privilegeSet.UserIds.Contains($id)) {
         if ($privilegeSet.Sources.ContainsKey($id)) { [string]$privilegeSet.Sources[$id] } else { 'Directory role' }
     }
+    # Matches Get-NoPasskeyCandidate, which holds such a user back from both exports, so the
+    # assessment row says why they are missing from them.
+    elseif ($isAdmin) { 'Admin per registration report' }
     else { '' }
 
     # A different population from BlockedAtRetirement: not locked out -- a stronger method
@@ -3571,6 +3669,26 @@ $exportRows = @($exportRows | Sort-Object `
 $outputDirectory = Split-Path -Parent $OutputPath
 if ($outputDirectory -and -not (Test-Path -LiteralPath $outputDirectory)) {
     New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
+}
+
+# The two targeting exports, named here so a copy left by an earlier run is removed BEFORE
+# this run writes anything. Removing them only at the end, and only when this run withheld
+# them, left two gaps: a run that stopped part-way kept yesterday's lists beside today's
+# assessment, and a file that could not be deleted (open in Excel) was reported as removed
+# while it stayed exactly where today's list would go. Now either the old lists are gone
+# before the first write, or the run stops here having written nothing.
+$campaignListPath = [System.IO.Path]::ChangeExtension($OutputPath, $null).TrimEnd('.') + '_SmsVoiceUsers_NoPasskey.csv'
+$noPasskeyListPath = [System.IO.Path]::ChangeExtension($OutputPath, $null).TrimEnd('.') + '_NoPasskey_Nonprivileged.csv'
+$removedStaleExports = [System.Collections.Generic.List[string]]::new()
+foreach ($stale in @($noPasskeyListPath, $campaignListPath)) {
+    if (-not (Test-Path -LiteralPath $stale)) { continue }
+    $removeError = ''
+    try { Remove-Item -LiteralPath $stale -Force -ErrorAction Stop }
+    catch { $removeError = $_.Exception.Message }
+    if (Test-Path -LiteralPath $stale) {
+        throw "Could not remove $stale, a targeting list from an earlier run, so this run has stopped before writing anything. Close the file if it is open (Excel locks it) and run again. $removeError"
+    }
+    $removedStaleExports.Add([System.IO.Path]::GetFileName($stale))
 }
 
 if ($exportRows.Count -eq 0) {
@@ -3789,8 +3907,7 @@ Write-Host "Action list ($($actionListRows.Count) users, attach this to a ticket
 # Emitting the lists is read-only. Creating the security group, adding members, enabling
 # methods and configuring the registration campaign all stay manual, because all four are
 # writes.
-$campaignListPath = [System.IO.Path]::ChangeExtension($OutputPath, $null).TrimEnd('.') + '_SmsVoiceUsers_NoPasskey.csv'
-$noPasskeyListPath = [System.IO.Path]::ChangeExtension($OutputPath, $null).TrimEnd('.') + '_NoPasskey_Nonprivileged.csv'
+# Both paths were set, and any earlier copy removed, before the assessment CSV was written.
 
 # One classifier, two populations, so the files and every number quoted about them come
 # from the same logic. @() for the same reason as the action list above: an empty result
@@ -3838,15 +3955,12 @@ else {
     # tickets and HTML report are all still written -- they describe the tenant and do not
     # claim a safe targeting population -- and the limitation travels with them.
     #
-    # Any file of either name from an EARLIER, successful run is removed rather than left
-    # in place. A stale list sitting beside today's fresh assessment is the failure this
-    # branch exists to prevent: it has today's folder, today's neighbours and yesterday's
-    # population, and nothing on it says so.
-    foreach ($stale in @($noPasskeyListPath, $campaignListPath)) {
-        if (Test-Path -LiteralPath $stale) {
-            Remove-Item -LiteralPath $stale -Force -ErrorAction SilentlyContinue
-            Write-Warning "Removed a previous run's $([System.IO.Path]::GetFileName($stale)) so it cannot be read as this run's result."
-        }
+    # Any file of either name from an EARLIER run was removed before the first write, and the
+    # run would have stopped had that failed. A stale list sitting beside today's fresh
+    # assessment is the failure this branch exists to prevent: it has today's folder, today's
+    # neighbours and yesterday's population, and nothing on it says so.
+    foreach ($removed in $removedStaleExports) {
+        Write-Warning "Removed a previous run's $removed so it cannot be read as this run's result."
     }
 
     # $null, not 0. A zero here would read as "nobody needs targeting", which is the

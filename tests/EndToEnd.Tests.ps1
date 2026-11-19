@@ -1395,3 +1395,108 @@ Describe 'A run where nobody needs action' {
         @(Import-Csv -LiteralPath $script:CleanCsv).Count | Should -BeGreaterThan 0
     }
 }
+
+Describe 'Earlier targeting lists never sit beside a newer assessment' {
+
+    # Both runs pre-seed a previous run's targeting lists exactly where this run's would go.
+    # Before the fix, the lists were only removed at the end and only on a withheld run, so
+    # a run that stopped part-way kept them beside a fresh assessment; and a list that could
+    # not be deleted (open in Excel) was reported removed while it stayed in place.
+
+    BeforeAll {
+        $pwshPath = if ($IsWindows) { Join-Path $PSHOME 'pwsh.exe' } else { Join-Path $PSHOME 'pwsh' }
+        if (-not (Test-Path -LiteralPath $pwshPath)) { $pwshPath = 'pwsh' }
+
+        function Invoke-SeededRun {
+            param([string]$Name, [string]$Prelude = '', [scriptblock]$Arrange, [switch]$RefusePimForGroups)
+            $root = Join-Path ([System.IO.Path]::GetTempPath()) ("e2e-$Name-" + [guid]::NewGuid())
+            $out = Join-Path $root 'out'
+            New-Item -ItemType Directory -Path $out -Force | Out-Null
+
+            # The stub tenant, optionally with the PIM for Groups read refused -- the withheld-
+            # export path, which is where the false "removed" message used to be printed.
+            $modules = Join-Path $script:Root 'Modules'
+            if ($RefusePimForGroups) {
+                $modules = Join-Path $root 'Modules'
+                $moduleDir = Join-Path $modules 'Microsoft.Graph.Authentication'
+                New-Item -ItemType Directory -Path $moduleDir -Force | Out-Null
+                $stub = Get-Content -LiteralPath (Join-Path $script:ModuleDir 'Microsoft.Graph.Authentication.psm1') -Raw
+                $marker = "    if (`$Uri -match '/identityGovernance/privilegedAccess/group/eligibilityScheduleInstances') {"
+                $refuse = @'
+    if ($Uri -match '/identityGovernance/privilegedAccess/group/') {
+        $exception = [System.Exception]::new('Authorization_RequestDenied')
+        $exception | Add-Member -NotePropertyName Response -NotePropertyValue ([PSCustomObject]@{ StatusCode = 403 }) -Force
+        throw $exception
+    }
+'@
+                $stub.IndexOf($marker) | Should -BeGreaterThan 0
+                $stub.Replace($marker, $refuse + $marker) | Set-Content -LiteralPath (Join-Path $moduleDir 'Microsoft.Graph.Authentication.psm1')
+                Copy-Item -LiteralPath (Join-Path $script:ModuleDir 'Microsoft.Graph.Authentication.psd1') -Destination $moduleDir
+            }
+            $csv = Join-Path $out 'run.csv'
+            $campaign = Join-Path $out 'run_SmsVoiceUsers_NoPasskey.csv'
+            $wider = Join-Path $out 'run_NoPasskey_Nonprivileged.csv'
+            'OLD-ASSESSMENT' | Set-Content -LiteralPath $csv
+            'STALE-LIST' | Set-Content -LiteralPath $campaign
+            'STALE-LIST' | Set-Content -LiteralPath $wider
+            if ($Arrange) { & $Arrange $out }
+
+            $stdout = Join-Path $root 'stdout.txt'; $stderr = Join-Path $root 'stderr.txt'
+            $command = @"
+`$env:PSModulePath = '$modules' + [IO.Path]::PathSeparator + `$env:PSModulePath
+$Prelude
+& '$(Get-AssessmentScriptPath)' -TenantId 'fabrikam-example.com' -OutputPath '$csv' -SkipAclHardening | Out-Null
+"@
+            $process = Start-Process -FilePath $pwshPath -PassThru -Wait -NoNewWindow `
+                -RedirectStandardOutput $stdout -RedirectStandardError $stderr `
+                -ArgumentList @('-NoProfile', '-NonInteractive', '-Command', $command)
+            [PSCustomObject]@{
+                Root = $root; Out = $out; Csv = $csv; Campaign = $campaign; Wider = $wider
+                Exit = $process.ExitCode
+                Text = ((Get-Content -LiteralPath $stdout -Raw -ErrorAction SilentlyContinue) + (Get-Content -LiteralPath $stderr -Raw -ErrorAction SilentlyContinue))
+            }
+        }
+
+        # A previous list that cannot be deleted. An advanced function honours -ErrorAction
+        # exactly as Remove-Item does on a sharing violation.
+        $script:Locked = Invoke-SeededRun -Name locked -RefusePimForGroups -Prelude @'
+function global:Remove-Item {
+    [CmdletBinding()] param([string]$LiteralPath, [switch]$Force, [switch]$Recurse)
+    Write-Error "The process cannot access the file '$LiteralPath' because it is being used by another process."
+}
+'@
+        # A run that stops after the assessment is written: the action list path is taken
+        # by a folder, so that write fails. Stands in for a crash or Ctrl+C at that point.
+        $script:Stopped = Invoke-SeededRun -Name stopped -Arrange {
+            param($out) New-Item -ItemType Directory -Path (Join-Path $out 'run_ActionList.csv') | Out-Null
+        }
+    }
+
+    AfterAll {
+        foreach ($run in @($script:Locked, $script:Stopped)) {
+            if ($run) { Remove-Item -LiteralPath $run.Root -Recurse -Force -ErrorAction SilentlyContinue }
+        }
+    }
+
+    It 'stops before writing anything when an earlier list cannot be removed' {
+        $script:Locked.Exit | Should -Not -Be 0
+        $script:Locked.Text | Should -Match 'Could not remove .*run_NoPasskey_Nonprivileged\.csv'
+        (Get-Content -LiteralPath $script:Locked.Csv -Raw) | Should -Match 'OLD-ASSESSMENT' -Because 'nothing from this run may be written beside a list it could not remove'
+        Test-Path -LiteralPath (Join-Path $script:Locked.Out 'run_ActionList.csv') | Should -BeFalse
+    }
+
+    It 'never says a list was removed when it was not' {
+        $script:Locked.Text | Should -Not -Match "Removed a previous run's"
+    }
+
+    It 'has removed the earlier lists by the time a run that stops part-way has written its assessment' {
+        $script:Stopped.Exit | Should -Not -Be 0
+        (Get-Content -LiteralPath $script:Stopped.Csv -Raw) | Should -Not -Match 'OLD-ASSESSMENT' -Because 'this run wrote its assessment before stopping'
+        Test-Path -LiteralPath $script:Stopped.Campaign | Should -BeFalse
+        Test-Path -LiteralPath $script:Stopped.Wider | Should -BeFalse
+    }
+
+    It 'leaves no half-written file behind' {
+        @(Get-ChildItem -LiteralPath $script:Stopped.Out -Force -Filter '*.partial').Count | Should -Be 0
+    }
+}
