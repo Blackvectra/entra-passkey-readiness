@@ -153,20 +153,234 @@ Describe 'Every script hardens its output the same way' {
         (& $normalize $actual) | Should -Be (& $normalize $reference) -Because "$Name must harden output identically to the assessment"
     }
 
-    It 'guards against the same CSV formula characters in <Name>' -TestCases $csvWriters {
+    It 'guards its CSV with the same Protect-CsvInjection as the assessment in <Name>' -TestCases $csvWriters {
         param($Name, $Path)
 
-        # The set is OWASP's: the four formula leaders, plus tab and carriage return,
-        # which Excel strips on import and so exposes whatever follows them.
-        $text = Get-Content -LiteralPath $Path -Raw
-        # Single-quoted: in a double-quoted PowerShell string $value would expand away and
-        # leave a pattern that does not compile.
-        $matched = [regex]::Matches($text, '\$value\[0\] -in @\(([^)]*)\)')
+        # One definition of the rule, copied verbatim: the OWASP leaders (= + - @, tab, CR)
+        # plus LF, looked for past leading whitespace and control characters and in their
+        # full-width forms. tests/Sanitization.Tests.ps1 covers what it does; this keeps
+        # every copy identical, including in any CSV-writing script added later.
+        $reference = Get-FunctionText -Path (Get-AssessmentScriptPath) -Name 'Protect-CsvInjection'
+        $actual = Get-FunctionText -Path $Path -Name 'Protect-CsvInjection'
+        $normalize = { param($t) (($t -split "`n") | ForEach-Object { $_.TrimEnd() -replace '^\s+', '' }) -join "`n" }
+        (& $normalize $actual) | Should -Be (& $normalize $reference) -Because "$Name must guard its CSV exactly as the assessment does"
+        (Get-Content -LiteralPath $Path -Raw) | Should -Match '\|\s*Protect-CsvInjection\b' -Because "$Name must pass its rows through the guard"
+    }
+}
 
-        $matched.Count | Should -BeGreaterThan 0 -Because "$Name writes a CSV and must guard it"
-        foreach ($match in $matched) {
-            $match.Groups[1].Value.Trim() |
-                Should -Be "'=', '+', '-', '@', [char]9, [char]13" -Because "$Name must guard the same characters as the assessment"
+Describe 'Write-ProtectedFile: no report is readable early or visible half-written' {
+
+    # Every CSV, the HTML report, the ticket history and the remediation script go through
+    # this helper. Before it, each file took the umask (0644 on most Linux hosts) and was
+    # narrowed only after the rows were in it, and a run stopped mid-write left a truncated
+    # file under its final name that looked like a complete one.
+
+    BeforeAll {
+        . (Import-ScriptFunction -Path (Get-AssessmentScriptPath) -Name @('Protect-OutputFile', 'Write-ProtectedFile'))
+        $script:Dir = Join-Path ([System.IO.Path]::GetTempPath()) "protected-$(New-Guid)"
+        New-Item -ItemType Directory -Path $script:Dir | Out-Null
+    }
+
+    AfterAll { Remove-Item -LiteralPath $script:Dir -Recurse -Force -ErrorAction SilentlyContinue }
+
+    It 'is already owner-only when the first byte is written' -Skip:$IsWindows {
+        $target = Join-Path $script:Dir 'early.csv'
+        $script:ModeAtWrite = $null
+        Write-ProtectedFile -TargetPath $target -Writer {
+            param([string]$Destination)
+            $script:ModeAtWrite = Get-Mode $Destination
+            Set-Content -LiteralPath $Destination -Value 'secret'
         }
+        $script:ModeAtWrite | Should -Be '600'
+        Get-Mode $target | Should -Be '600'
+        Get-Content -LiteralPath $target -Raw | Should -Match 'secret'
+    }
+
+    It 'writes under a temporary name and only then takes the final one' {
+        $target = Join-Path $script:Dir 'rename.csv'
+        $script:TargetExistedDuringWrite = $null
+        Write-ProtectedFile -TargetPath $target -SkipAclHardening -Writer {
+            param([string]$Destination)
+            $script:TargetExistedDuringWrite = Test-Path -LiteralPath (Join-Path $script:Dir 'rename.csv')
+            Set-Content -LiteralPath $Destination -Value 'rows'
+        }
+        $script:TargetExistedDuringWrite | Should -BeFalse
+        Test-Path -LiteralPath $target | Should -BeTrue
+        @(Get-ChildItem -LiteralPath $script:Dir -Force -Filter '*.partial').Count | Should -Be 0
+    }
+
+    It 'leaves the previous file untouched and no partial file behind when the write fails' {
+        $target = Join-Path $script:Dir 'fail.csv'
+        Set-Content -LiteralPath $target -Value 'PREVIOUS'
+        {
+            Write-ProtectedFile -TargetPath $target -SkipAclHardening -Writer {
+                param([string]$Destination)
+                Set-Content -LiteralPath $Destination -Value 'half'
+                throw 'interrupted'
+            }
+        } | Should -Throw '*interrupted*'
+        Get-Content -LiteralPath $target -Raw | Should -Match 'PREVIOUS'
+        @(Get-ChildItem -LiteralPath $script:Dir -Force -Filter '*.partial').Count | Should -Be 0
+    }
+
+    It 'is the only way the assessment writes a file' {
+        # Every Export-Csv, Set-Content and Out-File in the assessment writes to the temporary
+        # path a Write-ProtectedFile writer is handed, so no new export can skip it unnoticed.
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile((Get-AssessmentScriptPath), [ref]$null, [ref]$null)
+        $writes = @($ast.FindAll({
+                    $args[0] -is [System.Management.Automation.Language.CommandAst] -and
+                    $args[0].GetCommandName() -in @('Export-Csv', 'Set-Content', 'Out-File')
+                }, $true))
+        $writes.Count | Should -BeGreaterThan 0
+        foreach ($write in $writes) {
+            $write.Extent.Text | Should -Match '-LiteralPath \$Destination\b' -Because "line $($write.Extent.StartLineNumber) must write through Write-ProtectedFile"
+        }
+    }
+}
+
+Describe 'Write-ProtectedFile refuses a target that is a folder' {
+
+    # Move-Item puts a file INSIDE a folder of the target's name rather than failing, which
+    # would report a write that never reached the expected path.
+
+    BeforeAll {
+        . (Import-ScriptFunction -Path (Get-AssessmentScriptPath) -Name @('Protect-OutputFile', 'Write-ProtectedFile'))
+        $script:FolderDir = Join-Path ([System.IO.Path]::GetTempPath()) "protected-folder-$(New-Guid)"
+        New-Item -ItemType Directory -Path (Join-Path $script:FolderDir 'taken.csv') -Force | Out-Null
+    }
+
+    AfterAll { Remove-Item -LiteralPath $script:FolderDir -Recurse -Force -ErrorAction SilentlyContinue }
+
+    It 'throws and writes nothing' {
+        $target = Join-Path $script:FolderDir 'taken.csv'
+        { Write-ProtectedFile -TargetPath $target -SkipAclHardening -Writer { param([string]$Destination) Set-Content -LiteralPath $Destination -Value 'x' } } |
+            Should -Throw '*a folder already has that name*'
+        @(Get-ChildItem -LiteralPath $target -Force).Count | Should -Be 0
+        @(Get-ChildItem -LiteralPath $script:FolderDir -Force -Filter '*.partial').Count | Should -Be 0
+    }
+
+    It 'resolves a relative path against the PowerShell location, not the process directory' {
+        Push-Location -LiteralPath $script:FolderDir
+        try {
+            Write-ProtectedFile -TargetPath 'relative.csv' -SkipAclHardening -Writer { param([string]$Destination) Set-Content -LiteralPath $Destination -Value 'x' }
+        }
+        finally { Pop-Location }
+        Test-Path -LiteralPath (Join-Path $script:FolderDir 'relative.csv') | Should -BeTrue
+    }
+}
+
+Describe 'The concurrent sweep handoff folder is private before anything is written to it' {
+
+    # The folder used to be named from the clock and created with New-Item -Force, which
+    # accepts a folder or symlink another local account planted first; a failure to restrict
+    # it was only a warning. Platform coverage: the Linux and macOS branch runs here and in CI.
+    # The Windows branch (ACL check) is not exercised by CI, which runs on Linux.
+
+    BeforeAll {
+        . (Import-ScriptFunction -Path (Get-SweepScriptPath) -Name @('Protect-OutputFile', 'New-PrivateHandoffDirectory'))
+        $script:HandoffParent = Join-Path ([System.IO.Path]::GetTempPath()) "handoff-$(New-Guid)"
+        New-Item -ItemType Directory -Path $script:HandoffParent | Out-Null
+    }
+
+    AfterAll { Remove-Item -LiteralPath $script:HandoffParent -Recurse -Force -ErrorAction SilentlyContinue }
+
+    It 'uses an unguessable name' {
+        $a = New-PrivateHandoffDirectory -Parent $script:HandoffParent
+        $b = New-PrivateHandoffDirectory -Parent $script:HandoffParent
+        Split-Path -Leaf $a | Should -Match '^EntraSweep_[0-9a-f]{32}$'
+        $a | Should -Not -Be $b
+    }
+
+    It 'is owner-only when it is returned' -Skip:$IsWindows {
+        $path = New-PrivateHandoffDirectory -Parent $script:HandoffParent
+        Get-Mode $path | Should -Be '700'
+    }
+
+    It 'refuses a folder that is already there and leaves it alone' {
+        $taken = Join-Path $script:HandoffParent 'EntraSweep_taken'
+        New-Item -ItemType Directory -Path $taken | Out-Null
+        Set-Content -LiteralPath (Join-Path $taken 'planted.txt') -Value 'x'
+        { New-PrivateHandoffDirectory -Parent $script:HandoffParent -Name 'EntraSweep_taken' } |
+            Should -Throw '*already exists*'
+        Test-Path -LiteralPath (Join-Path $taken 'planted.txt') | Should -BeTrue
+    }
+
+    It 'refuses a planted symlink, including one whose target does not exist' -Skip:$IsWindows {
+        $target = Join-Path $script:HandoffParent 'elsewhere'
+        New-Item -ItemType Directory -Path $target | Out-Null
+        New-Item -ItemType SymbolicLink -Path (Join-Path $script:HandoffParent 'EntraSweep_link') -Target $target | Out-Null
+        New-Item -ItemType SymbolicLink -Path (Join-Path $script:HandoffParent 'EntraSweep_dangling') -Target (Join-Path $script:HandoffParent 'missing') | Out-Null
+        { New-PrivateHandoffDirectory -Parent $script:HandoffParent -Name 'EntraSweep_link' } | Should -Throw '*already exists*'
+        { New-PrivateHandoffDirectory -Parent $script:HandoffParent -Name 'EntraSweep_dangling' } | Should -Throw '*already exists*'
+        @(Get-ChildItem -LiteralPath $target -Force).Count | Should -Be 0
+    }
+
+    It 'removes the folder and stops when it cannot be made private' -Skip:$IsWindows {
+        # Stands in for a filesystem that ignores permission changes.
+        function Protect-OutputFile { param($Path, [switch]$Directory) $null = $Directory; [System.IO.File]::SetUnixFileMode($Path, [System.IO.UnixFileMode]511) }
+        { New-PrivateHandoffDirectory -Parent $script:HandoffParent -Name 'EntraSweep_open' } | Should -Throw '*Could not make*private*'
+        Test-Path -LiteralPath (Join-Path $script:HandoffParent 'EntraSweep_open') | Should -BeFalse
+    }
+
+    It 'is what the concurrent sweep uses, and nothing writes there first' {
+        $text = Get-Content -LiteralPath (Get-SweepScriptPath) -Raw
+        $text | Should -Match '\$handoffRoot = New-PrivateHandoffDirectory -Parent'
+        $text | Should -Not -Match 'EntraSweep_\$runStamp'
+    }
+}
+
+Describe 'Write-ProtectedFile writes nothing until the file is private, and publishes it private' {
+
+    # The order under test: create the temporary file, restrict it, confirm the restriction,
+    # write, close, then rename it over the target. Platform coverage: the Linux and macOS
+    # branch runs here and in CI; the Windows ACL check is not exercised by CI.
+
+    BeforeAll {
+        . (Import-ScriptFunction -Path (Get-AssessmentScriptPath) -Name @('Protect-OutputFile', 'Write-ProtectedFile'))
+        $script:OrderDir = Join-Path ([System.IO.Path]::GetTempPath()) "order-$(New-Guid)"
+        New-Item -ItemType Directory -Path $script:OrderDir | Out-Null
+        ${function:Protect-OutputFileReal} = ${function:Protect-OutputFile}
+    }
+
+    AfterAll { Remove-Item -LiteralPath $script:OrderDir -Recurse -Force -ErrorAction SilentlyContinue }
+
+    It 'hardens an empty file, before the writer runs' {
+        $script:Events = [System.Collections.Generic.List[string]]::new()
+        function Protect-OutputFile { param($Path, [switch]$Directory) $null = $Directory; $script:Events.Add("harden:$([System.IO.FileInfo]::new($Path).Length)"); Protect-OutputFileReal -Path $Path }
+        Write-ProtectedFile -TargetPath (Join-Path $script:OrderDir 'order.csv') -Writer {
+            param([string]$Destination)
+            $script:Events.Add('write')
+            Set-Content -LiteralPath $Destination -Value 'secret'
+        }
+        @($script:Events) | Should -Be @('harden:0', 'write')
+    }
+
+    It 'stops before writing when the file cannot be made private, and leaves nothing behind' -Skip:$IsWindows {
+        $target = Join-Path $script:OrderDir 'refused.csv'
+        Set-Content -LiteralPath $target -Value 'PREVIOUS'
+        # Stands in for a filesystem that ignores permission changes.
+        function Protect-OutputFile { param($Path, [switch]$Directory) $null = $Directory; [System.IO.File]::SetUnixFileMode($Path, [System.IO.UnixFileMode]420) }
+        $script:WriterRan = $false
+        { Write-ProtectedFile -TargetPath $target -Writer { param([string]$Destination) $script:WriterRan = $true; Set-Content -LiteralPath $Destination -Value 'secret' } } |
+            Should -Throw '*nothing was written*'
+        $script:WriterRan | Should -BeFalse
+        Get-Content -LiteralPath $target -Raw | Should -Match 'PREVIOUS'
+        @(Get-ChildItem -LiteralPath $script:OrderDir -Force -Filter '*.partial').Count | Should -Be 0
+    }
+
+    It 'replaces a world-readable earlier file with an owner-only one' -Skip:$IsWindows {
+        $target = Join-Path $script:OrderDir 'replaced.csv'
+        Set-Content -LiteralPath $target -Value 'old'
+        [System.IO.File]::SetUnixFileMode($target, [System.IO.UnixFileMode]420)
+        Write-ProtectedFile -TargetPath $target -Writer { param([string]$Destination) Set-Content -LiteralPath $Destination -Value 'new' }
+        Get-Mode $target | Should -Be '600'
+        Get-Content -LiteralPath $target -Raw | Should -Match 'new'
+    }
+
+    It 'leaves permissions alone under -SkipAclHardening, the documented opt-out' -Skip:$IsWindows {
+        $script:Hardened = $false
+        function Protect-OutputFile { param($Path, [switch]$Directory) $null = $Directory, $Path; $script:Hardened = $true }
+        Write-ProtectedFile -TargetPath (Join-Path $script:OrderDir 'optout.csv') -SkipAclHardening -Writer { param([string]$Destination) Set-Content -LiteralPath $Destination -Value 'x' }
+        $script:Hardened | Should -BeFalse
     }
 }

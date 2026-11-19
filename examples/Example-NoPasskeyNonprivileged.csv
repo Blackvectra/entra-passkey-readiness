@@ -1,0 +1,7 @@
+﻿"TenantId","Risk","DisplayName","UserPrincipalName","UserType","PhoneMethodsRegistered","OtherSurvivingMfaMethods","AllMethodsRegistered","UserId"
+"00000000-0000-0000-0000-000000000000","High","Ingrid Solberg","ingrid.solberg_northwind-example.com#EXT#@fabrikam-example.onmicrosoft.com","Guest","mobilePhone","","mobilePhone","11111111-aaaa-4bbb-8ccc-000000000005"
+"00000000-0000-0000-0000-000000000000","High","Marcus Whitfield","marcus.whitfield@fabrikam-example.com","Member","mobilePhone","","mobilePhone","11111111-aaaa-4bbb-8ccc-000000000004"
+"00000000-0000-0000-0000-000000000000","High","Marguerite Delacroix","marguerite.delacroix@fabrikam-example.com","Member","","softwareOneTimePasscode","softwareOneTimePasscode","11111111-aaaa-4bbb-8ccc-000000000009"
+"00000000-0000-0000-0000-000000000000","High","Rosalind Achebe","rosalind.achebe@fabrikam-example.com","Member","officePhone","","officePhone; email","11111111-aaaa-4bbb-8ccc-000000000003"
+"00000000-0000-0000-0000-000000000000","Moderate","Service Account - Scanner","svc-scanner@fabrikam-example.com","Member","alternateMobilePhone","","alternateMobilePhone","11111111-aaaa-4bbb-8ccc-000000000008"
+"00000000-0000-0000-0000-000000000000","Low","Emeka Osondu","emeka.osondu@fabrikam-example.com","Member","mobilePhone","windowsHelloForBusiness","mobilePhone; windowsHelloForBusiness","11111111-aaaa-4bbb-8ccc-000000000011"
