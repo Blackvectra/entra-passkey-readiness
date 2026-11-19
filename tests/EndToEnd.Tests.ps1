@@ -1442,10 +1442,16 @@ Describe 'Earlier targeting lists never sit beside a newer assessment' {
             if ($Arrange) { & $Arrange $out }
 
             $stdout = Join-Path $root 'stdout.txt'; $stderr = Join-Path $root 'stderr.txt'
+            # The terminating error is written to its own file rather than scraped from
+            # stderr: the console renders it in colour and wraps it at the host's width, which
+            # differs between machines and splits a long path across lines.
+            $errorFile = Join-Path $root 'error.txt'
             $command = @"
+`$PSStyle.OutputRendering = 'PlainText'
 `$env:PSModulePath = '$modules' + [IO.Path]::PathSeparator + `$env:PSModulePath
 $Prelude
-& '$(Get-AssessmentScriptPath)' -TenantId 'fabrikam-example.com' -OutputPath '$csv' -SkipAclHardening | Out-Null
+try { & '$(Get-AssessmentScriptPath)' -TenantId 'fabrikam-example.com' -OutputPath '$csv' -SkipAclHardening | Out-Null }
+catch { Set-Content -LiteralPath '$errorFile' -Value `$_.Exception.Message; exit 1 }
 "@
             $process = Start-Process -FilePath $pwshPath -PassThru -Wait -NoNewWindow `
                 -RedirectStandardOutput $stdout -RedirectStandardError $stderr `
@@ -1454,6 +1460,7 @@ $Prelude
                 Root = $root; Out = $out; Csv = $csv; Campaign = $campaign; Wider = $wider
                 Exit = $process.ExitCode
                 Text = ((Get-Content -LiteralPath $stdout -Raw -ErrorAction SilentlyContinue) + (Get-Content -LiteralPath $stderr -Raw -ErrorAction SilentlyContinue))
+                Error = [string](Get-Content -LiteralPath $errorFile -Raw -ErrorAction SilentlyContinue)
             }
         }
 
@@ -1480,7 +1487,7 @@ function global:Remove-Item {
 
     It 'stops before writing anything when an earlier list cannot be removed' {
         $script:Locked.Exit | Should -Not -Be 0
-        $script:Locked.Text | Should -Match 'Could not remove .*run_NoPasskey_Nonprivileged\.csv'
+        $script:Locked.Error | Should -Match 'Could not remove .*run_NoPasskey_Nonprivileged\.csv'
         (Get-Content -LiteralPath $script:Locked.Csv -Raw) | Should -Match 'OLD-ASSESSMENT' -Because 'nothing from this run may be written beside a list it could not remove'
         Test-Path -LiteralPath (Join-Path $script:Locked.Out 'run_ActionList.csv') | Should -BeFalse
     }
