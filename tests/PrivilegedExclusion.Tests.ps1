@@ -838,7 +838,7 @@ Describe 'Privileged users are held out of the actionable exports' {
         $outDir = Join-Path ([System.IO.Path]::GetTempPath()) ("privexcl-" + [guid]::NewGuid())
         New-Item -ItemType Directory -Path $outDir -Force | Out-Null
         try {
-            . (Import-ScriptFunction -Path $script:AssessmentPath -Name @('Protect-CsvInjection', 'Protect-OutputFile', 'Export-AssessmentCsv'))
+            . (Import-ScriptFunction -Path $script:AssessmentPath -Name @('Protect-CsvInjection', 'Protect-OutputFile', 'Export-AssessmentCsv', 'Write-ProtectedFile'))
             $path = Join-Path $outDir 'all-privileged.csv'
             Export-AssessmentCsv -Data @() -Path $path -HeaderWhenEmpty $script:Columns -SkipAclHardening
 
@@ -855,7 +855,7 @@ Describe 'Privileged users are held out of the actionable exports' {
         $withoutPrivilege = @(Get-NoPasskeyCandidate -Rows $rows `
                 -PhoneMethods $script:Lists.PhoneMethods -PasskeyMethods $script:Lists.PasskeyMethods `
                 -SurvivingMfaMethods $script:Lists.SurvivingMfaMethods `
-                -PrivilegedUserIds $null -PrivilegeSources $null -RequirePhoneMethod)
+                -PrivilegedUserIds ([System.Collections.Generic.HashSet[string]]::new()) -PrivilegeSources $null -RequirePhoneMethod)
         $withoutPrivilege.Count | Should -Be 0
         @(Get-Split $rows).All.Count | Should -Be 0
     }
@@ -966,5 +966,57 @@ Describe 'The script applies one documented failure policy' {
         $old = [PSCustomObject]@{ Customer = 'Contoso' } | ConvertTo-Json | ConvertFrom-Json
         (Get-PropertyValue $old 'NoPasskeyPrivilegedOmitted') | Should -BeNullOrEmpty
         (Get-PropertyValue $old 'NoPasskeyPrivilegedOmitted') | Should -Not -Be 0
+    }
+}
+
+Describe 'The export selector fails closed on its own inputs' {
+
+    # The main run only calls the selector once discovery is complete, so these are defence
+    # in depth: a caller that passes no set, a row that cannot be matched, or a disagreement
+    # between role discovery and the registration report must not put an administrator on a
+    # bulk campaign list.
+
+    BeforeAll {
+        function Get-Selected {
+            param([object[]]$Rows, $Ids, [hashtable]$Sources = @{})
+            @(Get-NoPasskeyCandidate -Rows @($Rows) -PhoneMethods $script:Lists.PhoneMethods `
+                    -PasskeyMethods $script:Lists.PasskeyMethods -SurvivingMfaMethods $script:Lists.SurvivingMfaMethods `
+                    -PrivilegedUserIds $Ids -PrivilegeSources $Sources -RequirePhoneMethod)
+        }
+        $script:Empty = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    }
+
+    It 'refuses a missing privileged-user set instead of reading it as nobody' {
+        { Get-Selected -Rows @(New-Row -Methods @('mobilePhone') -UserId 'u-1') -Ids $null } |
+            Should -Throw '*privileged-user set*'
+    }
+
+    It 'holds back a row with no user id, because it cannot be matched' {
+        $result = Get-Selected -Rows @(New-Row -Methods @('mobilePhone') -UserId '') -Ids $script:Empty
+        $result.Count | Should -Be 1
+        $result[0].PrivilegeSource | Should -Be '(not determined)'
+    }
+
+    It 'holds back a registration-report admin that role discovery did not find (<Flag>)' -ForEach @(
+        @{ Flag = $true }, @{ Flag = 'True' }
+    ) {
+        $row = New-Row -Methods @('mobilePhone') -UserId 'u-admin-only'
+        $row | Add-Member -NotePropertyName IsAdmin -NotePropertyValue $Flag
+        $result = Get-Selected -Rows @($row) -Ids $script:Empty
+        $result[0].PrivilegeSource | Should -Be 'Admin per registration report'
+    }
+
+    It 'keeps a user the report does not mark as an admin (<Flag>)' -ForEach @(
+        @{ Flag = $false }, @{ Flag = 'False' }
+    ) {
+        $row = New-Row -Methods @('mobilePhone') -UserId 'u-staff'
+        $row | Add-Member -NotePropertyName IsAdmin -NotePropertyValue $Flag
+        $result = Get-Selected -Rows @($row) -Ids $script:Empty
+        $result[0].PrivilegeSource | Should -BeNullOrEmpty
+    }
+
+    It 'gives the assessment row the same reason, so the CSV says why the user is missing' {
+        $text = Get-Content -LiteralPath (Get-AssessmentScriptPath) -Raw
+        $text | Should -Match "elseif \(\`$isAdmin\) \{ 'Admin per registration report' \}"
     }
 }

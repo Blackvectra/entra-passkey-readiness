@@ -55,6 +55,7 @@ These are implemented, not aspirational. Verify them by reading the script.
 | Certificate-only app auth | `AppOnly` parameter set | Client secrets are unsupported. A secret that reads identity posture across an entire customer estate should not exist as a script parameter. |
 | Tenant mismatch abort | `Connect-AssessmentGraph` | If `-TenantId` is a GUID and the established context does not match, the run stops rather than writing one customer's data into another customer's file. |
 | Single export choke point | `Export-AssessmentCsv` | Injection guard and ACL hardening cannot be forgotten on a future export because there is only one place a CSV is written. |
+| Private, all-or-nothing writes | `Write-ProtectedFile` | Every CSV, the HTML report, the ticket history and the remediation script are written to a temporary file beside the target that is owner-only before any data reaches it (created `0600` on Linux and macOS with PowerShell 7.3+, restricted while still empty everywhere), then renamed into place once complete. No report is readable by another local account part-way through, and a run stopped mid-write leaves no truncated file under the real name. A test fails the build if any write in the assessment bypasses it. |
 
 ## Least privilege
 

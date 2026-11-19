@@ -330,6 +330,7 @@ Describe 'Tickets put the stranded ahead of the merely unmigrated' {
                 'Protect-CsvInjection'
                 'Export-AssessmentCsv'
                 'Protect-OutputFile'
+                'Write-ProtectedFile'
             ))
         $script:NoReportRowMarker = '(no row in registration report)'
 

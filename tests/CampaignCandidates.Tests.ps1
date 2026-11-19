@@ -26,6 +26,7 @@ BeforeAll {
             'Protect-CsvInjection'
             'Export-AssessmentCsv'
             'Protect-OutputFile'
+            'Write-ProtectedFile'
         ))
 
     $script:NoReportRowMarker = '(no row in registration report)'
@@ -67,7 +68,9 @@ BeforeAll {
             # The subset is the default so every assertion written before the wider export
             # existed still asserts exactly what it asserted then.
             [switch]$AnyMethod,
-            $PrivilegedUserIds = $null,
+            # An empty set, not $null: the selector refuses $null rather than reading it as
+            # "nobody is privileged".
+            $PrivilegedUserIds = [System.Collections.Generic.HashSet[string]]::new(),
             $PrivilegeSources = $null
         )
         $splat = @{

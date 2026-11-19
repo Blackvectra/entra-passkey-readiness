@@ -170,3 +170,104 @@ Describe 'Every script hardens its output the same way' {
         }
     }
 }
+
+Describe 'Write-ProtectedFile: no report is readable early or visible half-written' {
+
+    # Every CSV, the HTML report, the ticket history and the remediation script go through
+    # this helper. Before it, each file took the umask (0644 on most Linux hosts) and was
+    # narrowed only after the rows were in it, and a run stopped mid-write left a truncated
+    # file under its final name that looked like a complete one.
+
+    BeforeAll {
+        . (Import-ScriptFunction -Path (Get-AssessmentScriptPath) -Name @('Protect-OutputFile', 'Write-ProtectedFile'))
+        $script:Dir = Join-Path ([System.IO.Path]::GetTempPath()) "protected-$(New-Guid)"
+        New-Item -ItemType Directory -Path $script:Dir | Out-Null
+    }
+
+    AfterAll { Remove-Item -LiteralPath $script:Dir -Recurse -Force -ErrorAction SilentlyContinue }
+
+    It 'is already owner-only when the first byte is written' -Skip:$IsWindows {
+        $target = Join-Path $script:Dir 'early.csv'
+        $script:ModeAtWrite = $null
+        Write-ProtectedFile -TargetPath $target -Writer {
+            param([string]$Destination)
+            $script:ModeAtWrite = Get-Mode $Destination
+            Set-Content -LiteralPath $Destination -Value 'secret'
+        }
+        $script:ModeAtWrite | Should -Be '600'
+        Get-Mode $target | Should -Be '600'
+        Get-Content -LiteralPath $target -Raw | Should -Match 'secret'
+    }
+
+    It 'writes under a temporary name and only then takes the final one' {
+        $target = Join-Path $script:Dir 'rename.csv'
+        $script:TargetExistedDuringWrite = $null
+        Write-ProtectedFile -TargetPath $target -SkipAclHardening -Writer {
+            param([string]$Destination)
+            $script:TargetExistedDuringWrite = Test-Path -LiteralPath (Join-Path $script:Dir 'rename.csv')
+            Set-Content -LiteralPath $Destination -Value 'rows'
+        }
+        $script:TargetExistedDuringWrite | Should -BeFalse
+        Test-Path -LiteralPath $target | Should -BeTrue
+        @(Get-ChildItem -LiteralPath $script:Dir -Force -Filter '*.partial').Count | Should -Be 0
+    }
+
+    It 'leaves the previous file untouched and no partial file behind when the write fails' {
+        $target = Join-Path $script:Dir 'fail.csv'
+        Set-Content -LiteralPath $target -Value 'PREVIOUS'
+        {
+            Write-ProtectedFile -TargetPath $target -SkipAclHardening -Writer {
+                param([string]$Destination)
+                Set-Content -LiteralPath $Destination -Value 'half'
+                throw 'interrupted'
+            }
+        } | Should -Throw '*interrupted*'
+        Get-Content -LiteralPath $target -Raw | Should -Match 'PREVIOUS'
+        @(Get-ChildItem -LiteralPath $script:Dir -Force -Filter '*.partial').Count | Should -Be 0
+    }
+
+    It 'is the only way the assessment writes a file' {
+        # Every Export-Csv, Set-Content and Out-File in the assessment writes to the temporary
+        # path a Write-ProtectedFile writer is handed, so no new export can skip it unnoticed.
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile((Get-AssessmentScriptPath), [ref]$null, [ref]$null)
+        $writes = @($ast.FindAll({
+                    $args[0] -is [System.Management.Automation.Language.CommandAst] -and
+                    $args[0].GetCommandName() -in @('Export-Csv', 'Set-Content', 'Out-File')
+                }, $true))
+        $writes.Count | Should -BeGreaterThan 0
+        foreach ($write in $writes) {
+            $write.Extent.Text | Should -Match '-LiteralPath \$Destination\b' -Because "line $($write.Extent.StartLineNumber) must write through Write-ProtectedFile"
+        }
+    }
+}
+
+Describe 'Write-ProtectedFile refuses a target that is a folder' {
+
+    # Move-Item puts a file INSIDE a folder of the target's name rather than failing, which
+    # would report a write that never reached the expected path.
+
+    BeforeAll {
+        . (Import-ScriptFunction -Path (Get-AssessmentScriptPath) -Name @('Protect-OutputFile', 'Write-ProtectedFile'))
+        $script:FolderDir = Join-Path ([System.IO.Path]::GetTempPath()) "protected-folder-$(New-Guid)"
+        New-Item -ItemType Directory -Path (Join-Path $script:FolderDir 'taken.csv') -Force | Out-Null
+    }
+
+    AfterAll { Remove-Item -LiteralPath $script:FolderDir -Recurse -Force -ErrorAction SilentlyContinue }
+
+    It 'throws and writes nothing' {
+        $target = Join-Path $script:FolderDir 'taken.csv'
+        { Write-ProtectedFile -TargetPath $target -SkipAclHardening -Writer { param([string]$Destination) Set-Content -LiteralPath $Destination -Value 'x' } } |
+            Should -Throw '*a folder already has that name*'
+        @(Get-ChildItem -LiteralPath $target -Force).Count | Should -Be 0
+        @(Get-ChildItem -LiteralPath $script:FolderDir -Force -Filter '*.partial').Count | Should -Be 0
+    }
+
+    It 'resolves a relative path against the PowerShell location, not the process directory' {
+        Push-Location -LiteralPath $script:FolderDir
+        try {
+            Write-ProtectedFile -TargetPath 'relative.csv' -SkipAclHardening -Writer { param([string]$Destination) Set-Content -LiteralPath $Destination -Value 'x' }
+        }
+        finally { Pop-Location }
+        Test-Path -LiteralPath (Join-Path $script:FolderDir 'relative.csv') | Should -BeTrue
+    }
+}

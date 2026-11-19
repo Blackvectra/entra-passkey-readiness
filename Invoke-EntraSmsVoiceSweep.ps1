@@ -90,9 +90,11 @@
         -ThrottleLimit 6 -Resume
 
 .NOTES
-    App-only runs require the four Graph permissions granted as APPLICATION permissions
+    App-only runs require the six Graph permissions granted as APPLICATION permissions
     with admin consent in each tenant: Policy.Read.All, AuditLog.Read.All, User.Read.All,
-    GroupMember.Read.All.
+    GroupMember.Read.All, RoleManagement.Read.Directory,
+    PrivilegedEligibilitySchedule.Read.AzureADGroup. Without the last two, every tenant's
+    privileged-account discovery is incomplete and its targeting exports are withheld.
 
     The cross-tenant summary CSV names customers and counts their weakest accounts.
     Treat it with the same handling as the per-tenant exports. See SECURITY.md.
@@ -543,7 +545,12 @@ end {
                     # Paths are embedded in the child command, so any apostrophe in an
                     # operator-supplied -ReportRoot must be doubled or it terminates the
                     # string early.
-                    $q = { param($p) "'" + ($p -replace "'", "''") + "'" }
+                    #
+                    # Escaped by PowerShell's own routine rather than by doubling the ASCII
+                    # apostrophe alone: PowerShell also ends a single-quoted string at the
+                    # typographic quotes U+2018 to U+201B, so a folder named with a curly
+                    # apostrophe -- what Word and many keyboards type -- broke the command.
+                    $q = { param($p) "'" + [System.Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($p) + "'" }
 
                     $childCommand = @"
 `$ErrorActionPreference = 'Stop'

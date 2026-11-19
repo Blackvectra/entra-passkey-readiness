@@ -29,9 +29,11 @@ Before optimizing anything, it is worth being honest about the cost distribution
 
 ### 1. App registration and consent
 
-Register one application and consent to it in every managed tenant. The four permissions are required as **application** permissions, and all four are read-only:
+Register one application and consent to it in every managed tenant. The six permissions are required as **application** permissions, and all six are read-only:
 
-`Policy.Read.All`, `AuditLog.Read.All`, `User.Read.All`, `GroupMember.Read.All`
+`Policy.Read.All`, `AuditLog.Read.All`, `User.Read.All`, `GroupMember.Read.All`, `RoleManagement.Read.Directory`, `PrivilegedEligibilitySchedule.Read.AzureADGroup`
+
+Without the last two, privileged-account discovery cannot complete and no tenant's targeting exports are written.
 
 Send each customer's Global Administrator an admin consent URL rather than talking them through the portal:
 
