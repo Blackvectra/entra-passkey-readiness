@@ -642,7 +642,7 @@ The sweep does this for you: history lives in the per-tenant folder rather than 
 | `-MaxIndividualTickets` | int | 50 | Cap on individual tickets before High findings batch into a campaign ticket. |
 | `-TicketHistoryPath` | string | beside the ticket CSV | Users already ticketed, so a re-run does not raise duplicates. See [Re-running without duplicating tickets](#re-running-without-duplicating-tickets). |
 | `-IgnoreTicketHistory` | switch | off | Ticket every actionable user regardless of previous runs. |
-| `-SkipAclHardening` | switch | off | Skip restricting output file permissions. Use only where the filesystem rejects ACL changes. |
+| `-SkipAclHardening` | switch | off | Skip restricting output file permissions. Without it, a run that cannot make a report file owner-only (a filesystem that ignores permissions, or PowerShell older than 7.3 on Linux and macOS) stops before writing that file. |
 | `-PassThru` | switch | off | Emit per-user objects to the pipeline in addition to the summary. |
 
 ### `Invoke-EntraSmsVoiceSweep.ps1`

@@ -152,3 +152,86 @@ Describe 'ConvertTo-SafeHtml' {
         ConvertTo-SafeHtml "Niamh O'Brien" | Should -BeExactly 'Niamh O&#39;Brien'
     }
 }
+
+Describe 'Protect-CsvInjection cannot be bypassed by padding or look-alike triggers' {
+
+    # Precautionary beyond the unpadded ASCII triggers above: LibreOffice 24.2 was observed
+    # to evaluate only an unpadded "=", and Excel's handling of these forms is unverified.
+    # The guard looks past leading whitespace and control characters and recognises the
+    # full-width triggers, and only ever prefixes, so the original text is kept intact.
+
+    It 'neutralizes <Label>' -TestCases @(
+        @{ Label = 'a leading space before =';      Value = ' =1+1' }
+        @{ Label = 'several spaces before +';       Value = '   +1+1' }
+        @{ Label = 'a line feed';                   Value = "`n=1+1" }
+        @{ Label = 'CR LF before =';                Value = "`r`n=1+1" }
+        @{ Label = 'a tab before @';                Value = "`t@SUM(A1)" }
+        @{ Label = 'a no-break space before -';     Value = ([string][char]0x00A0 + '-1+1') }
+        @{ Label = 'a control character before =';  Value = ([string][char]0x01 + '=1+1') }
+        @{ Label = 'a full-width equals';           Value = ([string][char]0xFF1D + '1+1') }
+        @{ Label = 'a full-width plus';             Value = ([string][char]0xFF0B + '1+1') }
+        @{ Label = 'a full-width minus';            Value = ([string][char]0xFF0D + '1+1') }
+        @{ Label = 'a full-width at';               Value = ([string][char]0xFF20 + 'SUM(A1)') }
+        @{ Label = 'a space before a full-width equals'; Value = (' ' + [string][char]0xFF1D + '1') }
+    ) {
+        ([PSCustomObject]@{ DisplayName = $Value } | Protect-CsvInjection).DisplayName | Should -BeExactly ("'" + $Value)
+    }
+
+    It 'leaves <Label> alone' -TestCases @(
+        @{ Label = 'a name with a leading space'; Value = ' Rowan Ellis' }
+        @{ Label = 'a hyphenated name';           Value = 'Mary-Jane Ellis' }
+        @{ Label = 'a name with a comma';         Value = 'Ellis, Rowan' }
+        @{ Label = 'whitespace only';             Value = '   ' }
+    ) {
+        ([PSCustomObject]@{ DisplayName = $Value } | Protect-CsvInjection).DisplayName | Should -BeExactly $Value
+    }
+
+    It 'keeps embedded delimiters, quotes and line breaks inside one field' {
+        # Export-Csv quotes every field and doubles embedded quotes; this confirms a hostile
+        # value cannot open a new cell or row in the file the tool writes.
+        $path = Join-Path ([System.IO.Path]::GetTempPath()) "csv-$(New-Guid).csv"
+        try {
+            $hostile = 'Ellis","=1+1' + "`n" + '=2+2,"x'
+            [PSCustomObject]@{ DisplayName = $hostile; Upn = 'r@contoso-example.com' } | Protect-CsvInjection |
+                Export-Csv -LiteralPath $path -NoTypeInformation -Encoding utf8BOM
+            $back = @(Import-Csv -LiteralPath $path)
+            $back.Count | Should -Be 1
+            @($back[0].PSObject.Properties.Name) | Should -Be @('DisplayName', 'Upn')
+            $back[0].DisplayName | Should -BeExactly $hostile
+            $back[0].Upn | Should -BeExactly 'r@contoso-example.com'
+        }
+        finally { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+Describe 'Every CSV the project writes uses the same guard' {
+
+    BeforeAll {
+        function Get-GuardText {
+            param([string]$Path)
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path -LiteralPath $Path).Path, [ref]$null, [ref]$null)
+            $found = @($ast.FindAll({
+                        $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                        $args[0].Name -eq 'Protect-CsvInjection'
+                    }, $true))
+            $found.Count | Should -Be 1 -Because "$Path must define exactly one Protect-CsvInjection"
+            (($found[0].Extent.Text -split "`n") | ForEach-Object { $_.TrimEnd() -replace '^\s+', '' }) -join "`n"
+        }
+        $script:Reference = Get-GuardText -Path (Get-AssessmentScriptPath)
+    }
+
+    It 'defines an identical guard in <Name>' -TestCases @(
+        @{ Name = 'the sweep'; Path = (Get-SweepScriptPath) }
+        @{ Name = 'the comparison script'; Path = (Get-CompareScriptPath) }
+    ) {
+        Get-GuardText -Path $Path | Should -Be $script:Reference
+    }
+
+    It 'routes the sweep summary through it' {
+        (Get-Content -LiteralPath (Get-SweepScriptPath) -Raw) | Should -Match '\[PSCustomObject\]\$clone \| Protect-CsvInjection'
+    }
+
+    It 'routes the comparison export through it' {
+        (Get-Content -LiteralPath (Get-CompareScriptPath) -Raw) | Should -Match '\| Protect-CsvInjection \| Export-Csv'
+    }
+}

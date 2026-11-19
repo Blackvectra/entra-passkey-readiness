@@ -599,6 +599,20 @@ function Get-GraphCollection {
     $next = $Uri
     $page = 0
 
+    # Where every following page must come from: the same HTTPS host and port as the first
+    # request, which this script builds from $script:GraphBase. A next-page link is a value
+    # the server supplies and is followed verbatim, so it is checked rather than trusted.
+    #
+    # Not a credential question. Microsoft.Graph.Authentication 2.41.2 was observed to
+    # attach the token only to the Graph hosts it knows, to refuse plain HTTP to them, and
+    # to drop the token when a Graph response redirects elsewhere. It does still SEND the
+    # request to any other host, though, and whatever comes back would be read here as this
+    # tenant's data -- an empty role list from the wrong server would make everyone look
+    # unprivileged. Matching the first request's origin rather than a hard-coded host keeps
+    # this correct for whichever Graph endpoint the base URI names.
+    $origin = $null
+    [void][System.Uri]::TryCreate($Uri, [System.UriKind]::Absolute, [ref]$origin)
+
     while ($next) {
         if (-not $seen.Add([string]$next)) {
             throw "Graph pagination looped: $next was returned as the next page of itself. Aborting rather than reporting a partial result as complete."
@@ -613,6 +627,19 @@ function Get-GraphCollection {
         if ($response.PSObject.Properties.Name -contains 'value') {
             foreach ($item in @($response.value)) { $items.Add($item) }
             $next = Get-PropertyValue $response '@odata.nextLink'
+
+            if ($next) {
+                $candidate = $null
+                $sameOrigin = $origin -and $origin.Scheme -eq 'https' -and
+                    [System.Uri]::TryCreate([string]$next, [System.UriKind]::Absolute, [ref]$candidate) -and
+                    $candidate.Scheme -eq 'https' -and
+                    [string]::IsNullOrEmpty($candidate.UserInfo) -and
+                    [string]::Equals($candidate.Host, $origin.Host, [System.StringComparison]::OrdinalIgnoreCase) -and
+                    $candidate.Port -eq $origin.Port
+                if (-not $sameOrigin) {
+                    throw "Graph returned a next page at an unexpected destination ($next) for $Uri. Only HTTPS on the same host as the first request is followed; aborting rather than reading another server's reply as this tenant's data."
+                }
+            }
         }
         else {
             $items.Add($response)
@@ -3069,8 +3096,34 @@ function Write-ProtectedFile {
     }
 
     try {
-        # Narrowed while still empty. Writing into an existing file keeps its permissions.
-        if (-not $SkipAclHardening) { Protect-OutputFile -Path $temp }
+        # Narrowed while still empty, and checked: nothing is written until the file is
+        # verifiably private. Protect-OutputFile only warns when a filesystem refuses a
+        # permission change, which is right for a finished file but not here, where it would
+        # mean writing the report into a file anyone can read. Writing into an existing file
+        # keeps its permissions, and so does the rename below.
+        if (-not $SkipAclHardening) {
+            Protect-OutputFile -Path $temp
+            $private = $false
+            try {
+                if ($IsWindows) {
+                    $acl = Get-Acl -LiteralPath $temp
+                    $allowed = @(
+                        [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+                        'S-1-5-32-544'
+                    )
+                    $rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
+                    $private = $acl.AreAccessRulesProtected -and $rules.Count -gt 0 -and
+                        @($rules | Where-Object { $_.IdentityReference.Value -notin $allowed }).Count -eq 0
+                }
+                elseif ($modeType) {
+                    $private = [int]([System.IO.FileInfo]::new($temp).UnixFileMode) -eq 384
+                }
+            }
+            catch { $private = $false }
+            if (-not $private) {
+                throw "Could not restrict $TargetPath to this account, so nothing was written to it. Write to a filesystem that supports permissions, run on PowerShell 7.3 or later on Linux and macOS, or pass -SkipAclHardening to accept the default permissions knowingly."
+            }
+        }
         & $Writer $temp
         # File.Move rather than Move-Item: Move-Item puts the file INSIDE a folder of that
         # name instead of failing, and overwrite:$true is a single rename on the same volume.
@@ -3089,17 +3142,33 @@ function Protect-CsvInjection {
     # in tenants that allow self-service profile edits or B2B invites, and this report is
     # specifically a file that a manager will open in Excel. Prefixing the value with a
     # single quote makes Excel treat it as literal text.
+    #
+    # The trigger is looked for past any leading whitespace or control characters, and in
+    # its full-width forms (U+FF1D, U+FF0B, U+FF0D, U+FF20) as well. That part is
+    # precautionary: LibreOffice 24.2 was observed to evaluate only an unpadded "=", and
+    # Excel's handling of padded or full-width triggers has not been verified. A value is
+    # only ever prefixed, never altered, so nothing a reader needs is lost.
+    #
     # Applied at export time only, so in-memory objects stay pristine for the HTML path,
-    # which has its own encoding.
+    # which has its own encoding. Identical copies live in the sweep and the comparison
+    # script; tests/Sanitization.Tests.ps1 keeps them identical.
     param([Parameter(ValueFromPipeline)][object]$InputObject)
 
     process {
+        $triggers = @('=', '+', '-', '@', [char]0xFF1D, [char]0xFF0B, [char]0xFF0D, [char]0xFF20)
         $clone = [ordered]@{}
         foreach ($property in $InputObject.PSObject.Properties) {
             $value = $property.Value
-            if ($value -is [string] -and $value.Length -gt 0 -and
-                $value[0] -in @('=', '+', '-', '@', [char]9, [char]13)) {
-                $value = "'" + $value
+            if ($value -is [string] -and $value.Length -gt 0) {
+                $lead = $null
+                foreach ($character in $value.ToCharArray()) {
+                    if (-not ([char]::IsWhiteSpace($character) -or [char]::IsControl($character))) { $lead = $character; break }
+                }
+                $startsHidden = [char]::IsWhiteSpace($value[0]) -or [char]::IsControl($value[0])
+                if ($value[0] -in $triggers -or $value[0] -in @([char]9, [char]10, [char]13) -or
+                    ($startsHidden -and $null -ne $lead -and $lead -in $triggers)) {
+                    $value = "'" + $value
+                }
             }
             $clone[$property.Name] = $value
         }
