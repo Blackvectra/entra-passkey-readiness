@@ -2408,14 +2408,24 @@ function New-RemediationScript {
         [switch]$SkipAclHardening
     )
 
+    # Values from the tenant land in this file's text, and the operator is told to run the
+    # file. A line break inside one would end the comment it sits in and start a live
+    # statement, so control characters and Unicode line separators are flattened to spaces
+    # before any value is written. "#>" is broken up too: in the <# #> header it would close
+    # the comment mid-line (block comments do not nest, so "<#" is harmless). Nested so every
+    # caller that lifts this function gets it.
+    function ConvertTo-InertScriptText([object]$Value) {
+        return (([string]$Value) -replace '[\p{Cc}\u2028\u2029]', ' ') -replace '#>', '# >'
+    }
+
     $targets = @($Rows | Where-Object { $_.Risk -in @('Critical', 'High', 'Moderate') })
 
-    $label = if ([string]::IsNullOrWhiteSpace($Customer)) { 'this tenant' } else { $Customer }
+    $label = if ([string]::IsNullOrWhiteSpace($Customer)) { 'this tenant' } else { ConvertTo-InertScriptText $Customer }
     $lines = [System.Collections.Generic.List[string]]::new()
 
     [void]$lines.Add('<#')
     [void]$lines.Add("    Remediation commands for $label, generated from:")
-    [void]$lines.Add("      $GeneratedFrom")
+    [void]$lines.Add("      $(ConvertTo-InertScriptText $GeneratedFrom)")
     [void]$lines.Add('')
     [void]$lines.Add('    THIS FILE HAS NOT BEEN RUN. It was written by a read-only assessment that does')
     [void]$lines.Add('    not modify tenants. Read it before you run any of it.')
@@ -2449,19 +2459,23 @@ function New-RemediationScript {
     }
 
     foreach ($row in $targets) {
-        $upn = [string](Get-PropertyValue $row 'UserPrincipalName')
-        $id = [string](Get-PropertyValue $row 'UserId')
+        $upn = ConvertTo-InertScriptText (Get-PropertyValue $row 'UserPrincipalName')
+        # The id is spliced into single-quoted URIs on lines the operator uncomments, so a
+        # quote in it (curly ones count in PowerShell) would end the string. Escaped with
+        # the parser's own rules rather than a hand-written list of quote characters.
+        $id = [System.Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent(
+            (ConvertTo-InertScriptText (Get-PropertyValue $row 'UserId')))
         # Via Get-PropertyValue, not direct access: under StrictMode a property the row
         # shape does not carry throws, and this function is reachable with either the full
         # assessment row or the narrower action-list row. That mistake has crashed this
         # script three times now.
-        $age = [string](Get-PropertyValue $row 'DaysSinceLastSignIn')
-        $legacyState = [string](Get-PropertyValue $row 'PerUserMfaState')
+        $age = ConvertTo-InertScriptText (Get-PropertyValue $row 'DaysSinceLastSignIn')
+        $legacyState = ConvertTo-InertScriptText (Get-PropertyValue $row 'PerUserMfaState')
 
         [void]$lines.Add('# ---------------------------------------------------------------------------')
-        [void]$lines.Add("# $([string](Get-PropertyValue $row 'DisplayName'))  <$upn>")
-        [void]$lines.Add("#   Risk $([string](Get-PropertyValue $row 'Risk')); blocked at retirement: $([string](Get-PropertyValue $row 'BlockedAtRetirement')); last sign-in: $age")
-        [void]$lines.Add("#   Phone methods: $([string](Get-PropertyValue $row 'PhoneMethodsRegistered'))")
+        [void]$lines.Add("# $(ConvertTo-InertScriptText (Get-PropertyValue $row 'DisplayName'))  <$upn>")
+        [void]$lines.Add("#   Risk $(ConvertTo-InertScriptText (Get-PropertyValue $row 'Risk')); blocked at retirement: $(ConvertTo-InertScriptText (Get-PropertyValue $row 'BlockedAtRetirement')); last sign-in: $age")
+        [void]$lines.Add("#   Phone methods: $(ConvertTo-InertScriptText (Get-PropertyValue $row 'PhoneMethodsRegistered'))")
 
         # A stale account is a different ticket, and saying so here saves somebody
         # scheduling a call with a person who left.
