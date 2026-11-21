@@ -306,9 +306,6 @@ begin {
 
         foreach ($loadedProfile in $loaded) {
             $settings = Merge-TenantProfileSetting -TenantProfile $loadedProfile -Parameter $sweepWide -Mode Sweep
-            if ([bool]$settings.ClientId -ne [bool]$settings.CertificateThumbprint) {
-                throw "Tenant Profile '$($settings.TenantProfile)': app-only sign-in needs both ClientId and CertificateThumbprint, from the Tenant Profile or the sweep, but only one is set."
-            }
             if ($ThrottleLimit -gt 1 -and -not $settings.CertificateThumbprint) {
                 throw "Parallel sweeps require app-only authentication for every tenant, and Tenant Profile '$($settings.TenantProfile)' has no ClientId and CertificateThumbprint. Add them to the Tenant Profile, pass them to the sweep, or run with -ThrottleLimit 1."
             }
@@ -563,8 +560,10 @@ end {
         $jobs.Add([PSCustomObject]@{
             Index     = $index
             Label     = $target.Label
-            TenantProfile = $target.TenantProfile
             TenantId  = $target.TenantId
+            # Who a result row is about. Travels as one value so the four places that
+            # write a row -- success and failure, sequential and parallel -- cannot drift.
+            RowIdentity = @{ Label = $target.Label; TenantProfile = $target.TenantProfile; TenantId = $target.TenantId }
             TenantDir = $tenantDir
             Arguments = $arguments
         })
@@ -574,6 +573,7 @@ end {
 
     if ($ThrottleLimit -le 1) {
         foreach ($job in $jobs) {
+            $rowIdentity = $job.RowIdentity
             Write-Host "`n[$($job.Index)/$($jobs.Count)] $($job.Label)" -ForegroundColor Magenta
             $arguments = $job.Arguments
 
@@ -585,13 +585,13 @@ end {
                 }
 
                 $summary = & $AssessmentScriptPath @arguments
-                $results.Add((New-SweepResultRow -Label $job.Label -TenantProfile $job.TenantProfile -TenantId $job.TenantId -Status 'Success' -Summary $summary))
+                $results.Add((New-SweepResultRow @rowIdentity -Status 'Success' -Summary $summary))
             }
             catch {
                 # One tenant failing must not end the sweep. Common causes are missing admin
                 # consent and a tenant where the app registration was never deployed.
                 Write-Warning "$($job.Label): $($_.Exception.Message)"
-                $results.Add((New-SweepResultRow -Label $job.Label -TenantProfile $job.TenantProfile -TenantId $job.TenantId -Status 'Failed' `
+                $results.Add((New-SweepResultRow @rowIdentity -Status 'Failed' `
                             -Summary $null -ErrorMessage $_.Exception.Message))
             }
         }
@@ -639,6 +639,7 @@ end {
             $parallelResults = $jobs | ForEach-Object -ThrottleLimit $ThrottleLimit -Parallel {
                 ${function:New-SweepResultRow} = $using:rowFunction
                 $job = $_
+                $rowIdentity = $job.RowIdentity
                 $handoff = $using:handoffRoot
                 $exe = $using:pwshPath
                 $assessment = $using:assessmentPath
@@ -678,11 +679,11 @@ end {
 
                     $summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
                     Write-Host "[$($job.Index)/$($using:total)] done $($job.Label)" -ForegroundColor Green
-                    New-SweepResultRow -Label $job.Label -TenantProfile $job.TenantProfile -TenantId $job.TenantId -Status 'Success' -Summary $summary
+                    New-SweepResultRow @rowIdentity -Status 'Success' -Summary $summary
                 }
                 catch {
                     Write-Warning "$($job.Label): $($_.Exception.Message)"
-                    New-SweepResultRow -Label $job.Label -TenantProfile $job.TenantProfile -TenantId $job.TenantId -Status 'Failed' `
+                    New-SweepResultRow @rowIdentity -Status 'Failed' `
                         -Summary $null -ErrorMessage $_.Exception.Message
                 }
             }

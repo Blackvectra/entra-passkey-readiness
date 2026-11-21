@@ -148,7 +148,8 @@ param(
                     Sort-Object
             }
         })]
-    [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9-]{0,62}$')]
+    # The name is validated by Import-TenantProfile (Test-TenantProfileName), the one place
+    # that rule lives; a param attribute cannot call the helper, which loads after binding.
     [string]$TenantProfile,
 
     [Parameter(Mandatory, ParameterSetName = 'TenantProfilePath')]
@@ -359,11 +360,7 @@ if ($PSCmdlet.ParameterSetName -in @('TenantProfile', 'TenantProfilePath')) {
     if ($settings.TicketHistoryPath) { $TicketHistoryPath = $settings.TicketHistoryPath }
     $script:TenantProfileName = $settings.TenantProfile
 
-    # App-only sign-in needs both halves. Checked after the merge because they can come
-    # from different places: a Tenant Profile thumbprint and a -ClientId typed for this run.
-    if ([bool]$ClientId -ne [bool]$CertificateThumbprint) {
-        throw "Tenant Profile '$($script:TenantProfileName)': app-only sign-in needs both ClientId and CertificateThumbprint, but only one was supplied. Set both, or neither to sign in interactively."
-    }
+    # Merge-TenantProfileSetting has already refused a ClientId without a thumbprint, or the reverse.
     Write-Host "Using Tenant Profile '$($script:TenantProfileName)' ($CustomerName)." -ForegroundColor Cyan
 }
 

@@ -76,7 +76,8 @@ param(
     [string]$CurrentPath,
 
     [Parameter(Mandatory, ParameterSetName = 'TenantProfile')]
-    [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9-]{0,62}$')]
+    # The name is validated by Import-TenantProfile (Test-TenantProfileName), the one place
+    # that rule lives; a param attribute cannot call the helper, which loads after binding.
     [string]$TenantProfile,
 
     [Parameter(ParameterSetName = 'TenantProfile')]

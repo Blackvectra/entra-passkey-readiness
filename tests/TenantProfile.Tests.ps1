@@ -205,34 +205,41 @@ Describe 'Protect-TenantProfileRoot' -Skip:($IsWindows -or -not ('System.IO.Unix
 Describe 'Merge-TenantProfileSetting' {
 
     BeforeAll {
-        $script:Tp = [pscustomobject]@{
-            Name = 'fabrikam'; SchemaVersion = 1
-            TenantId = 'fabrikam-example.onmicrosoft.com'; CustomerName = 'Fabrikam'
-            ClientId = '00000000-1111-4222-8333-444444444444'; CertificateThumbprint = $null
-            ExcludeUpnPattern = @(); TicketHistoryPath = $null
+        function New-Tp {
+            param($ClientId, $CertificateThumbprint, [string[]]$ExcludeUpnPattern = @())
+            [pscustomobject]@{
+                Name = 'fabrikam'; SchemaVersion = 1
+                TenantId = 'fabrikam-example.onmicrosoft.com'; CustomerName = 'Fabrikam'
+                ClientId = $ClientId; CertificateThumbprint = $CertificateThumbprint
+                ExcludeUpnPattern = $ExcludeUpnPattern; TicketHistoryPath = $null
+            }
         }
+        $script:WithApp = New-Tp -ClientId '00000000-1111-4222-8333-444444444444' -CertificateThumbprint 'A1B2C3D4E5F60718293A4B5C6D7E8F9012345678'
+        $script:Bare = New-Tp
     }
 
     It 'lets an explicit parameter win on a single run, and says so' {
-        $verbose = $null
-        $s = Merge-TenantProfileSetting -TenantProfile $script:Tp -Mode Single -Parameter @{
+        $all = Merge-TenantProfileSetting -TenantProfile $script:WithApp -Mode Single -Parameter @{
             ClientId = 'ffffffff-1111-4222-8333-444444444444'
-        } -Verbose 4>&1 | Tee-Object -Variable verbose | Where-Object { $_ -isnot [System.Management.Automation.VerboseRecord] }
-        $s.ClientId | Should -Be 'ffffffff-1111-4222-8333-444444444444'
-        $s.TenantId | Should -Be 'fabrikam-example.onmicrosoft.com'
-        ($verbose | Where-Object { $_ -is [System.Management.Automation.VerboseRecord] }).Message |
+        } -Verbose 4>&1
+        $settings = $all | Where-Object { $_ -isnot [System.Management.Automation.VerboseRecord] }
+        $settings.ClientId | Should -Be 'ffffffff-1111-4222-8333-444444444444'
+        $settings.TenantId | Should -Be 'fabrikam-example.onmicrosoft.com'
+        ($all | Where-Object { $_ -is [System.Management.Automation.VerboseRecord] }).Message |
             Should -Match 'ClientId overridden'
     }
 
-    It 'lets the profile win in a sweep' {
-        $s = Merge-TenantProfileSetting -TenantProfile $script:Tp -Mode Sweep -Parameter @{
+    It 'lets the Tenant Profile win in a sweep' {
+        $s = Merge-TenantProfileSetting -TenantProfile $script:WithApp -Mode Sweep -Parameter @{
             ClientId = 'ffffffff-1111-4222-8333-444444444444'
+            CertificateThumbprint = 'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF'
         }
         $s.ClientId | Should -Be '00000000-1111-4222-8333-444444444444'
     }
 
-    It 'fills a blank profile key from the sweep-wide parameter' {
-        $s = Merge-TenantProfileSetting -TenantProfile $script:Tp -Mode Sweep -Parameter @{
+    It 'fills blank Tenant Profile keys from the sweep-wide parameters' {
+        $s = Merge-TenantProfileSetting -TenantProfile $script:Bare -Mode Sweep -Parameter @{
+            ClientId              = 'ffffffff-1111-4222-8333-444444444444'
             CertificateThumbprint = 'A1B2C3D4E5F60718293A4B5C6D7E8F9012345678'
             ExcludeUpnPattern     = @('^svc-')
         }
@@ -240,8 +247,16 @@ Describe 'Merge-TenantProfileSetting' {
         $s.ExcludeUpnPattern | Should -Be @('^svc-')
     }
 
-    It 'carries the profile name' {
-        (Merge-TenantProfileSetting -TenantProfile $script:Tp -Mode Single).TenantProfile | Should -Be 'fabrikam'
+    It 'refuses a <Mode> merge that ends up with only one half of app-only sign-in' -TestCases @(
+        @{ Mode = 'Single'; Parameter = @{ ClientId = 'ffffffff-1111-4222-8333-444444444444' } }
+        @{ Mode = 'Sweep'; Parameter = @{ CertificateThumbprint = 'A1B2C3D4E5F60718293A4B5C6D7E8F9012345678' } }
+    ) {
+        { Merge-TenantProfileSetting -TenantProfile $script:Bare -Mode $Mode -Parameter $Parameter } |
+            Should -Throw '*needs both ClientId and CertificateThumbprint*'
+    }
+
+    It 'carries the Tenant Profile name' {
+        (Merge-TenantProfileSetting -TenantProfile $script:Bare -Mode Single).TenantProfile | Should -Be 'fabrikam'
     }
 }
 

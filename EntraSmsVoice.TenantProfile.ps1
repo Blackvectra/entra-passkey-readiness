@@ -37,6 +37,9 @@ $script:TenantProfileAllowedKeys = @(
     'ExcludeUpnPattern'
     'TicketHistoryPath'
 )
+# A tenant or application ID. Shared by the tenant and ClientId checks below.
+$script:GuidPattern = '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$'
+
 $script:TenantProfileRequiredKeys = @('SchemaVersion', 'TenantId', 'CustomerName')
 
 # The keys that are run settings, as opposed to describing the file itself. Callers that
@@ -74,7 +77,7 @@ function Resolve-TenantIdentifier {
         $trimmed = $domain
     }
 
-    $isGuid = $trimmed -match '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$'
+    $isGuid = $trimmed -match $script:GuidPattern
     # A verified domain always has a dot. onmicrosoft.com tenants included.
     $isDomain = $trimmed -match '^[A-Za-z0-9][A-Za-z0-9-]*(\.[A-Za-z0-9][A-Za-z0-9-]*)+$'
     # Entra's own multi-tenant aliases. Allowed because Connect-MgGraph accepts them and
@@ -249,7 +252,7 @@ function Assert-TenantProfileData {
     catch { throw "Tenant Profile '$Source' has a TenantId that is not a tenant GUID or verified domain." }
 
     if ($Data.ContainsKey('ClientId') -and
-        [string]$Data.ClientId -notmatch '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') {
+        [string]$Data.ClientId -notmatch $script:GuidPattern) {
         throw "Tenant Profile '$Source' has a ClientId that is not an application (client) ID GUID."
     }
 
@@ -474,6 +477,12 @@ function Merge-TenantProfileSetting {
             elseif ($passed) { $settings[$key] = $Parameter[$key] }
             else { $settings[$key] = $null }
         }
+    }
+    # App-only sign-in needs both halves, and they can arrive from different places: a
+    # profile thumbprint with a -ClientId typed for this run, or a profile ClientId with a
+    # sweep-wide thumbprint. Checked here, after the merge, so every caller gets it.
+    if ([bool]$settings.ClientId -ne [bool]$settings.CertificateThumbprint) {
+        throw "Tenant Profile '$($TenantProfile.Name)': app-only sign-in needs both ClientId and CertificateThumbprint, but only one is set after combining the Tenant Profile with the parameters given. Set both, or neither to sign in interactively."
     }
     return $settings
 }
