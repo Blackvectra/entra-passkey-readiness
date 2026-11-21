@@ -57,9 +57,6 @@ function Resolve-TenantIdentifier {
 
         Anything that is neither a GUID nor domain-shaped fails here, at parameter time,
         instead of after a sign-in prompt has already been answered.
-
-        Copied from Get-EntraSmsVoiceMigrationImpact.ps1. Ticket 02 removes the original so
-        that this is the only copy (ADR 0001).
     #>
     param([AllowNull()][AllowEmptyString()][string]$Value)
 
