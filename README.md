@@ -316,22 +316,22 @@ It is a PowerShell data file, `profiles\<name>.profile.psd1`, one per tenant. St
 | Key | Required | Meaning |
 |---|---|---|
 | `SchemaVersion` | yes | Always `1`. |
-| `TenantId` | yes | Tenant GUID or verified domain. Not a sign-in name, and not `common`/`organizations`: a profile names exactly one tenant. |
+| `TenantId` | yes | Tenant GUID or verified domain. Not a sign-in name, and not `common`/`organizations`: a Tenant Profile names exactly one tenant. |
 | `CustomerName` | yes | The Customer. Several tenants of one Customer share it. |
 | `ClientId`, `CertificateThumbprint` | no | App-only sign-in. Leave both out to sign in interactively. |
 | `ExcludeUpnPattern` | no | Regexes for service and shared accounts. See [Service accounts](#service-accounts-and-shared-mailboxes). |
 | `TicketHistoryPath` | no | Where this tenant's ticket history lives. |
 
-**No secrets, enforced.** Any key not in that table stops the run, so a client secret pasted into a profile is refused rather than left on disk. The error names the key, never the value. A thumbprint is not a secret: it names a certificate in your store and is useless without its private key. Profiles are read with `Import-PowerShellDataFile`, so they can hold data only and cannot run code.
+**No secrets, enforced.** Any key not in that table stops the run, so a client secret pasted into a Tenant Profile is refused rather than left on disk. The error names the key, never the value. A thumbprint is not a secret: it names a certificate in your store and is useless without its private key. Tenant Profiles are read with `Import-PowerShellDataFile`, so they can hold data only and cannot run code.
 
-**Never committed.** `.gitignore` excludes `profiles/` and `*.profile.psd1`; only the fictional example is tracked, and a test fails if a real one ever is. Profiles are read from `-TenantProfileRoot`, then `$env:ENTRA_SMSVOICE_PROFILE_ROOT`, then `profiles\` beside the scripts, so an MSP can keep them on a protected share. That folder is restricted to you when read, and you are warned if other users can still read it.
+**Never committed.** `.gitignore` excludes `profiles/` and `*.profile.psd1`; only the fictional example is tracked, and a test fails if a real one ever is. Tenant Profiles are read from `-TenantProfileRoot`, then `$env:ENTRA_SMSVOICE_PROFILE_ROOT`, then `profiles\` beside the scripts, so an MSP can keep them on a protected share. That folder is restricted to you when read, and you are warned if other users can still read it.
 
-**Who wins.** On a single run, a parameter you type overrides the profile for that run, and `-Verbose` names each override. In a sweep, each profile's own values win, and the sweep-wide `-ClientId`, `-CertificateThumbprint` and `-ExcludeUpnPattern` only fill in what a profile leaves out.
+**Who wins.** On a single run, a parameter you type overrides the Tenant Profile for that run, and `-Verbose` names each override. In a sweep, each Tenant Profile's own values win, and the sweep-wide `-ClientId`, `-CertificateThumbprint` and `-ExcludeUpnPattern` only fill in what a Tenant Profile leaves out.
 
-**Where output goes.** A run from a profile files its output under the **profile name** — `reports\<profile>\` for a single run, `<ReportRoot>\<profile>\` in a sweep — because a Customer with two tenants would otherwise have them overwrite each other. See [ADR 0002](docs/adr/0002-profile-sweep-folders-by-profile-name.md). If you move a client from `tenants.csv` to a profile, set the profile's `TicketHistoryPath` to the client's existing history file, or the first profile run will raise its tickets again.
+**Where output goes.** A run from a Tenant Profile files its output under the **Tenant Profile name** — `reports\<profile>\` for a single run, `<ReportRoot>\<profile>\` in a sweep — because a Customer with two tenants would otherwise have them overwrite each other. See [ADR 0002](docs/adr/0002-profile-sweep-folders-by-profile-name.md). If you move a client from `tenants.csv` to a Tenant Profile, set the Tenant Profile's `TicketHistoryPath` to the client's existing history file, or the first Tenant Profile run will raise its tickets again.
 
 ```powershell
-# Sweep every profile, or a chosen few
+# Sweep every Tenant Profile, or a chosen few
 .\Invoke-EntraSmsVoiceSweep.ps1 -AllTenantProfiles -ReportRoot D:\ClientEvidence\EntraMigration
 .\Invoke-EntraSmsVoiceSweep.ps1 -TenantProfile contoso-prod, fabrikam -ReportRoot D:\ClientEvidence\EntraMigration
 
@@ -340,7 +340,7 @@ It is a PowerShell data file, `profiles\<name>.profile.psd1`, one per tenant. St
 .\Compare-EntraSmsVoiceAssessment.ps1 -TenantProfile fabrikam -ReportRoot D:\ClientEvidence\EntraMigration
 ```
 
-Every profile in a sweep is validated, and two profiles naming the same tenant are refused, before any tenant is contacted. The sweep summary records which profile produced each row in a `TenantProfile` column (the name only).
+Every Tenant Profile in a sweep is validated, and two Tenant Profiles naming the same tenant are refused, before any tenant is contacted. The sweep summary records which Tenant Profile produced each row in a `TenantProfile` column (the name only).
 
 ### Multi-tenant sweep (MSP scale)
 
@@ -584,8 +584,8 @@ The sweep does this for you: history lives in the per-tenant folder rather than 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `-TenantProfile` | string | none | A [Tenant Profile](#tenant-profiles) name. Supplies `-TenantId`, `-CustomerName`, `-ClientId`, `-CertificateThumbprint`, `-ExcludeUpnPattern` and `-TicketHistoryPath`; any of those typed explicitly overrides it. Tab-completes. |
-| `-TenantProfilePath` | string | none | A profile file by path, instead of `-TenantProfile`. |
-| `-TenantProfileRoot` | string | `$env:ENTRA_SMSVOICE_PROFILE_ROOT`, then `profiles\` | Folder that holds profiles. |
+| `-TenantProfilePath` | string | none | A Tenant Profile file by path, instead of `-TenantProfile`. |
+| `-TenantProfileRoot` | string | `$env:ENTRA_SMSVOICE_PROFILE_ROOT`, then `profiles\` | Folder that holds Tenant Profiles. |
 | `-TenantId` | string | current Graph context | Tenant GUID or verified domain — **not** a sign-in name, though a UPN is accepted and its domain used. Omit it to sign in interactively. Forces re-auth if it does not match the live session. Mandatory for app-only. |
 | `-ClientId` | string | none | App registration ID for unattended app-only auth, validated as a GUID. Requires `-CertificateThumbprint`. |
 | `-CertificateThumbprint` | string | none | Certificate thumbprint for app-only auth. |
@@ -611,9 +611,9 @@ Accepts and passes through `-IncludeUnaffected`, `-SkipLegacyPerUserMfa`, `-Excl
 |---|---|---|---|
 | `-TenantId` | string[] | none | One or more tenants. Accepts pipeline input. Mutually exclusive with `-TenantListPath`. |
 | `-TenantListPath` | string | none | CSV with a `TenantId` column and optional `CustomerName`. |
-| `-TenantProfile` | string[] | none | Sweep these [Tenant Profiles](#tenant-profiles). Each profile's own values win over the sweep-wide ones. |
-| `-AllTenantProfiles` | switch | off | Sweep every profile in the profile folder. |
-| `-TenantProfileRoot` | string | `$env:ENTRA_SMSVOICE_PROFILE_ROOT`, then `profiles\` | Folder that holds profiles. |
+| `-TenantProfile` | string[] | none | Sweep these [Tenant Profiles](#tenant-profiles). Each Tenant Profile's own values win over the sweep-wide ones. |
+| `-AllTenantProfiles` | switch | off | Sweep every Tenant Profile in the Tenant Profile folder. |
+| `-TenantProfileRoot` | string | `$env:ENTRA_SMSVOICE_PROFILE_ROOT`, then `profiles\` | Folder that holds Tenant Profiles. |
 | `-ReportRoot` | string | **required** | Output root. One subfolder per tenant. Point at your protected client documentation store. |
 | `-ClientId` / `-CertificateThumbprint` | string | none | App-only auth. Both or neither. |
 | `-AssessmentScriptPath` | string | same directory | Path to the assessment script. |
@@ -626,8 +626,8 @@ Accepts and passes through `-IncludeUnaffected`, `-SkipLegacyPerUserMfa`, `-Excl
 |---|---|---|---|
 | `-BaselinePath` | string | **required** unless `-TenantProfile` | The earlier assessment CSV. |
 | `-CurrentPath` | string | **required** unless `-TenantProfile` | The later assessment CSV. |
-| `-TenantProfile` | string | none | Compare this profile's two newest exports instead of naming files. |
-| `-TenantProfileRoot` | string | `$env:ENTRA_SMSVOICE_PROFILE_ROOT`, then `profiles\` | Folder that holds profiles. |
+| `-TenantProfile` | string | none | Compare this Tenant Profile's two newest exports instead of naming files. |
+| `-TenantProfileRoot` | string | `$env:ENTRA_SMSVOICE_PROFILE_ROOT`, then `profiles\` | Folder that holds Tenant Profiles. |
 | `-ReportRoot` | string | `reports\` beside the scripts | With `-TenantProfile`: where the exports are. Pass the sweep's `-ReportRoot` for sweep exports. |
 | `-OutputPath` | string | timestamped CSV beside `-CurrentPath` | Destination for the change report. |
 | `-IncludeUnchanged` | switch | off | Include users whose band did not move. |
@@ -726,7 +726,7 @@ Summarized here; full logic and remediation guidance in [docs/Risk-Classificatio
 .\Show-EntraSmsVoiceSweepGui.ps1
 ```
 
-If you have [Tenant Profiles](#tenant-profiles), the window opens on a checklist of them: tick the tenants, choose an output folder, press **Run sweep**. The list shows profile name, customer and tenant only — never the client ID or thumbprint, since this window gets screen-shared. Pass `-TenantProfileRoot` to point it at a different profile folder. Otherwise, or on the **Tenant list** tab:
+If you have [Tenant Profiles](#tenant-profiles), the window opens on a checklist of them: tick the tenants, choose an output folder, press **Run sweep**. The list shows Tenant Profile name, customer and tenant only — never the client ID or thumbprint, since this window gets screen-shared. Pass `-TenantProfileRoot` to point it at a different Tenant Profile folder. Otherwise, or on the **Tenant list** tab:
 
 Type the tenants into the grid, choose an output folder, press **Run sweep**. Each tenant gets its own folder named from its customer name:
 
