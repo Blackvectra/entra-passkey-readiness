@@ -55,6 +55,7 @@ These are implemented, not aspirational. Verify them by reading the script.
 | Certificate-only app auth | `AppOnly` parameter set | Client secrets are unsupported. A secret that reads identity posture across an entire customer estate should not exist as a script parameter. |
 | Tenant mismatch abort | `Connect-AssessmentGraph` | If `-TenantId` is a GUID and the established context does not match, the run stops rather than writing one customer's data into another customer's file. |
 | Single export choke point | `Export-AssessmentCsv` | Injection guard and ACL hardening cannot be forgotten on a future export because there is only one place a CSV is written. |
+| Inert text in the remediation script | `ConvertTo-InertScriptText` inside `New-RemediationScript` | The generated script is the one output you are told to edit and run, with write permissions, and it carries display names, UPNs and ids from the tenant plus the customer label from a PSA export. Every such value has control characters and Unicode line separators flattened and `#>` broken up, so it cannot end the comment it sits in. User ids are also escaped with PowerShell's own single-quote escaper, which covers curly quotes, so uncommenting a Graph line runs only that Graph call. |
 
 ## Least privilege
 

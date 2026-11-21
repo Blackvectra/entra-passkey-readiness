@@ -246,6 +246,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Removed the `2027-01-28` line from the assessment's console timeline. That date is not published in Microsoft Learn, in either the retirement article or the FAQ, and the script was printing it as a customer-managed telecom provider configuration deadline. Learn gives `2026-10-30` as the date provider configuration first becomes possible and `2027-02-01` as the date by which it must be in place; the timeline now prints those.
 
+### Security
+
+- **Tenant-controlled text can no longer become code in the generated remediation script.** `-ExportFixScript` writes display names, UPNs, user ids and other values from the assessed tenant, plus the customer label and source path, into a `.ps1` the operator is told to edit and run with write-scoped Graph permissions. Three ways that text could run: a line break in any value ended its `#` comment and started a live line below the `throw`; `#>` in the customer label or source path closed the `<# #>` header mid-line; and a quote in a user id, straight or curly (U+2019 counts in PowerShell), ended the single-quoted Graph URI, so uncommenting that line as instructed also ran whatever followed. Every value now passes through one sanitizer in `New-RemediationScript` that flattens control characters and Unicode line separators and breaks up `#>`, and the user id is also escaped with PowerShell's own single-quote escaper. The tests ask PowerShell's parser what the generated file, and each uncommented Graph line, would actually execute.
+
 ### Planned
 
 - Optional HTML summary output for client-facing delivery.
