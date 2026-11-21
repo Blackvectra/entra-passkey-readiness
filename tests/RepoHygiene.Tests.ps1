@@ -123,6 +123,7 @@ Describe 'Scripts parse' {
         @{ Name = 'Get-EntraSmsVoiceMigrationImpact.ps1' }
         @{ Name = 'Invoke-EntraSmsVoiceSweep.ps1' }
         @{ Name = 'Compare-EntraSmsVoiceAssessment.ps1' }
+        @{ Name = 'EntraSmsVoice.TenantProfile.ps1' }
     ) {
         $path = Join-Path $script:RepoRoot $Name
         $path | Should -Exist
@@ -155,6 +156,15 @@ Describe 'Evidence hygiene' {
             }
 
         $suspect | Should -BeNullOrEmpty -Because "these look like live exports:`n$($suspect.Name -join "`n")"
+    }
+
+    It 'tracks no real Tenant Profile' {
+        # A profile names a client, their tenant and the certificate used to read it. Only
+        # the fictional example belongs in the repo; the .gitignore is the net, this is the check.
+        $tracked = @(git -C $script:RepoRoot ls-files -- '*.profile.psd1' 'profiles/*')
+        $real = @($tracked | Where-Object { $_ -ne 'examples/Example.profile.psd1' })
+
+        $real | Should -BeNullOrEmpty -Because "real Tenant Profiles must never be committed:`n$($real -join "`n")"
     }
 
     It 'covers every artefact the scripts actually write' {
