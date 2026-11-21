@@ -494,8 +494,23 @@ end {
         # evidence is being written, and which app registration is reading their tenant.
         # Lock it to the owner before anything is written into it -- the files inside
         # inherit that, and the directory is removed in the finally below either way.
-        $handoffRoot = Join-Path ([System.IO.Path]::GetTempPath()) "EntraSweep_$runStamp"
-        New-Item -ItemType Directory -Path $handoffRoot -Force | Out-Null
+        #
+        # The name must be unguessable and the directory must be new. It used to be named
+        # from the start time to the second, and an existing directory of that name was
+        # reused: a local user who pre-created the next few minutes of names received every
+        # child's parameter file, and could swap it for one pointing the operator's
+        # certificate at any consented tenant before the child read it.
+        # CreateTempSubdirectory (.NET 7, so PowerShell 7.3+) is mkdtemp on Linux and macOS:
+        # random name, created atomically, 0700 from the first instant. Older runtimes get a
+        # random name created without -Force, which errors rather than adopting a directory.
+        $createTemp = [System.IO.Directory].GetMethod('CreateTempSubdirectory', [type[]]@([string]))
+        if ($createTemp) {
+            $handoffRoot = $createTemp.Invoke($null, @('EntraSweep_')).FullName
+        }
+        else {
+            $handoffRoot = Join-Path ([System.IO.Path]::GetTempPath()) "EntraSweep_$([guid]::NewGuid().ToString('n'))"
+            New-Item -ItemType Directory -Path $handoffRoot -ErrorAction Stop | Out-Null
+        }
         if (-not $SkipAclHardening) { Protect-OutputFile -Path $handoffRoot -Directory }
 
         $rowFunction = ${function:New-SweepResultRow}.ToString()
