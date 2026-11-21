@@ -339,15 +339,20 @@ end {
             throw "Refusing to use $path for the sweep handoff: something already exists there."
         }
 
+        # On Linux and macOS the folder is created 0700 in the same call whenever the runtime
+        # can (PowerShell 7.3+), including under -SkipAclHardening: that switch exists for
+        # report folders on filesystems that refuse permission changes, not for a folder in
+        # the shared temp directory that says which tenant each child reads.
         $modeType = 'System.IO.UnixFileMode' -as [type]
-        if (-not $IsWindows -and -not $SkipAclHardening) {
-            if (-not $modeType) {
-                throw "A concurrent sweep on this platform needs PowerShell 7.3 or later to create its handoff folder privately (this is $($PSVersionTable.PSVersion)). Upgrade, run with -ThrottleLimit 1, or pass -SkipAclHardening to accept a folder other local accounts may read."
-            }
+        if (-not $IsWindows -and $modeType) {
             [void][System.IO.Directory]::CreateDirectory($path, [Enum]::ToObject($modeType, 448))
         }
+        elseif (-not $IsWindows -and -not $SkipAclHardening) {
+            throw "A concurrent sweep on this platform needs PowerShell 7.3 or later to create its handoff folder privately (this is $($PSVersionTable.PSVersion)). Upgrade, run with -ThrottleLimit 1, or pass -SkipAclHardening to accept a folder other local accounts may read."
+        }
         else {
-            New-Item -ItemType Directory -Path $path | Out-Null
+            # No -Force: an existing folder is an error, never adopted.
+            New-Item -ItemType Directory -Path $path -ErrorAction Stop | Out-Null
         }
 
         try {
