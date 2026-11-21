@@ -27,6 +27,11 @@
 .PARAMETER ReportRoot
     Pre-fills the output folder. Otherwise the window starts with it empty.
 
+.PARAMETER TenantProfileRoot
+    Folder that holds Tenant Profiles. Defaults to $env:ENTRA_SMSVOICE_PROFILE_ROOT, then a
+    profiles folder beside this script. When it holds profiles, the window opens on a
+    checklist of them; the hand-typed tenant list stays available on its own tab.
+
 .PARAMETER TenantListPath
     Pre-loads the grid from an existing tenant list CSV, so a saved estate can be edited
     rather than retyped.
@@ -47,7 +52,10 @@ param(
     [string]$ReportRoot,
 
     [Parameter()]
-    [string]$TenantListPath
+    [string]$TenantListPath,
+
+    [Parameter()]
+    [string]$TenantProfileRoot
 )
 
 Set-StrictMode -Version Latest
@@ -185,8 +193,11 @@ function New-SweepArgumentList {
     # showing. Returned as data rather than splatted directly so the window can print the
     # equivalent command line -- a GUI whose actions cannot be reproduced on the command
     # line is a GUI you cannot schedule, and this run is one somebody will want nightly.
+    [CmdletBinding(DefaultParameterSetName = 'TenantList')]
     param(
-        [Parameter(Mandatory)][string]$TenantListPath,
+        [Parameter(Mandatory, ParameterSetName = 'TenantList')][string]$TenantListPath,
+        [Parameter(Mandatory, ParameterSetName = 'TenantProfiles')][string[]]$TenantProfile,
+        [Parameter(ParameterSetName = 'TenantProfiles')][string]$TenantProfileRoot,
         [Parameter(Mandatory)][string]$ReportRoot,
         [string]$ClientId,
         [string]$CertificateThumbprint,
@@ -197,10 +208,17 @@ function New-SweepArgumentList {
         [switch]$Resume
     )
 
-    $arguments = [ordered]@{
-        TenantListPath = $TenantListPath
-        ReportRoot     = $ReportRoot
+    $arguments = [ordered]@{}
+    if ($PSCmdlet.ParameterSetName -eq 'TenantProfiles') {
+        # Joined for the echoed command line; the sweep takes the names as an array, and the
+        # window splats this, so the array is what is actually passed.
+        $arguments.TenantProfile = [string[]]@($TenantProfile)
+        if ($TenantProfileRoot) { $arguments.TenantProfileRoot = $TenantProfileRoot }
     }
+    else {
+        $arguments.TenantListPath = $TenantListPath
+    }
+    $arguments.ReportRoot = $ReportRoot
 
     # Both or neither, matching the sweep's own rule. A ClientId without a certificate
     # falls back to an interactive prompt, which is the opposite of what an unattended
@@ -237,11 +255,68 @@ function Get-EquivalentCommandLine {
             if ($value) { $parts.Add("-$key") }
             continue
         }
-        $text = [string]$value
-        if ($text -match '[\s'']') { $text = "'" + ($text -replace "'", "''") + "'" }
+        $quote = { param($t) if ($t -match '[\s'',]') { "'" + ($t -replace "'", "''") + "'" } else { $t } }
+        $text = if ($value -is [array]) { (@($value) | ForEach-Object { & $quote ([string]$_) }) -join ',' } else { & $quote ([string]$value) }
         $parts.Add("-$key $text")
     }
     return ($parts -join ' ')
+}
+
+function Get-TenantProfileListing {
+    # What the profile checklist shows: name, customer and tenant, plus whether the profile
+    # carries its own app-only sign-in. Never the thumbprint or client ID: this window gets
+    # screen-shared, and a list of every client beside the certificate that reads them is
+    # not something to put on a call.
+    #
+    # Returns no rows, not an error, when the folder does not exist -- most operators will
+    # not have one yet, and the tenant-list tab is the fallback. A profile that fails
+    # validation is an error, because the sweep would refuse the run anyway.
+    param([string]$Root)
+
+    $folder = Get-TenantProfileRoot -Root $Root
+    if (-not (Test-Path -LiteralPath $folder -PathType Container)) {
+        return [PSCustomObject]@{ Folder = $folder; Profiles = @(); Problem = '' }
+    }
+    try {
+        $loaded = @(Get-TenantProfile -Root $folder)
+    }
+    catch {
+        return [PSCustomObject]@{ Folder = $folder; Profiles = @(); Problem = $_.Exception.Message }
+    }
+    $listing = @(foreach ($p in $loaded) {
+            [PSCustomObject]@{
+                Selected     = $true
+                Name         = $p.Name
+                CustomerName = $p.CustomerName
+                TenantId     = $p.TenantId
+                HasAppOnly   = [bool]$p.CertificateThumbprint
+            }
+        })
+    return [PSCustomObject]@{ Folder = $folder; Profiles = $listing; Problem = '' }
+}
+
+function Test-TenantProfileSelection {
+    # The checks the sweep would make, made while the operator is still looking at the list.
+    param(
+        [AllowEmptyCollection()][object[]]$Profiles,
+        [bool]$SweepWideAppOnly,
+        [int]$ThrottleLimit = 1
+    )
+
+    $chosen = @($Profiles | Where-Object { $_.Selected })
+    $problems = [System.Collections.Generic.List[string]]::new()
+    if ($chosen.Count -eq 0) { $problems.Add('Tick at least one Tenant Profile.') }
+    if ($ThrottleLimit -gt 1 -and -not $SweepWideAppOnly) {
+        $interactive = @($chosen | Where-Object { -not $_.HasAppOnly } | ForEach-Object { $_.Name })
+        if ($interactive.Count -gt 0) {
+            $problems.Add("Running tenants in parallel needs app-only sign-in for every tenant. These profiles have none, and no client ID and thumbprint are filled in below: $($interactive -join ', '). Set parallel tenants back to 1, fill both fields, or add them to the profiles.")
+        }
+    }
+    return [PSCustomObject]@{
+        IsValid  = ($problems.Count -eq 0)
+        Problems = @($problems)
+        Names    = @($chosen | ForEach-Object { $_.Name })
+    }
 }
 
 function Test-CanRunSweepGui {
@@ -276,6 +351,13 @@ if (-not (Test-Path -LiteralPath $sweepScript -PathType Leaf)) {
     throw "Invoke-EntraSmsVoiceSweep.ps1 not found beside this script. Keep the repository files together."
 }
 $estateScript = Join-Path $PSScriptRoot 'New-EntraSmsVoiceEstateReport.ps1'
+
+# Tenant Profile loading lives in one shared file (docs/adr/0001-shared-tenant-profile-helper.md).
+$tenantProfileHelper = Join-Path $PSScriptRoot 'EntraSmsVoice.TenantProfile.ps1'
+if (-not (Test-Path -LiteralPath $tenantProfileHelper -PathType Leaf)) {
+    throw 'EntraSmsVoice.TenantProfile.ps1 not found beside this script. Keep the repository files together.'
+}
+. $tenantProfileHelper
 
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -325,8 +407,30 @@ $estateScript = Join-Path $PSScriptRoot 'New-EntraSmsVoiceEstateReport.ps1'
       <Button Grid.Column="2" x:Name="BtnBrowse" Content="Browse..." Margin="8,0,0,0"/>
     </Grid>
 
-    <GroupBox Grid.Row="2" Header="Tenants" Margin="22,14,22,0" FontFamily="Segoe UI">
-      <DockPanel>
+    <TabControl Grid.Row="2" x:Name="TabSource" Margin="22,14,22,0" FontFamily="Segoe UI">
+      <TabItem x:Name="TabProfiles" Header="Tenant Profiles">
+        <DockPanel Margin="6">
+          <TextBlock DockPanel.Dock="Top" x:Name="TxtProfileFolder" Foreground="#4A5C70" Margin="0,0,0,6"
+                     TextTrimming="CharacterEllipsis"/>
+          <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Margin="0,8,0,0">
+            <Button x:Name="BtnSelectAll" Content="Select all"/>
+            <Button x:Name="BtnSelectNone" Content="Select none"/>
+            <Button x:Name="BtnReloadProfiles" Content="Reload"/>
+          </StackPanel>
+          <DataGrid x:Name="GridProfiles" AutoGenerateColumns="False" CanUserAddRows="False"
+                    CanUserDeleteRows="False" HeadersVisibility="Column" GridLinesVisibility="Horizontal"
+                    RowHeight="26" Background="White">
+            <DataGrid.Columns>
+              <DataGridCheckBoxColumn Header="Sweep" Binding="{Binding Selected, UpdateSourceTrigger=PropertyChanged}" Width="60"/>
+              <DataGridTextColumn Header="Profile" Binding="{Binding Name}" IsReadOnly="True" Width="2*"/>
+              <DataGridTextColumn Header="Customer" Binding="{Binding CustomerName}" IsReadOnly="True" Width="3*"/>
+              <DataGridTextColumn Header="Tenant" Binding="{Binding TenantId}" IsReadOnly="True" Width="3*"/>
+            </DataGrid.Columns>
+          </DataGrid>
+        </DockPanel>
+      </TabItem>
+      <TabItem x:Name="TabList" Header="Tenant list">
+      <DockPanel Margin="6">
         <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Margin="0,8,0,0">
           <Button x:Name="BtnAddRow" Content="Add tenant"/>
           <Button x:Name="BtnRemoveRow" Content="Remove selected"/>
@@ -342,7 +446,8 @@ $estateScript = Join-Path $PSScriptRoot 'New-EntraSmsVoiceEstateReport.ps1'
           </DataGrid.Columns>
         </DataGrid>
       </DockPanel>
-    </GroupBox>
+      </TabItem>
+    </TabControl>
 
     <StackPanel Grid.Row="3" Margin="22,12,22,0">
       <WrapPanel>
@@ -390,7 +495,9 @@ $window = [Windows.Markup.XamlReader]::Load($reader)
 $controls = @{}
 foreach ($name in @('TxtReportRoot', 'BtnBrowse', 'GridTenants', 'BtnAddRow', 'BtnRemoveRow', 'BtnImport',
         'BtnExport', 'ChkHtml', 'ChkTickets', 'ChkUnaffected', 'ChkResume', 'ChkEstate', 'TxtClientId',
-        'TxtThumbprint', 'CmbThrottle', 'TxtLog', 'TxtStatus', 'BtnOpenFolder', 'BtnRun')) {
+        'TxtThumbprint', 'CmbThrottle', 'TxtLog', 'TxtStatus', 'BtnOpenFolder', 'BtnRun',
+        'TabSource', 'TabProfiles', 'TabList', 'TxtProfileFolder', 'GridProfiles', 'BtnSelectAll',
+        'BtnSelectNone', 'BtnReloadProfiles')) {
     $controls[$name] = $window.FindName($name)
 }
 
@@ -430,6 +537,33 @@ if ($TenantListPath -and (Test-Path -LiteralPath $TenantListPath -PathType Leaf)
     }
 }
 if ($rows.Count -eq 0) { Add-TenantRow }
+
+# Captured at script scope so the click handlers below can see it.
+$script:ProfileRootChoice = $TenantProfileRoot
+
+$profileRows = New-Object System.Collections.ObjectModel.ObservableCollection[object]
+$controls.GridProfiles.ItemsSource = $profileRows
+
+function Update-ProfileList {
+    $profileRows.Clear()
+    $listing = Get-TenantProfileListing -Root $script:ProfileRootChoice
+    foreach ($p in $listing.Profiles) { $profileRows.Add($p) }
+    $controls.TxtProfileFolder.Text = if ($listing.Problem) {
+        "Could not load profiles from $($listing.Folder): $($listing.Problem)"
+    }
+    elseif ($profileRows.Count -eq 0) {
+        "No Tenant Profiles in $($listing.Folder). Copy examples\Example.profile.psd1 there, or use the Tenant list tab."
+    }
+    else { "$($profileRows.Count) Tenant Profile(s) in $($listing.Folder)" }
+}
+
+Update-ProfileList
+# Open on the profiles when there are any; a hand-typed list given on the command line wins.
+$controls.TabSource.SelectedItem = if ($profileRows.Count -gt 0 -and -not $TenantListPath) { $controls.TabProfiles } else { $controls.TabList }
+
+$controls.BtnReloadProfiles.Add_Click({ Update-ProfileList })
+$controls.BtnSelectAll.Add_Click({ foreach ($p in $profileRows) { $p.Selected = $true }; $controls.GridProfiles.Items.Refresh() })
+$controls.BtnSelectNone.Add_Click({ foreach ($p in $profileRows) { $p.Selected = $false }; $controls.GridProfiles.Items.Refresh() })
 
 $controls.BtnAddRow.Add_Click({ Add-TenantRow })
 
@@ -500,19 +634,31 @@ $controls.BtnRun.Add_Click({
             return
         }
 
-        $validation = Test-TenantListInput -Entries @($rows)
-        if (-not $validation.IsValid) {
-            [System.Windows.MessageBox]::Show(($validation.Problems -join "`r`n`r`n"), 'Fix these first', 'OK', 'Warning') | Out-Null
-            return
-        }
-
+        $useProfiles = $controls.TabSource.SelectedItem -eq $controls.TabProfiles
         $clientId = [string]$controls.TxtClientId.Text
         $thumbprint = [string]$controls.TxtThumbprint.Text
         $throttle = [int]$controls.CmbThrottle.SelectedItem
 
+        if ($useProfiles) {
+            $validation = Test-TenantProfileSelection -Profiles @($profileRows) `
+                -SweepWideAppOnly ([bool]($clientId -and $thumbprint)) -ThrottleLimit $throttle
+            if (-not $validation.IsValid) {
+                [System.Windows.MessageBox]::Show(($validation.Problems -join "`r`n`r`n"), 'Fix these first', 'OK', 'Warning') | Out-Null
+                return
+            }
+        }
+        else {
+            $validation = Test-TenantListInput -Entries @($rows)
+            if (-not $validation.IsValid) {
+                [System.Windows.MessageBox]::Show(($validation.Problems -join "`r`n`r`n"), 'Fix these first', 'OK', 'Warning') | Out-Null
+                return
+            }
+        }
+
         # The sweep refuses this combination anyway. Saying so here costs the operator a
         # dialog instead of a failed run.
-        if ($throttle -gt 1 -and -not ($clientId -and $thumbprint)) {
+        # Profiles may carry their own app-only sign-in; Test-TenantProfileSelection checked those.
+        if (-not $useProfiles -and $throttle -gt 1 -and -not ($clientId -and $thumbprint)) {
             [System.Windows.MessageBox]::Show(
                 'Running tenants in parallel needs app-only authentication: a client ID and a certificate thumbprint. Interactive sign-in cannot be driven concurrently. Set parallel tenants back to 1, or fill both fields.',
                 'Parallel needs app-only auth', 'OK', 'Warning') | Out-Null
@@ -531,19 +677,34 @@ $controls.BtnRun.Add_Click({
 
         # The tenant list is written to a locked-down temp file and removed afterwards. It
         # names every customer being assessed, which is not user rows but is not nothing.
-        $handoff = Join-Path ([System.IO.Path]::GetTempPath()) ("EntraSweepGui_" + [guid]::NewGuid().ToString('n'))
-        New-Item -ItemType Directory -Path $handoff -Force | Out-Null
-        $listPath = Join-Path $handoff 'tenants.csv'
-        $validation.Entries | Export-Csv -LiteralPath $listPath -NoTypeInformation -Encoding utf8BOM
-
-        $arguments = New-SweepArgumentList -TenantListPath $listPath -ReportRoot $reportRootValue `
-            -ClientId $clientId -CertificateThumbprint $thumbprint -ThrottleLimit $throttle `
-            -HtmlReport:$controls.ChkHtml.IsChecked -ExportTickets:$controls.ChkTickets.IsChecked `
-            -IncludeUnaffected:$controls.ChkUnaffected.IsChecked -Resume:$controls.ChkResume.IsChecked
+        $common = @{
+            ReportRoot            = $reportRootValue
+            ClientId              = $clientId
+            CertificateThumbprint = $thumbprint
+            ThrottleLimit         = $throttle
+            HtmlReport            = [bool]$controls.ChkHtml.IsChecked
+            ExportTickets         = [bool]$controls.ChkTickets.IsChecked
+            IncludeUnaffected     = [bool]$controls.ChkUnaffected.IsChecked
+            Resume                = [bool]$controls.ChkResume.IsChecked
+        }
+        $handoff = $null
+        if ($useProfiles) {
+            # Profiles are passed by name; the sweep reads them itself, so no temp file.
+            $arguments = New-SweepArgumentList @common -TenantProfile $validation.Names -TenantProfileRoot $script:ProfileRootChoice
+            $tenantCount = $validation.Names.Count
+        }
+        else {
+            $handoff = Join-Path ([System.IO.Path]::GetTempPath()) ("EntraSweepGui_" + [guid]::NewGuid().ToString('n'))
+            New-Item -ItemType Directory -Path $handoff -Force | Out-Null
+            $listPath = Join-Path $handoff 'tenants.csv'
+            $validation.Entries | Export-Csv -LiteralPath $listPath -NoTypeInformation -Encoding utf8BOM
+            $arguments = New-SweepArgumentList @common -TenantListPath $listPath
+            $tenantCount = $validation.Entries.Count
+        }
 
         $controls.BtnRun.IsEnabled = $false
         $controls.TxtLog.Clear()
-        Add-ProgressLine "Assessing $($validation.Entries.Count) tenant(s). Read-only; nothing is changed in any tenant."
+        Add-ProgressLine "Assessing $tenantCount tenant(s). Read-only; nothing is changed in any tenant."
         Add-ProgressLine "Equivalent command line:"
         Add-ProgressLine "  $(Get-EquivalentCommandLine -Arguments $arguments)"
         Add-ProgressLine ''
@@ -571,10 +732,10 @@ $controls.BtnRun.Add_Click({
             Set-Status 'Failed. See the progress pane.'
         }
         finally {
-            Remove-Item -LiteralPath $handoff -Recurse -Force -ErrorAction SilentlyContinue
+            if ($handoff) { Remove-Item -LiteralPath $handoff -Recurse -Force -ErrorAction SilentlyContinue }
             $controls.BtnRun.IsEnabled = $true
         }
     })
 
-Set-Status 'Add your tenants, choose an output folder, then Run sweep.'
+Set-Status 'Tick Tenant Profiles or add tenants, choose an output folder, then Run sweep.'
 [void]$window.ShowDialog()
