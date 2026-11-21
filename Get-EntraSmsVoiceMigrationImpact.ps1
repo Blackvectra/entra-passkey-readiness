@@ -483,10 +483,15 @@ function Get-DefaultOutputPath {
         [string]$TenantId,
         [Parameter(Mandatory)][string]$TenantGuid,
         [Parameter(Mandatory)][string]$BaseDirectory,
-        [Parameter(Mandatory)][datetime]$RunDate
+        [Parameter(Mandatory)][datetime]$RunDate,
+        # A Tenant Profile name. When set it names the folder and files instead of the
+        # customer: several tenants of one customer share a CustomerName, and would
+        # otherwise overwrite each other's same-day files (docs/adr/0002-profile-sweep-folders-by-profile-name.md).
+        [string]$TenantProfileName
     )
 
-    $label = Get-SafeFileLabel $CustomerName
+    $label = Get-SafeFileLabel $TenantProfileName
+    if (-not $label) { $label = Get-SafeFileLabel $CustomerName }
     if (-not $label -and $Account -match '@') {
         $label = Get-SafeFileLabel (($Account -split '@')[-1])
     }
@@ -2647,7 +2652,7 @@ if (-not $OutputPath) {
     $OutputPath = Get-DefaultOutputPath -CustomerName $CustomerName `
         -Account ([string](Get-PropertyValue $graphContext 'Account')) `
         -TenantId $TenantId -TenantGuid ([string]$graphContext.TenantId) `
-        -BaseDirectory $baseDirectory -RunDate $assessmentStartUtc
+        -BaseDirectory $baseDirectory -RunDate $assessmentStartUtc -TenantProfileName $script:TenantProfileName
     Write-Host "Writing to: $OutputPath" -ForegroundColor Cyan
 }
 

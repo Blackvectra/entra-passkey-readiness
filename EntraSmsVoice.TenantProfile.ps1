@@ -390,6 +390,45 @@ function Assert-UniqueTenantProfile {
     }
 }
 
+function Find-TenantProfileExport {
+    <#
+    .SYNOPSIS
+        Lists a Tenant's assessment exports, newest first.
+    .DESCRIPTION
+        A run from a Tenant Profile writes its exports to a folder named after the profile:
+        <ReportRoot>/<profile name>/. A single run's default ReportRoot is the reports
+        folder beside the scripts; a sweep's is whatever -ReportRoot it was given.
+
+        Only the main assessment CSV counts. The action list, ticket queue and other
+        derived files beside it are excluded by name. The two layouts are:
+          <label>_yyyy-MM-dd.csv                            (single run)
+          EntraSmsVoiceMigrationImpact_yyyyMMdd_HHmmss.csv  (sweep)
+        They are ordered by the date in the name, not by file time, because copying a
+        folder resets file times.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$TenantProfileName,
+        [string]$ReportRoot,
+        [string]$ScriptRoot = $PSScriptRoot
+    )
+
+    if ([string]::IsNullOrWhiteSpace($ReportRoot)) { $ReportRoot = Join-Path $ScriptRoot 'reports' }
+    $folder = Join-Path $ReportRoot $TenantProfileName
+    if (-not (Test-Path -LiteralPath $folder -PathType Container)) { return @() }
+
+    $exports = foreach ($file in Get-ChildItem -LiteralPath $folder -File -Filter '*.csv') {
+        $stamp = $null
+        if ($file.Name -match '^EntraSmsVoiceMigrationImpact_(?<d>\d{8})_(?<t>\d{6})\.csv$') {
+            $stamp = [datetime]::ParseExact("$($Matches.d)$($Matches.t)", 'yyyyMMddHHmmss', [cultureinfo]::InvariantCulture)
+        }
+        elseif ($file.Name -match '^.+_(?<d>\d{4}-\d{2}-\d{2})\.csv$') {
+            $stamp = [datetime]::ParseExact($Matches.d, 'yyyy-MM-dd', [cultureinfo]::InvariantCulture)
+        }
+        if ($stamp) { [PSCustomObject]@{ Path = $file.FullName; Stamp = $stamp } }
+    }
+    return @($exports | Sort-Object Stamp -Descending | ForEach-Object Path)
+}
+
 function Merge-TenantProfileSetting {
     <#
     .SYNOPSIS
