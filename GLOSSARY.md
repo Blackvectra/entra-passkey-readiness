@@ -15,3 +15,7 @@ _Avoid_: Customer (when you mean the directory), org
 **Tenant Profile**:
 The saved, non-secret settings needed to assess one Tenant: which Tenant, which Customer it belongs to, how to sign in to it, and who to leave out. Each Tenant has exactly one Tenant Profile.
 _Avoid_: Profile (on its own), config, customer profile, connection
+
+**Sweep**:
+One run that assesses several Tenants in turn and writes a single summary across them.
+_Avoid_: Batch, bulk run
