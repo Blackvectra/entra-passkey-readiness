@@ -88,7 +88,7 @@ Fields added late with `Add-Member` (the export paths and counts) are part of th
 
 ### How the sweep runs tenants concurrently
 
-Sequential mode calls the assessment script in-process. Concurrent mode (`-ThrottleLimit`) cannot, because each tenant needs its own Graph session: it writes each job's splatted arguments to a JSON file in a handoff folder from `New-PrivateHandoffDirectory` (random name, refuses an existing path or link, verified owner-only before anything is written, or the sweep stops), launches a child `pwsh` per tenant via `Start-Process`, and reads back the summary as JSON. Paths are embedded in the child command string, so they are escaped with `CodeGeneration.EscapeSingleQuotedStringContent` before interpolation — not by doubling the ASCII apostrophe alone, because PowerShell also ends a single-quoted string at the typographic quotes U+2018 to U+201B.
+Sequential mode calls the assessment script in-process. Concurrent mode (`-ThrottleLimit`) cannot, because each tenant needs its own Graph session: it writes each job's splatted arguments to a JSON file in a handoff folder from `New-PrivateHandoffDirectory` (random name, refuses an existing path or link; on Linux and macOS with PowerShell 7.3+ created `0700` in the same call even under `-SkipAclHardening`, which exists for report folders on filesystems that refuse permission changes, not for this one; without that switch the restriction is verified before anything is written, or the sweep stops), launches a child `pwsh` per tenant via `Start-Process`, and reads back the summary as JSON. Paths are embedded in the child command string, so they are escaped with `CodeGeneration.EscapeSingleQuotedStringContent` before interpolation — not by doubling the ASCII apostrophe alone, because PowerShell also ends a single-quoted string at the typographic quotes U+2018 to U+201B.
 
 ### StrictMode and Graph reads
 
@@ -163,13 +163,14 @@ Role and PIM reads are stubbed the same way; `New-GraphError` builds an exceptio
 
 **Pester v5+ scoping bites here.** Functions dot-sourced in `BeforeAll` are not visible inside `It` bodies, and neither are path helpers. Resolve what an `It` needs into `$script:` variables in `BeforeAll`.
 
-Three areas want a test with any change:
+Four areas want a test with any change:
 
 | Area | Why |
 |---|---|
 | `Get-RiskAssessment` | The band decides whether a user gets an individual ticket, a bulk campaign, or nothing. A silent change changes what a technician is told to do. |
 | `Get-MethodPolicyScope` | Exclusions are an override, not an ordered filter, and group targeting is transitive. Either one backwards produces a plausible report naming the wrong people. |
 | `Protect-CsvInjection` / `ConvertTo-SafeHtml` | Silent failure. |
+| `ConvertTo-InertScriptText` (inside `New-RemediationScript`) | `-ExportFixScript` writes tenant-controlled names into a script a technician runs. Break it and a display name becomes code. |
 
 ### Samples are generated, not hand-maintained
 
