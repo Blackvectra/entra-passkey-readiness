@@ -133,7 +133,9 @@ param(
     # -TenantId, -ClientId and -CertificateThumbprint optional, since the profile has them.
     [Parameter(Mandatory, ParameterSetName = 'TenantProfile')]
     [ArgumentCompleter({
-            param($commandName, $parameterName, $wordToComplete, $commandAst, $fakeBoundParameters)
+            # Positional rather than a param block: the completer contract passes five
+            # arguments and this needs three, and unused named ones fail PSScriptAnalyzer.
+            $wordToComplete = $args[2]; $commandAst = $args[3]; $fakeBoundParameters = $args[4]
             # Same folder precedence as Get-TenantProfileRoot, inlined because the helper is
             # not loaded while the shell is completing a command line.
             $root = if ($fakeBoundParameters.ContainsKey('TenantProfileRoot')) { $fakeBoundParameters.TenantProfileRoot }
