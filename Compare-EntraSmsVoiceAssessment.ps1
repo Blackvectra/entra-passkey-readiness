@@ -323,7 +323,7 @@ if (-not $tenantProfileHelper -or -not (Test-Path -LiteralPath $tenantProfileHel
 . $tenantProfileHelper
 
 if ($PSCmdlet.ParameterSetName -eq 'TenantProfile') {
-    # Loading the profile confirms it exists and is valid, and gives the canonical name
+    # Loading the Tenant Profile confirms it exists and is valid, and gives the canonical name
     # the exports were filed under. Nothing else in it is needed: this script reads files only.
     $loadedProfile = Import-TenantProfile -Name $TenantProfile -Root $TenantProfileRoot -SkipAclHardening:$SkipAclHardening
     $exports = @(Find-TenantProfileExport -TenantProfileName $loadedProfile.Name -ReportRoot $ReportRoot)

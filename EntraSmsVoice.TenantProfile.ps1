@@ -10,15 +10,15 @@
 
     A Tenant Profile is a PowerShell data file, <name>.profile.psd1, read with
     Import-PowerShellDataFile. That cmdlet evaluates the file in restricted language mode, so
-    a profile cannot run code. An auditor can read a profile as plain data and know that is
+    a Tenant Profile cannot run code. An auditor can read a Tenant Profile as plain data and know that is
     all it is.
 
     Validation fails closed. Any key outside the allow-list stops the run, so a client secret
-    pasted into a profile is refused instead of quietly ignored and left on disk. Error
+    pasted into a Tenant Profile is refused instead of quietly ignored and left on disk. Error
     messages name the file and the key, never the value.
 
     Profile folder precedence: -Root, then $env:ENTRA_SMSVOICE_PROFILE_ROOT, then ./profiles
-    beside the scripts. Real profiles are git-ignored. examples/Example.profile.psd1 is the
+    beside the scripts. Real Tenant Profiles are git-ignored. examples/Example.profile.psd1 is the
     only one tracked.
 #>
 
@@ -38,6 +38,11 @@ $script:TenantProfileAllowedKeys = @(
     'TicketHistoryPath'
 )
 $script:TenantProfileRequiredKeys = @('SchemaVersion', 'TenantId', 'CustomerName')
+
+# The keys that are run settings, as opposed to describing the file itself. Callers that
+# map a Tenant Profile onto their own parameters iterate this, so a key added to the
+# allow-list reaches them without a second edit.
+$script:TenantProfileSettingKeys = @($script:TenantProfileAllowedKeys | Where-Object { $_ -ne 'SchemaVersion' })
 
 function Resolve-TenantIdentifier {
     <#
@@ -122,10 +127,10 @@ function Test-TenantProfileRootExposed {
     <#
     .SYNOPSIS
         True when users other than the owner (and Administrators on Windows) can read the
-        profile folder.
+        Tenant Profile folder.
     .DESCRIPTION
-        A profile is not a secret, but it names a client, their tenant and the certificate
-        used to read it. Taken together across many profiles, that is a map of the MSP's
+        A Tenant Profile is not a secret, but it names a client, their tenant and the certificate
+        used to read it. Taken together across many Tenant Profiles, that is a map of the MSP's
         client estate, so a folder anyone on the machine can list deserves a warning.
     #>
     param([Parameter(Mandatory)][string]$Path)
@@ -154,7 +159,7 @@ function Test-TenantProfileRootExposed {
 function Protect-TenantProfileRoot {
     <#
     .SYNOPSIS
-        Restricts the profile folder to its owner (and local Administrators on Windows), and
+        Restricts the Tenant Profile folder to its owner (and local Administrators on Windows), and
         warns if it could not.
     .DESCRIPTION
         Uses the same approach as Protect-OutputFile in the assessment script: on Windows,
@@ -208,7 +213,7 @@ function Protect-TenantProfileRoot {
 function Assert-TenantProfileData {
     <#
     .SYNOPSIS
-        Validates the hashtable read from one profile file, throwing on the first problem.
+        Validates the hashtable read from one Tenant Profile file, throwing on the first problem.
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Data,
@@ -219,7 +224,7 @@ function Assert-TenantProfileData {
     # has other problems too.
     $unknown = @($Data.Keys | Where-Object { $_ -notin $script:TenantProfileAllowedKeys } | Sort-Object)
     if ($unknown.Count -gt 0) {
-        throw "Tenant Profile '$Source' contains key(s) that are not allowed: $($unknown -join ', '). A profile holds only $($script:TenantProfileAllowedKeys -join ', '). Secrets such as client secrets or private keys never belong in a profile; remove the key and keep the secret in its proper store."
+        throw "Tenant Profile '$Source' contains key(s) that are not allowed: $($unknown -join ', '). A Tenant Profile holds only $($script:TenantProfileAllowedKeys -join ', '). Secrets such as client secrets or private keys never belong in a Tenant Profile; remove the key and keep the secret in its proper store."
     }
 
     foreach ($key in $script:TenantProfileRequiredKeys) {
@@ -233,7 +238,7 @@ function Assert-TenantProfileData {
         throw "Tenant Profile '$Source' has an unsupported SchemaVersion. This version of the scripts reads SchemaVersion = $($script:TenantProfileSchemaVersion) only."
     }
 
-    # A profile names exactly one tenant. A sign-in name or a multi-tenant alias would be
+    # A Tenant Profile names exactly one tenant. A sign-in name or a multi-tenant alias would be
     # resolved at run time to whatever the operator signed in to, which defeats the point
     # of saving the tenant.
     $tenantId = ([string]$Data.TenantId).Trim()
@@ -250,7 +255,7 @@ function Assert-TenantProfileData {
 
     if ($Data.ContainsKey('CertificateThumbprint') -and
         [string]$Data.CertificateThumbprint -notmatch '^[0-9A-Fa-f]{40}$') {
-        throw "Tenant Profile '$Source' has a CertificateThumbprint that is not 40 hexadecimal characters. A profile holds only the thumbprint, never a certificate or key."
+        throw "Tenant Profile '$Source' has a CertificateThumbprint that is not 40 hexadecimal characters. A Tenant Profile holds only the thumbprint, never a certificate or key."
     }
 
     if ($Data.ContainsKey('ExcludeUpnPattern')) {
@@ -287,8 +292,8 @@ function Import-TenantProfile {
         [Parameter(ParameterSetName = 'ByName')][string]$Root,
         [Parameter(Mandatory, ParameterSetName = 'ByPath')][string]$Path,
         [switch]$SkipAclHardening,
-        # Set by Get-TenantProfile, which hardens and checks the folder once for the batch
-        # rather than once per profile.
+        # Set by Get-TenantProfile, which hardens and checks the folder once for the whole Sweep
+        # rather than once per Tenant Profile.
         [Parameter(ParameterSetName = 'ByName')][switch]$RootAlreadyProtected
     )
 
@@ -345,8 +350,8 @@ function Get-TenantProfile {
     .SYNOPSIS
         Loads every Tenant Profile in the folder, or the named ones, and refuses duplicates.
     .DESCRIPTION
-        Every profile is validated before any is returned, so a sweep stops before it
-        connects to anything. Two profiles that name the same tenant are refused: the sweep
+        Every Tenant Profile is validated before any is returned, so a sweep stops before it
+        connects to anything. Two Tenant Profiles that name the same tenant are refused: the sweep
         would assess that tenant twice and raise every ticket twice.
     #>
     [CmdletBinding()]
@@ -386,7 +391,7 @@ function Assert-UniqueTenantProfile {
     $clashes = @($TenantProfile | Group-Object { $_.TenantId.ToLowerInvariant() } | Where-Object Count -gt 1)
     if ($clashes.Count -gt 0) {
         $detail = ($clashes | ForEach-Object { ($_.Group | ForEach-Object { $_.Path }) -join ' and ' }) -join '; '
-        throw "More than one Tenant Profile names the same tenant: $detail. Each tenant has exactly one profile; remove or merge the duplicate."
+        throw "More than one Tenant Profile names the same tenant: $detail. Each tenant has exactly one Tenant Profile; remove or merge the duplicate."
     }
 }
 
@@ -395,7 +400,7 @@ function Find-TenantProfileExport {
     .SYNOPSIS
         Lists a Tenant's assessment exports, newest first.
     .DESCRIPTION
-        A run from a Tenant Profile writes its exports to a folder named after the profile:
+        A run from a Tenant Profile writes its exports to a folder named after the Tenant Profile:
         <ReportRoot>/<profile name>/. A single run's default ReportRoot is the reports
         folder beside the scripts; a sweep's is whatever -ReportRoot it was given.
 
@@ -435,11 +440,11 @@ function Merge-TenantProfileSetting {
         Combines a Tenant Profile with the parameters a caller passed, returning the
         settings to run with.
     .DESCRIPTION
-        Single (one assessment run): an explicit parameter beats the profile, and a verbose
+        Single (one assessment run): an explicit parameter beats the Tenant Profile, and a verbose
         line names each overridden key, so a one-off run stays possible and leaves a trace.
 
-        Sweep: the profile beats the sweep-wide parameter, which only fills in what the
-        profile leaves blank. Otherwise one sweep-wide -ClientId would override every
+        Sweep: the Tenant Profile beats the sweep-wide parameter, which only fills in what the
+        Tenant Profile leaves blank. Otherwise one sweep-wide -ClientId would override every
         client's own app registration.
     .OUTPUTS
         Ordered hashtable of every allowed key except SchemaVersion, plus TenantProfile (the name).
@@ -452,9 +457,7 @@ function Merge-TenantProfileSetting {
     )
 
     $settings = [ordered]@{ TenantProfile = $TenantProfile.Name }
-    foreach ($key in $script:TenantProfileAllowedKeys) {
-        if ($key -eq 'SchemaVersion') { continue }
-
+    foreach ($key in $script:TenantProfileSettingKeys) {
         $fromProfile = $TenantProfile.$key
         $profileHasValue = $null -ne $fromProfile -and -not ($fromProfile -is [array] -and $fromProfile.Count -eq 0)
         $passed = $Parameter.ContainsKey($key)

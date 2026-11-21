@@ -22,22 +22,22 @@
     name the per-tenant output folder. Alternative to -TenantId.
 
 .PARAMETER TenantProfile
-    One or more Tenant Profile names (<name>.profile.psd1 in the profile folder). Each
-    profile supplies its tenant, customer, app registration, exclusions and ticket history
+    One or more Tenant Profile names (<name>.profile.psd1 in the Tenant Profile folder). Each
+    Tenant Profile supplies its tenant, customer, app registration, exclusions and ticket history
     location. Alternative to -TenantId and -TenantListPath.
 
 .PARAMETER AllTenantProfiles
-    Sweep every Tenant Profile in the profile folder.
+    Sweep every Tenant Profile in the Tenant Profile folder.
 
 .PARAMETER TenantProfileRoot
     Folder that holds Tenant Profiles. Defaults to $env:ENTRA_SMSVOICE_PROFILE_ROOT, then a
     profiles folder beside this script.
 
-    In a profile sweep, a profile's own values win. -ClientId, -CertificateThumbprint and
-    -ExcludeUpnPattern only fill in what a profile leaves blank, so one shared app
-    registration can still be given once. Every profile is validated, and duplicate
+    In a Tenant Profile sweep, a Tenant Profile's own values win. -ClientId, -CertificateThumbprint and
+    -ExcludeUpnPattern only fill in what a Tenant Profile leaves blank, so one shared app
+    registration can still be given once. Every Tenant Profile is validated, and duplicate
     tenants are refused, before any tenant is contacted. Each tenant's output folder is
-    named from its profile name, which is unique, so several tenants of one customer
+    named from its Tenant Profile name, which is unique, so several tenants of one customer
     (sharing a CustomerName) do not collide.
 
 .PARAMETER ReportRoot
@@ -219,7 +219,7 @@ begin {
     function New-SweepTarget {
         # One shape for every tenant to assess, whichever way it was listed. Key names the
         # output folder and drives -Resume matching: the customer label for a tenant list,
-        # the profile name for a profile sweep. Profile names are unique by construction,
+        # the Tenant Profile name for a Tenant Profile sweep. Tenant Profile names are unique by construction,
         # where a CustomerName is shared by every tenant of a multi-tenant customer.
         param(
             [string]$TenantId,
@@ -262,8 +262,8 @@ begin {
 
     $profileSweep = $PSCmdlet.ParameterSetName -in @('TenantProfiles', 'AllTenantProfiles')
 
-    # In a profile sweep each tenant can bring its own app registration, so whether the
-    # sweep can run in parallel is decided per tenant once the profiles are loaded.
+    # In a Tenant Profile sweep each tenant can bring its own app registration, so whether the
+    # sweep can run in parallel is decided per tenant once the Tenant Profiles are loaded.
     if ($ThrottleLimit -gt 1 -and -not $useAppOnly -and -not $profileSweep) {
         throw 'Parallel sweeps require app-only authentication (-ClientId and -CertificateThumbprint). Interactive sign-in cannot be driven concurrently; run with -ThrottleLimit 1.'
     }
@@ -287,8 +287,8 @@ begin {
     }
 
     if ($profileSweep) {
-        # Every profile is validated, and duplicate tenants refused, here -- before the
-        # first tenant is contacted. A bad profile at position 40 must not surface after
+        # Every Tenant Profile is validated, and duplicate tenants refused, here -- before the
+        # first tenant is contacted. A bad Tenant Profile at position 40 must not surface after
         # 39 tenants have been assessed.
         $loaded = if ($AllTenantProfiles) {
             @(Get-TenantProfile -Root $TenantProfileRoot -SkipAclHardening:$SkipAclHardening)
@@ -298,7 +298,7 @@ begin {
         }
         if ($loaded.Count -eq 0) { throw "No Tenant Profiles found in '$(Get-TenantProfileRoot -Root $TenantProfileRoot)'." }
 
-        # Sweep-wide values only fill in what a profile leaves blank (Mode Sweep).
+        # Sweep-wide values only fill in what a Tenant Profile leaves blank (Mode Sweep).
         $sweepWide = @{}
         foreach ($key in 'ClientId', 'CertificateThumbprint', 'ExcludeUpnPattern') {
             if ($PSBoundParameters.ContainsKey($key)) { $sweepWide[$key] = $PSBoundParameters[$key] }
@@ -307,10 +307,10 @@ begin {
         foreach ($loadedProfile in $loaded) {
             $settings = Merge-TenantProfileSetting -TenantProfile $loadedProfile -Parameter $sweepWide -Mode Sweep
             if ([bool]$settings.ClientId -ne [bool]$settings.CertificateThumbprint) {
-                throw "Tenant Profile '$($settings.TenantProfile)': app-only sign-in needs both ClientId and CertificateThumbprint, from the profile or the sweep, but only one is set."
+                throw "Tenant Profile '$($settings.TenantProfile)': app-only sign-in needs both ClientId and CertificateThumbprint, from the Tenant Profile or the sweep, but only one is set."
             }
             if ($ThrottleLimit -gt 1 -and -not $settings.CertificateThumbprint) {
-                throw "Parallel sweeps require app-only authentication for every tenant, and Tenant Profile '$($settings.TenantProfile)' has no ClientId and CertificateThumbprint. Add them to the profile, pass them to the sweep, or run with -ThrottleLimit 1."
+                throw "Parallel sweeps require app-only authentication for every tenant, and Tenant Profile '$($settings.TenantProfile)' has no ClientId and CertificateThumbprint. Add them to the Tenant Profile, pass them to the sweep, or run with -ThrottleLimit 1."
             }
             $targets.Add((New-SweepTarget -TenantId $settings.TenantId -Label $settings.CustomerName `
                         -TenantProfile $settings.TenantProfile -ClientId $settings.ClientId `
@@ -421,7 +421,7 @@ end {
         return [PSCustomObject][ordered]@{
             Customer                   = $Label
             # The Tenant Profile name only, never its path or contents: enough to say which
-            # saved settings produced a row, and the key -Resume matches on in a profile sweep.
+            # saved settings produced a row, and the key -Resume matches on in a Tenant Profile sweep.
             TenantProfile              = $TenantProfile
             TenantId                   = if ($Summary) { & $get 'TenantId' } else { $TenantId }
             Status                     = $Status
@@ -486,7 +486,7 @@ end {
             # already finished.
             $completed = @{}
             foreach ($row in @(Import-Csv -LiteralPath $priorSummary.FullName)) {
-                # A profile sweep matches on the profile name, a tenant-list sweep on the
+                # A Tenant Profile sweep matches on the Tenant Profile name, a tenant-list sweep on the
                 # customer label; each is the Key its targets were built with.
                 $profileColumn = $row.PSObject.Properties['TenantProfile']
                 $rowKey = if ($profileSweep) { if ($profileColumn) { [string]$profileColumn.Value } else { '' } } else { [string]$row.Customer }
@@ -556,7 +556,7 @@ end {
             $arguments.MaxIndividualTickets = $MaxIndividualTickets
             # Ticket history lives per tenant folder rather than per dated run, so a
             # monthly sweep does not re-raise tickets already in somebody's queue.
-            # A profile that names its own history file keeps it there.
+            # A Tenant Profile that names its own history file keeps it there.
             $arguments.TicketHistoryPath = if ($target.TicketHistoryPath) { $target.TicketHistoryPath } else { Join-Path $tenantDir 'TicketHistory.json' }
         }
 

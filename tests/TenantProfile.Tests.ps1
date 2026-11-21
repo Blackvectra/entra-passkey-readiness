@@ -244,3 +244,15 @@ Describe 'Merge-TenantProfileSetting' {
         (Merge-TenantProfileSetting -TenantProfile $script:Tp -Mode Single).TenantProfile | Should -Be 'fabrikam'
     }
 }
+
+Describe 'Setting keys stay in step with the allow-list' {
+
+    It 'are every allowed key except SchemaVersion' {
+        $script:TenantProfileSettingKeys | Should -Be @($script:TenantProfileAllowedKeys | Where-Object { $_ -ne 'SchemaVersion' })
+    }
+
+    It 'are each a parameter of the assessment, so every one can be overridden on a single run' {
+        $assessment = (Get-Command (Join-Path $script:RepoRoot 'Get-EntraSmsVoiceMigrationImpact.ps1')).Parameters.Keys
+        foreach ($key in $script:TenantProfileSettingKeys) { $assessment | Should -Contain $key }
+    }
+}

@@ -29,7 +29,7 @@
 
 .PARAMETER TenantProfileRoot
     Folder that holds Tenant Profiles. Defaults to $env:ENTRA_SMSVOICE_PROFILE_ROOT, then a
-    profiles folder beside this script. When it holds profiles, the window opens on a
+    profiles folder beside this script. When it holds Tenant Profiles, the window opens on a
     checklist of them; the hand-typed tenant list stays available on its own tab.
 
 .PARAMETER TenantListPath
@@ -263,13 +263,13 @@ function Get-EquivalentCommandLine {
 }
 
 function Get-TenantProfileListing {
-    # What the profile checklist shows: name, customer and tenant, plus whether the profile
+    # What the Tenant Profile checklist shows: name, customer and tenant, plus whether the Tenant Profile
     # carries its own app-only sign-in. Never the thumbprint or client ID: this window gets
     # screen-shared, and a list of every client beside the certificate that reads them is
     # not something to put on a call.
     #
     # Returns no rows, not an error, when the folder does not exist -- most operators will
-    # not have one yet, and the tenant-list tab is the fallback. A profile that fails
+    # not have one yet, and the tenant-list tab is the fallback. A Tenant Profile that fails
     # validation is an error, because the sweep would refuse the run anyway.
     param([string]$Root)
 
@@ -309,7 +309,7 @@ function Test-TenantProfileSelection {
     if ($ThrottleLimit -gt 1 -and -not $SweepWideAppOnly) {
         $interactive = @($chosen | Where-Object { -not $_.HasAppOnly } | ForEach-Object { $_.Name })
         if ($interactive.Count -gt 0) {
-            $problems.Add("Running tenants in parallel needs app-only sign-in for every tenant. These profiles have none, and no client ID and thumbprint are filled in below: $($interactive -join ', '). Set parallel tenants back to 1, fill both fields, or add them to the profiles.")
+            $problems.Add("Running tenants in parallel needs app-only sign-in for every tenant. These Tenant Profiles have none, and no client ID and thumbprint are filled in below: $($interactive -join ', '). Set parallel tenants back to 1, fill both fields, or add them to the Tenant Profiles.")
         }
     }
     return [PSCustomObject]@{
@@ -549,7 +549,7 @@ function Update-ProfileList {
     $listing = Get-TenantProfileListing -Root $script:ProfileRootChoice
     foreach ($p in $listing.Profiles) { $profileRows.Add($p) }
     $controls.TxtProfileFolder.Text = if ($listing.Problem) {
-        "Could not load profiles from $($listing.Folder): $($listing.Problem)"
+        "Could not load Tenant Profiles from $($listing.Folder): $($listing.Problem)"
     }
     elseif ($profileRows.Count -eq 0) {
         "No Tenant Profiles in $($listing.Folder). Copy examples\Example.profile.psd1 there, or use the Tenant list tab."
@@ -558,7 +558,7 @@ function Update-ProfileList {
 }
 
 Update-ProfileList
-# Open on the profiles when there are any; a hand-typed list given on the command line wins.
+# Open on the Tenant Profiles when there are any; a hand-typed list given on the command line wins.
 $controls.TabSource.SelectedItem = if ($profileRows.Count -gt 0 -and -not $TenantListPath) { $controls.TabProfiles } else { $controls.TabList }
 
 $controls.BtnReloadProfiles.Add_Click({ Update-ProfileList })

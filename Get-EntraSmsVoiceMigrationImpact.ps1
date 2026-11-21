@@ -32,10 +32,10 @@
     on the app registration. Client secrets are deliberately not supported.
 
 .PARAMETER TenantProfile
-    Name of a Tenant Profile: <name>.profile.psd1 in the profile folder. Supplies TenantId,
+    Name of a Tenant Profile: <name>.profile.psd1 in the Tenant Profile folder. Supplies TenantId,
     CustomerName, ClientId, CertificateThumbprint, ExcludeUpnPattern and TicketHistoryPath,
     so switching tenants is one choice. Any of those passed explicitly overrides the
-    profile for this run, and -Verbose names each override. A profile holds no secrets.
+    Tenant Profile for this run, and -Verbose names each override. A Tenant Profile holds no secrets.
     See examples/Example.profile.psd1.
 
 .PARAMETER TenantProfilePath
@@ -128,9 +128,9 @@
 
 [CmdletBinding(DefaultParameterSetName = 'Delegated')]
 param(
-    # Tenant Profile selection. A profile supplies the tenant, the customer and how to sign
-    # in; the explicit parameters below override it for one run. The two profile sets make
-    # -TenantId, -ClientId and -CertificateThumbprint optional, since the profile has them.
+    # Tenant Profile selection. A Tenant Profile supplies the tenant, the customer and how to sign
+    # in; the explicit parameters below override it for one run. The two Tenant Profile sets make
+    # -TenantId, -ClientId and -CertificateThumbprint optional, since the Tenant Profile has them.
     [Parameter(Mandatory, ParameterSetName = 'TenantProfile')]
     [ArgumentCompleter({
             # Positional rather than a param block: the completer contract passes five
@@ -330,10 +330,10 @@ if (-not $tenantProfileHelper -or -not (Test-Path -LiteralPath $tenantProfileHel
 }
 . $tenantProfileHelper
 
-# A profile fills in whatever was not passed explicitly. An explicit parameter wins, and
+# A Tenant Profile fills in whatever was not passed explicitly. An explicit parameter wins, and
 # Merge-TenantProfileSetting says so under -Verbose. Everything downstream keeps reading
 # the same variables it always has, so the rest of the script does not know or care
-# whether a value came from a profile.
+# whether a value came from a Tenant Profile.
 $script:TenantProfileName = $null
 if ($PSCmdlet.ParameterSetName -in @('TenantProfile', 'TenantProfilePath')) {
     $loadedProfile = if ($PSCmdlet.ParameterSetName -eq 'TenantProfile') {
@@ -344,7 +344,7 @@ if ($PSCmdlet.ParameterSetName -in @('TenantProfile', 'TenantProfilePath')) {
     }
 
     $explicit = @{}
-    foreach ($key in 'TenantId', 'CustomerName', 'ClientId', 'CertificateThumbprint', 'ExcludeUpnPattern', 'TicketHistoryPath') {
+    foreach ($key in $script:TenantProfileSettingKeys) {
         if ($PSBoundParameters.ContainsKey($key)) { $explicit[$key] = $PSBoundParameters[$key] }
     }
     $settings = Merge-TenantProfileSetting -TenantProfile $loadedProfile -Parameter $explicit -Mode Single
@@ -360,7 +360,7 @@ if ($PSCmdlet.ParameterSetName -in @('TenantProfile', 'TenantProfilePath')) {
     $script:TenantProfileName = $settings.TenantProfile
 
     # App-only sign-in needs both halves. Checked after the merge because they can come
-    # from different places: a profile thumbprint and a -ClientId typed for this run.
+    # from different places: a Tenant Profile thumbprint and a -ClientId typed for this run.
     if ([bool]$ClientId -ne [bool]$CertificateThumbprint) {
         throw "Tenant Profile '$($script:TenantProfileName)': app-only sign-in needs both ClientId and CertificateThumbprint, but only one was supplied. Set both, or neither to sign in interactively."
     }
@@ -368,7 +368,7 @@ if ($PSCmdlet.ParameterSetName -in @('TenantProfile', 'TenantProfilePath')) {
 }
 
 # Parameter-set detection is done once here rather than via $PSCmdlet, which is not
-# addressable from inside the plain functions below. A profile can supply the thumbprint,
+# addressable from inside the plain functions below. A Tenant Profile can supply the thumbprint,
 # so this asks whether one is set rather than whether one was typed.
 $script:IsAppOnly = -not [string]::IsNullOrEmpty($CertificateThumbprint)
 
