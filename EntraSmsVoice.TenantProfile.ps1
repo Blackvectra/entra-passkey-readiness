@@ -286,7 +286,10 @@ function Import-TenantProfile {
         [Parameter(Mandatory, ParameterSetName = 'ByName')][string]$Name,
         [Parameter(ParameterSetName = 'ByName')][string]$Root,
         [Parameter(Mandatory, ParameterSetName = 'ByPath')][string]$Path,
-        [switch]$SkipAclHardening
+        [switch]$SkipAclHardening,
+        # Set by Get-TenantProfile, which hardens and checks the folder once for the batch
+        # rather than once per profile.
+        [Parameter(ParameterSetName = 'ByName')][switch]$RootAlreadyProtected
     )
 
     if ($PSCmdlet.ParameterSetName -eq 'ByName') {
@@ -297,7 +300,7 @@ function Import-TenantProfile {
         if (-not (Test-Path -LiteralPath $folder -PathType Container)) {
             throw "The Tenant Profile folder '$folder' does not exist. Create it, or point -TenantProfileRoot or `$env:$($script:TenantProfileRootVariable) at the folder that holds your profiles."
         }
-        Protect-TenantProfileRoot -Path $folder -SkipAclHardening:$SkipAclHardening
+        if (-not $RootAlreadyProtected) { Protect-TenantProfileRoot -Path $folder -SkipAclHardening:$SkipAclHardening }
         $Path = Join-Path $folder "$Name$($script:TenantProfileSuffix)"
         if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
             throw "No Tenant Profile named '$Name' in '$folder'. Expected the file $Name$($script:TenantProfileSuffix)."
@@ -358,6 +361,8 @@ function Get-TenantProfile {
         throw "The Tenant Profile folder '$folder' does not exist."
     }
 
+    Protect-TenantProfileRoot -Path $folder -SkipAclHardening:$SkipAclHardening
+
     if (-not $Name) {
         $Name = @(Get-ChildItem -LiteralPath $folder -File -Filter "*$($script:TenantProfileSuffix)" |
                 ForEach-Object { $_.Name.Substring(0, $_.Name.Length - $script:TenantProfileSuffix.Length) } |
@@ -365,7 +370,7 @@ function Get-TenantProfile {
     }
 
     $profiles = @(foreach ($profileName in @($Name | Select-Object -Unique)) {
-            Import-TenantProfile -Name $profileName -Root $folder -SkipAclHardening:$SkipAclHardening
+            Import-TenantProfile -Name $profileName -Root $folder -RootAlreadyProtected
         })
 
     Assert-UniqueTenantProfile -TenantProfile $profiles

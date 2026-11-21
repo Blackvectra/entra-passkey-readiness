@@ -21,6 +21,25 @@
     Path to a CSV with a TenantId column, and optionally a CustomerName column used to
     name the per-tenant output folder. Alternative to -TenantId.
 
+.PARAMETER TenantProfile
+    One or more Tenant Profile names (<name>.profile.psd1 in the profile folder). Each
+    profile supplies its tenant, customer, app registration, exclusions and ticket history
+    location. Alternative to -TenantId and -TenantListPath.
+
+.PARAMETER AllTenantProfiles
+    Sweep every Tenant Profile in the profile folder.
+
+.PARAMETER TenantProfileRoot
+    Folder that holds Tenant Profiles. Defaults to $env:ENTRA_SMSVOICE_PROFILE_ROOT, then a
+    profiles folder beside this script.
+
+    In a profile sweep, a profile's own values win. -ClientId, -CertificateThumbprint and
+    -ExcludeUpnPattern only fill in what a profile leaves blank, so one shared app
+    registration can still be given once. Every profile is validated, and duplicate
+    tenants are refused, before any tenant is contacted. Each tenant's output folder is
+    named from its profile name, which is unique, so several tenants of one customer
+    (sharing a CustomerName) do not collide.
+
 .PARAMETER ReportRoot
     Root directory for output. One subfolder per tenant. Point this at your protected
     client documentation store, never at a git working directory.
@@ -108,6 +127,17 @@ param(
     [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })]
     [string]$TenantListPath,
 
+    [Parameter(Mandatory, ParameterSetName = 'TenantProfiles')]
+    [ValidateNotNullOrEmpty()]
+    [string[]]$TenantProfile,
+
+    [Parameter(Mandatory, ParameterSetName = 'AllTenantProfiles')]
+    [switch]$AllTenantProfiles,
+
+    [Parameter(ParameterSetName = 'TenantProfiles')]
+    [Parameter(ParameterSetName = 'AllTenantProfiles')]
+    [string]$TenantProfileRoot,
+
     [Parameter(Mandatory)]
     [ValidateNotNullOrEmpty()]
     [string]$ReportRoot,
@@ -186,9 +216,42 @@ begin {
         return [System.IO.Path]::GetFileName($safe)
     }
 
+    function New-SweepTarget {
+        # One shape for every tenant to assess, whichever way it was listed. Key names the
+        # output folder and drives -Resume matching: the customer label for a tenant list,
+        # the profile name for a profile sweep. Profile names are unique by construction,
+        # where a CustomerName is shared by every tenant of a multi-tenant customer.
+        param(
+            [string]$TenantId,
+            [string]$Label,
+            [string]$TenantProfile = '',
+            [string]$ClientId,
+            [string]$CertificateThumbprint,
+            [string[]]$ExcludeUpnPattern,
+            [string]$TicketHistoryPath
+        )
+        [PSCustomObject]@{
+            TenantId              = $TenantId
+            Label                 = $Label
+            Key                   = if ($TenantProfile) { $TenantProfile } else { $Label }
+            TenantProfile         = $TenantProfile
+            ClientId              = $ClientId
+            CertificateThumbprint = $CertificateThumbprint
+            ExcludeUpnPattern     = @($ExcludeUpnPattern | Where-Object { $_ })
+            TicketHistoryPath     = $TicketHistoryPath
+        }
+    }
+
     if (-not (Test-Path -LiteralPath $AssessmentScriptPath -PathType Leaf)) {
         throw "Assessment script not found at $AssessmentScriptPath. Supply -AssessmentScriptPath."
     }
+
+    # Tenant Profile loading lives in one shared file (docs/adr/0001-shared-tenant-profile-helper.md).
+    $tenantProfileHelper = if ($PSScriptRoot) { Join-Path $PSScriptRoot 'EntraSmsVoice.TenantProfile.ps1' } else { $null }
+    if (-not $tenantProfileHelper -or -not (Test-Path -LiteralPath $tenantProfileHelper -PathType Leaf)) {
+        throw 'EntraSmsVoice.TenantProfile.ps1 was not found beside this script. Copy it alongside Invoke-EntraSmsVoiceSweep.ps1.'
+    }
+    . $tenantProfileHelper
 
     # Both or neither. A ClientId without a certificate silently falls back to an
     # interactive prompt, which is the opposite of what an unattended sweep needs.
@@ -197,7 +260,11 @@ begin {
         throw 'App-only authentication requires both -ClientId and -CertificateThumbprint.'
     }
 
-    if ($ThrottleLimit -gt 1 -and -not $useAppOnly) {
+    $profileSweep = $PSCmdlet.ParameterSetName -in @('TenantProfiles', 'AllTenantProfiles')
+
+    # In a profile sweep each tenant can bring its own app registration, so whether the
+    # sweep can run in parallel is decided per tenant once the profiles are loaded.
+    if ($ThrottleLimit -gt 1 -and -not $useAppOnly -and -not $profileSweep) {
         throw 'Parallel sweeps require app-only authentication (-ClientId and -CertificateThumbprint). Interactive sign-in cannot be driven concurrently; run with -ThrottleLimit 1.'
     }
 
@@ -215,7 +282,40 @@ begin {
         }
         foreach ($row in $listRows) {
             $label = if (($row | Get-Member -Name CustomerName) -and $row.CustomerName) { $row.CustomerName } else { $row.TenantId }
-            $targets.Add([PSCustomObject]@{ TenantId = $row.TenantId; Label = $label })
+            $targets.Add((New-SweepTarget -TenantId $row.TenantId -Label $label))
+        }
+    }
+
+    if ($profileSweep) {
+        # Every profile is validated, and duplicate tenants refused, here -- before the
+        # first tenant is contacted. A bad profile at position 40 must not surface after
+        # 39 tenants have been assessed.
+        $loaded = if ($AllTenantProfiles) {
+            @(Get-TenantProfile -Root $TenantProfileRoot -SkipAclHardening:$SkipAclHardening)
+        }
+        else {
+            @(Get-TenantProfile -Name $TenantProfile -Root $TenantProfileRoot -SkipAclHardening:$SkipAclHardening)
+        }
+        if ($loaded.Count -eq 0) { throw "No Tenant Profiles found in '$(Get-TenantProfileRoot -Root $TenantProfileRoot)'." }
+
+        # Sweep-wide values only fill in what a profile leaves blank (Mode Sweep).
+        $sweepWide = @{}
+        foreach ($key in 'ClientId', 'CertificateThumbprint', 'ExcludeUpnPattern') {
+            if ($PSBoundParameters.ContainsKey($key)) { $sweepWide[$key] = $PSBoundParameters[$key] }
+        }
+
+        foreach ($loadedProfile in $loaded) {
+            $settings = Merge-TenantProfileSetting -TenantProfile $loadedProfile -Parameter $sweepWide -Mode Sweep
+            if ([bool]$settings.ClientId -ne [bool]$settings.CertificateThumbprint) {
+                throw "Tenant Profile '$($settings.TenantProfile)': app-only sign-in needs both ClientId and CertificateThumbprint, from the profile or the sweep, but only one is set."
+            }
+            if ($ThrottleLimit -gt 1 -and -not $settings.CertificateThumbprint) {
+                throw "Parallel sweeps require app-only authentication for every tenant, and Tenant Profile '$($settings.TenantProfile)' has no ClientId and CertificateThumbprint. Add them to the profile, pass them to the sweep, or run with -ThrottleLimit 1."
+            }
+            $targets.Add((New-SweepTarget -TenantId $settings.TenantId -Label $settings.CustomerName `
+                        -TenantProfile $settings.TenantProfile -ClientId $settings.ClientId `
+                        -CertificateThumbprint $settings.CertificateThumbprint `
+                        -ExcludeUpnPattern $settings.ExcludeUpnPattern -TicketHistoryPath $settings.TicketHistoryPath))
         }
     }
 }
@@ -223,7 +323,7 @@ begin {
 process {
     if ($PSCmdlet.ParameterSetName -eq 'TenantIds') {
         foreach ($id in $TenantId) {
-            $targets.Add([PSCustomObject]@{ TenantId = $id; Label = $id })
+            $targets.Add((New-SweepTarget -TenantId $id -Label $id))
         }
     }
 }
@@ -239,7 +339,7 @@ end {
     # on the sanitized form. Fail here, before any tenant is contacted.
     $labelOwners = @{}
     foreach ($target in $targets) {
-        $safe = ConvertTo-SafeLabel -Label ([string]$target.Label)
+        $safe = ConvertTo-SafeLabel -Label ([string]$target.Key)
         if ([string]::IsNullOrWhiteSpace($safe)) { continue }
         if ($labelOwners.ContainsKey($safe)) {
             throw ("Two tenants share the customer label '$safe': $($labelOwners[$safe]) and $($target.TenantId). " +
@@ -308,7 +408,7 @@ end {
     function New-SweepResultRow {
         # One shape for every result, so the sequential path, the parallel path, and the
         # failure path cannot drift into producing different columns.
-        param($Label, $TenantId, [string]$Status, $Summary, [string]$ErrorMessage = '')
+        param($Label, $TenantId, [string]$Status, $Summary, [string]$ErrorMessage = '', [string]$TenantProfile = '')
 
         $get = {
             param($name)
@@ -320,6 +420,9 @@ end {
 
         return [PSCustomObject][ordered]@{
             Customer                   = $Label
+            # The Tenant Profile name only, never its path or contents: enough to say which
+            # saved settings produced a row, and the key -Resume matches on in a profile sweep.
+            TenantProfile              = $TenantProfile
             TenantId                   = if ($Summary) { & $get 'TenantId' } else { $TenantId }
             Status                     = $Status
             RegistrationCampaignState  = if ($Summary) { & $get 'RegistrationCampaignState' } else { '' }
@@ -383,13 +486,17 @@ end {
             # already finished.
             $completed = @{}
             foreach ($row in @(Import-Csv -LiteralPath $priorSummary.FullName)) {
-                if ($row.Status -eq 'Success' -and $row.Customer) { $completed[[string]$row.Customer] = $row }
+                # A profile sweep matches on the profile name, a tenant-list sweep on the
+                # customer label; each is the Key its targets were built with.
+                $profileColumn = $row.PSObject.Properties['TenantProfile']
+                $rowKey = if ($profileSweep) { if ($profileColumn) { [string]$profileColumn.Value } else { '' } } else { [string]$row.Customer }
+                if ($row.Status -eq 'Success' -and $rowKey) { $completed[$rowKey] = $row }
             }
 
             $remaining = [System.Collections.Generic.List[object]]::new()
             foreach ($target in $targets) {
-                $label = [string]$target.Label
-                if ($completed.ContainsKey($label)) { $carriedForward.Add($completed[$label]) }
+                $key = [string]$target.Key
+                if ($completed.ContainsKey($key)) { $carriedForward.Add($completed[$key]) }
                 else { $remaining.Add($target) }
             }
 
@@ -414,7 +521,7 @@ end {
 
         # A label that sanitizes away to nothing still needs a folder, and the run index
         # makes that fallback unique where the label could not.
-        $safeLabel = ConvertTo-SafeLabel -Label ([string]$target.Label)
+        $safeLabel = ConvertTo-SafeLabel -Label ([string]$target.Key)
         if ([string]::IsNullOrWhiteSpace($safeLabel)) { $safeLabel = "tenant_$index" }
         $tenantDir = Join-Path $ReportRoot $safeLabel
         $csvPath = Join-Path $tenantDir "EntraSmsVoiceMigrationImpact_$runStamp.csv"
@@ -423,13 +530,22 @@ end {
             TenantId   = $target.TenantId
             OutputPath = $csvPath
         }
-        if ($useAppOnly) {
+        if ($target.CertificateThumbprint) {
+            # Profile sweep: this tenant's own app registration, already merged with the
+            # sweep-wide values.
+            $arguments.ClientId = $target.ClientId
+            $arguments.CertificateThumbprint = $target.CertificateThumbprint
+        }
+        elseif ($useAppOnly -and -not $profileSweep) {
             $arguments.ClientId = $ClientId
             $arguments.CertificateThumbprint = $CertificateThumbprint
         }
         if ($IncludeUnaffected) { $arguments.IncludeUnaffected = $true }
         if ($HtmlReport) { $arguments.HtmlReport = $true }
-        if ($ExcludeUpnPattern) { $arguments.ExcludeUpnPattern = $ExcludeUpnPattern }
+        if ($profileSweep) {
+            if ($target.ExcludeUpnPattern.Count -gt 0) { $arguments.ExcludeUpnPattern = $target.ExcludeUpnPattern }
+        }
+        elseif ($ExcludeUpnPattern) { $arguments.ExcludeUpnPattern = $ExcludeUpnPattern }
         if ($SkipLegacyPerUserMfa) { $arguments.SkipLegacyPerUserMfa = $true }
         if ($SkipAclHardening) { $arguments.SkipAclHardening = $true }
         # The customer label becomes the report heading and the ticket company, so every
@@ -440,12 +556,14 @@ end {
             $arguments.MaxIndividualTickets = $MaxIndividualTickets
             # Ticket history lives per tenant folder rather than per dated run, so a
             # monthly sweep does not re-raise tickets already in somebody's queue.
-            $arguments.TicketHistoryPath = Join-Path $tenantDir 'TicketHistory.json'
+            # A profile that names its own history file keeps it there.
+            $arguments.TicketHistoryPath = if ($target.TicketHistoryPath) { $target.TicketHistoryPath } else { Join-Path $tenantDir 'TicketHistory.json' }
         }
 
         $jobs.Add([PSCustomObject]@{
             Index     = $index
             Label     = $target.Label
+            TenantProfile = $target.TenantProfile
             TenantId  = $target.TenantId
             TenantDir = $tenantDir
             Arguments = $arguments
@@ -467,13 +585,13 @@ end {
                 }
 
                 $summary = & $AssessmentScriptPath @arguments
-                $results.Add((New-SweepResultRow -Label $job.Label -TenantId $job.TenantId -Status 'Success' -Summary $summary))
+                $results.Add((New-SweepResultRow -Label $job.Label -TenantProfile $job.TenantProfile -TenantId $job.TenantId -Status 'Success' -Summary $summary))
             }
             catch {
                 # One tenant failing must not end the sweep. Common causes are missing admin
                 # consent and a tenant where the app registration was never deployed.
                 Write-Warning "$($job.Label): $($_.Exception.Message)"
-                $results.Add((New-SweepResultRow -Label $job.Label -TenantId $job.TenantId -Status 'Failed' `
+                $results.Add((New-SweepResultRow -Label $job.Label -TenantProfile $job.TenantProfile -TenantId $job.TenantId -Status 'Failed' `
                             -Summary $null -ErrorMessage $_.Exception.Message))
             }
         }
@@ -560,11 +678,11 @@ end {
 
                     $summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
                     Write-Host "[$($job.Index)/$($using:total)] done $($job.Label)" -ForegroundColor Green
-                    New-SweepResultRow -Label $job.Label -TenantId $job.TenantId -Status 'Success' -Summary $summary
+                    New-SweepResultRow -Label $job.Label -TenantProfile $job.TenantProfile -TenantId $job.TenantId -Status 'Success' -Summary $summary
                 }
                 catch {
                     Write-Warning "$($job.Label): $($_.Exception.Message)"
-                    New-SweepResultRow -Label $job.Label -TenantId $job.TenantId -Status 'Failed' `
+                    New-SweepResultRow -Label $job.Label -TenantProfile $job.TenantProfile -TenantId $job.TenantId -Status 'Failed' `
                         -Summary $null -ErrorMessage $_.Exception.Message
                 }
             }
@@ -636,7 +754,7 @@ end {
     # A value the row does not carry exports empty, which reads correctly as "this tenant
     # was never assessed on that field".
     $columns = @(
-        'Customer', 'TenantId', 'Status', 'AssessmentConfidence', 'RegistrationCampaignState',
+        'Customer', 'TenantProfile', 'TenantId', 'Status', 'AssessmentConfidence', 'RegistrationCampaignState',
         'PolicyMigrationState', 'SmsPolicyState', 'VoicePolicyState', 'EnabledUsersAssessed',
         'MigrationCandidates', 'Critical', 'High', 'Moderate', 'Low', 'BlockedAtRetirement',
         'BlockedAdminsAtRetirement', 'PasswordlessCapableInScope', 'OldestReportRowUtc',

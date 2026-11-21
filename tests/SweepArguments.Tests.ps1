@@ -47,7 +47,14 @@ BeforeAll {
 
     $script:Forwarded = @($literalKeys + $memberKeys) | Sort-Object -Unique
 
-    $script:Shared = @($script:Sweep.Names | Where-Object { $_ -in $script:Assessment.Names })
+    # Tenant Profile selection is resolved by the sweep itself: it loads each profile, merges
+    # it with the sweep-wide values, and forwards the resulting TenantId, CustomerName,
+    # ClientId, CertificateThumbprint, ExcludeUpnPattern and TicketHistoryPath. Forwarding the
+    # profile name as well would make the assessment load it a second time and apply the
+    # single-run precedence instead of the sweep's, so these two are deliberately not passed.
+    $script:ResolvedBySweep = @('TenantProfile', 'TenantProfileRoot')
+
+    $script:Shared = @($script:Sweep.Names | Where-Object { $_ -in $script:Assessment.Names -and $_ -notin $script:ResolvedBySweep })
 }
 
 Describe 'Sweep parameters reach the assessment' {
