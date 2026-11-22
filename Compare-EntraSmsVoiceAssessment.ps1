@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+#Requires -Version 7.4
 <#
 .SYNOPSIS
     Diffs two Entra SMS/voice assessment exports and reports what changed between them.
@@ -240,8 +240,7 @@ function Protect-OutputFile {
     #
     # Windows: break inheritance, then grant the file owner and local Administrators only.
     # Linux and macOS: 0600 for a file, 0700 for a directory. The API that sets it arrived
-    # in .NET 7, so PowerShell 7.0 to 7.2 cannot call it; there the operator is told what
-    # to run instead of being left believing a control applied when it did not.
+    # in .NET 7; every supported runtime (#Requires 7.4) has it.
     param(
         [Parameter(Mandatory)][string]$Path,
         [switch]$Directory
@@ -265,18 +264,10 @@ function Protect-OutputFile {
             return
         }
 
-        # Resolved at run time, so this parses on a PowerShell that has never heard of it.
-        $modeType = 'System.IO.UnixFileMode' -as [type]
-        if (-not $modeType) {
-            $octal = if ($Directory) { '700' } else { '600' }
-            Write-Warning "Cannot restrict permissions on $Path. Setting them needs PowerShell 7.3 or later; this is $($PSVersionTable.PSVersion). Run: chmod $octal '$Path'"
-            return
-        }
-
         # 0600 (384) for a file, 0700 (448) for a directory: a directory needs the execute
         # bit or its owner cannot open it, which would break the sweep rather than protect
         # it. File::SetUnixFileMode is the setter for both; there is no Directory:: form.
-        $mode = [Enum]::ToObject($modeType, $(if ($Directory) { 448 } else { 384 }))
+        $mode = [System.IO.UnixFileMode]$(if ($Directory) { 448 } else { 384 })
         [System.IO.File]::SetUnixFileMode($Path, $mode)
     }
     catch {

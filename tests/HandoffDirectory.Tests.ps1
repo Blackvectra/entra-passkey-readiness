@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+#Requires -Version 7.4
 #Requires -Modules Pester
 
 # Covers the parallel sweep's handoff directory.
@@ -125,20 +125,6 @@ Describe 'The parallel sweep handoff directory' -Skip:($IsWindows) {
             $modes = @(Get-Content -LiteralPath $probe)
             $modes | Should -Not -BeNullOrEmpty -Because 'each child should have seen the handoff directory'
             foreach ($mode in $modes) { $mode | Should -Be '700' }
-        }
-        finally { Remove-Item -LiteralPath $fixture.Root -Recurse -Force -ErrorAction SilentlyContinue }
-    }
-
-    It 'refuses to run in parallel when it cannot create an owner-only directory' -Skip:([bool][System.IO.Directory].GetMethod('CreateTempSubdirectory', [type[]]@([string]))) {
-        # Only runs where the runtime lacks CreateTempSubdirectory (PowerShell 7.0-7.2),
-        # which also cannot set POSIX permissions. There the handoff directory would sit at
-        # the umask mode, readable by every local account, for the whole sweep. Refusing,
-        # with the way out named, beats running with the tenant list exposed.
-        $fixture = New-SweepFixture
-        try {
-            { Invoke-ParallelSweep -Fixture $fixture } | Should -Throw -ExpectedMessage '*7.3*'
-            @(Get-ChildItem -LiteralPath $fixture.Temp -Filter 'EntraSweep_*') |
-                Should -BeNullOrEmpty -Because 'nothing should be written before refusing'
         }
         finally { Remove-Item -LiteralPath $fixture.Root -Recurse -Force -ErrorAction SilentlyContinue }
     }

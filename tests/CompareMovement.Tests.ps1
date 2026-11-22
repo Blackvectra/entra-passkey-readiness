@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+#Requires -Version 7.4
 #Requires -Modules Pester
 
 # Covers Get-Movement and Get-ChangeNote in Compare-EntraSmsVoiceAssessment.ps1.

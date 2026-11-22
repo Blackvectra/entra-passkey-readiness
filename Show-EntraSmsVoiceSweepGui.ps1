@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+#Requires -Version 7.4
 <#
 .SYNOPSIS
     Windows front end for the multi-tenant sweep. Type in tenants, press Run, get a folder

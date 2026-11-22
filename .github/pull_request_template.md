@@ -19,6 +19,7 @@ it from the fictional samples in examples/.
 
 - [ ] `Invoke-Pester ./tests` passes
 - [ ] `Invoke-ScriptAnalyzer -Path . -Recurse -Settings ./PSScriptAnalyzerSettings.psd1` is clean
+- [ ] Every new security test was run against the code before the fix and failed. A test that cannot fail proves nothing; say how you saw it fail.
 - [ ] Tested against a real tenant <!-- if not, say so above and note what is unverified -->
 
 ## Checklist
