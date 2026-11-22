@@ -71,7 +71,7 @@ foreach (`$k in `$PSBoundParameters.Keys) { `$record[`$k] = `$PSBoundParameters[
         -ReportRoot $script:ReportRoot -AssessmentScriptPath $script:FakeAssessment `
         -ClientId 'ffffffff-1111-4222-8333-444444444444' `
         -CertificateThumbprint 'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF' `
-        -ExcludeUpnPattern '^shared-' -ExportTickets -SkipAclHardening 6>$null 3>$null | Out-Null
+        -ExcludeUpnPattern '^shared-' -ExportTickets -SkipAclHardening -SkipTenantLookup 6>$null 3>$null | Out-Null
 
     $script:Summary = Import-Csv -LiteralPath (Get-ChildItem -LiteralPath $script:ReportRoot -Filter 'SweepSummary_*.csv').FullName
 }
@@ -129,7 +129,7 @@ Describe 'Refusals before any tenant is contacted' {
             'b' = "@{ SchemaVersion = 1; TenantId = 'dup.example.com'; CustomerName = 'B' }"
         }
         { & (Get-SweepScriptPath) -AllTenantProfiles -TenantProfileRoot $folder -ReportRoot (Join-Path $script:Root 'x') `
-                -AssessmentScriptPath $script:FakeAssessment -SkipAclHardening 6>$null } |
+                -AssessmentScriptPath $script:FakeAssessment -SkipAclHardening -SkipTenantLookup 6>$null } |
             Should -Throw '*same tenant*'
         (Join-Path $script:Calls 'dup.example.com.json') | Should -Not -Exist
     }
@@ -139,7 +139,7 @@ Describe 'Refusals before any tenant is contacted' {
             'solo' = "@{ SchemaVersion = 1; TenantId = 'solo.example.com'; CustomerName = 'Solo' }"
         }
         { & (Get-SweepScriptPath) -TenantProfile solo -TenantProfileRoot $folder -ReportRoot (Join-Path $script:Root 'y') `
-                -AssessmentScriptPath $script:FakeAssessment -ThrottleLimit 2 -SkipAclHardening 6>$null } |
+                -AssessmentScriptPath $script:FakeAssessment -ThrottleLimit 2 -SkipAclHardening -SkipTenantLookup 6>$null } |
             Should -Throw "*Parallel sweeps*'solo'*"
     }
 
@@ -147,12 +147,12 @@ Describe 'Refusals before any tenant is contacted' {
         $out = Join-Path $script:Root 'resume'
         & (Get-SweepScriptPath) -AllTenantProfiles -TenantProfileRoot $script:Folder -ReportRoot $out `
             -AssessmentScriptPath $script:FakeAssessment -ClientId 'ffffffff-1111-4222-8333-444444444444' `
-            -CertificateThumbprint 'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF' -SkipAclHardening 6>$null 3>$null | Out-Null
+            -CertificateThumbprint 'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF' -SkipAclHardening -SkipTenantLookup 6>$null 3>$null | Out-Null
         Get-ChildItem -LiteralPath $script:Calls | Remove-Item
         Start-Sleep -Seconds 1   # the summary file name is stamped to the second
 
         & (Get-SweepScriptPath) -AllTenantProfiles -TenantProfileRoot $script:Folder -ReportRoot $out `
-            -AssessmentScriptPath $script:FakeAssessment -Resume -SkipAclHardening 6>$null 3>$null | Out-Null
+            -AssessmentScriptPath $script:FakeAssessment -Resume -SkipAclHardening -SkipTenantLookup 6>$null 3>$null | Out-Null
 
         @(Get-ChildItem -LiteralPath $script:Calls).Count | Should -Be 0 -Because 'both tenants already succeeded'
     }

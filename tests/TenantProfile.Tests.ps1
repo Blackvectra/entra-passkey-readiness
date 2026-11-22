@@ -183,6 +183,72 @@ Describe 'Get-TenantProfile' {
     }
 }
 
+Describe 'Assert-UniqueTenantProfile' {
+    # A stand-in for the tenant lookup, so these tests never reach the network.
+    BeforeAll {
+        $script:FabrikamGuid = '11111111-2222-4333-8444-555555555555'
+        $script:Lookup = {
+            param($TenantId)
+            if ($TenantId -eq 'fabrikam-example.onmicrosoft.com') { return $script:FabrikamGuid }
+            throw "lookup failed for $TenantId"
+        }
+        function New-Entry([string]$Name, [string]$TenantId) {
+            [pscustomobject]@{ Name = $Name; TenantId = $TenantId; Path = "$Name.profile.psd1" }
+        }
+    }
+
+    It 'refuses a domain and a GUID that name the same tenant' {
+        $entries = @(
+            New-Entry 'fabrikam' 'fabrikam-example.onmicrosoft.com'
+            New-Entry 'fabrikam-guid' $script:FabrikamGuid
+        )
+        { Assert-UniqueTenantProfile -TenantProfile $entries -TenantIdResolver $script:Lookup } |
+            Should -Throw '*fabrikam.profile.psd1*fabrikam-guid.profile.psd1*'
+    }
+
+    It 'warns and falls back to the written identifier when the lookup fails' {
+        $entries = @(
+            New-Entry 'contoso' 'contoso.example'
+            New-Entry 'fabrikam' $script:FabrikamGuid
+        )
+        $warnings = @(Assert-UniqueTenantProfile -TenantProfile $entries -TenantIdResolver $script:Lookup 3>&1)
+        ($warnings -join ' ') | Should -BeLike "*contoso*contoso.example*"
+    }
+
+    It 'still refuses identical identifiers when the lookup fails' {
+        $entries = @(
+            New-Entry 'contoso' 'contoso.example'
+            New-Entry 'contoso-old' 'CONTOSO.example'
+        )
+        { Assert-UniqueTenantProfile -TenantProfile $entries -TenantIdResolver $script:Lookup 3>$null } |
+            Should -Throw '*contoso.profile.psd1*contoso-old.profile.psd1*'
+    }
+}
+
+Describe 'Resolve-TenantGuid' {
+    It 'returns a GUID as written, without a lookup' {
+        Mock Invoke-RestMethod { throw 'should not be called' }
+        Resolve-TenantGuid -TenantId '11111111-2222-4333-8444-555555555555' | Should -Be '11111111-2222-4333-8444-555555555555'
+        Should -Invoke Invoke-RestMethod -Times 0
+    }
+
+    It 'reads the tenant GUID from the issuer of the anonymous OpenID configuration' {
+        Mock Invoke-RestMethod {
+            [pscustomobject]@{ issuer = 'https://login.microsoftonline.com/11111111-2222-4333-8444-555555555555/v2.0' }
+        }
+        Resolve-TenantGuid -TenantId 'fabrikam-example.onmicrosoft.com' | Should -Be '11111111-2222-4333-8444-555555555555'
+        Should -Invoke Invoke-RestMethod -Times 1 -ParameterFilter {
+            $Method -eq 'Get' -and
+            $Uri -eq 'https://login.microsoftonline.com/fabrikam-example.onmicrosoft.com/v2.0/.well-known/openid-configuration'
+        }
+    }
+
+    It 'throws when the issuer holds no tenant GUID' {
+        Mock Invoke-RestMethod { [pscustomobject]@{ issuer = 'https://example.invalid/' } }
+        { Resolve-TenantGuid -TenantId 'fabrikam-example.onmicrosoft.com' } | Should -Throw '*fabrikam-example.onmicrosoft.com*'
+    }
+}
+
 Describe 'Protect-TenantProfileRoot' -Skip:($IsWindows -or -not ('System.IO.UnixFileMode' -as [type])) {
 
     It 'restricts the folder to its owner' {

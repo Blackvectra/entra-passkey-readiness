@@ -356,12 +356,16 @@ function Get-TenantProfile {
         Every Tenant Profile is validated before any is returned, so a sweep stops before it
         connects to anything. Two Tenant Profiles that name the same tenant are refused: the sweep
         would assess that tenant twice and raise every ticket twice.
+
+        -ResolveTenantId looks up the GUID behind each domain-form TenantId first, so a domain
+        in one Tenant Profile and the GUID in another are caught too (see Resolve-TenantGuid).
     #>
     [CmdletBinding()]
     param(
         [string[]]$Name,
         [string]$Root,
-        [switch]$SkipAclHardening
+        [switch]$SkipAclHardening,
+        [switch]$ResolveTenantId
     )
 
     $folder = Get-TenantProfileRoot -Root $Root
@@ -381,17 +385,64 @@ function Get-TenantProfile {
             Import-TenantProfile -Name $profileName -Root $folder -RootAlreadyProtected
         })
 
-    Assert-UniqueTenantProfile -TenantProfile $profiles
+    $resolver = if ($ResolveTenantId) { { param($TenantId) Resolve-TenantGuid -TenantId $TenantId } }
+    Assert-UniqueTenantProfile -TenantProfile $profiles -TenantIdResolver $resolver
     return $profiles
 }
 
-function Assert-UniqueTenantProfile {
-    # Domain and GUID forms of the same tenant cannot be matched offline, so this catches
-    # identical identifiers only (case-insensitive). The sweep's own check on the tenant it
-    # actually reached is the backstop.
-    param([AllowEmptyCollection()][object[]]$TenantProfile)
+function Resolve-TenantGuid {
+    <#
+    .SYNOPSIS
+        Returns the tenant GUID for a TenantId written as a GUID or a verified domain.
+    .DESCRIPTION
+        A domain is looked up through Entra ID's public OpenID configuration document, an
+        anonymous GET to login.microsoftonline.com. It sends no credentials and does not touch
+        Microsoft Graph, so the scripts stay read-only. The issuer in that document carries the
+        tenant GUID.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][string]$TenantId)
 
-    $clashes = @($TenantProfile | Group-Object { $_.TenantId.ToLowerInvariant() } | Where-Object Count -gt 1)
+    if ($TenantId -match $script:GuidPattern) { return $TenantId }
+
+    $uri = 'https://login.microsoftonline.com/{0}/v2.0/.well-known/openid-configuration' -f [uri]::EscapeDataString($TenantId)
+    $config = Invoke-RestMethod -Method Get -Uri $uri -TimeoutSec 15 -ErrorAction Stop
+    if ([string]$config.issuer -match '/([0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12})/') {
+        return $Matches[1]
+    }
+    throw "The OpenID configuration for '$TenantId' names no tenant GUID in its issuer."
+}
+
+function Assert-UniqueTenantProfile {
+    <#
+    .SYNOPSIS
+        Refuses two Tenant Profiles that name the same tenant.
+    .DESCRIPTION
+        With -TenantIdResolver, each TenantId is first turned into its tenant GUID, so a domain
+        in one Tenant Profile and the GUID in another are caught before anything connects. A
+        lookup that fails is a warning, not a stop: that Tenant Profile is compared by the
+        identifier as written, and the sweep's own check on the tenant it reached is the backstop.
+        Without a resolver, only identical identifiers (case-insensitive) are caught.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowEmptyCollection()][object[]]$TenantProfile,
+        [scriptblock]$TenantIdResolver
+    )
+
+    $keyed = foreach ($entry in $TenantProfile) {
+        $key = $entry.TenantId.ToLowerInvariant()
+        if ($TenantIdResolver -and $key -notmatch $script:GuidPattern) {
+            try { $key = ([string](& $TenantIdResolver $entry.TenantId)).ToLowerInvariant() }
+            catch {
+                Write-Warning "Tenant Profile '$($entry.Name)': could not look up the tenant GUID for '$($entry.TenantId)' ($($_.Exception.Message)). Checking it for duplicates as written."
+            }
+        }
+        [pscustomobject]@{ Key = $key; Path = $entry.Path }
+    }
+
+    $clashes = @($keyed | Group-Object Key | Where-Object Count -gt 1)
     if ($clashes.Count -gt 0) {
         $detail = ($clashes | ForEach-Object { ($_.Group | ForEach-Object { $_.Path }) -join ' and ' }) -join '; '
         throw "More than one Tenant Profile names the same tenant: $detail. Each tenant has exactly one Tenant Profile; remove or merge the duplicate."

@@ -197,7 +197,13 @@ param(
     [switch]$Resume,
 
     [Parameter()]
-    [switch]$SkipAclHardening
+    [switch]$SkipAclHardening,
+
+    # Profile sweeps only. Skip looking up the tenant GUID behind each domain-form TenantId
+    # (an anonymous GET to login.microsoftonline.com). Without the lookup, a tenant written as
+    # a domain in one Tenant Profile and a GUID in another is not caught before connecting.
+    [Parameter()]
+    [switch]$SkipTenantLookup
 )
 
 begin {
@@ -291,10 +297,10 @@ begin {
         # first tenant is contacted. A bad Tenant Profile at position 40 must not surface after
         # 39 tenants have been assessed.
         $loaded = if ($AllTenantProfiles) {
-            @(Get-TenantProfile -Root $TenantProfileRoot -SkipAclHardening:$SkipAclHardening)
+            @(Get-TenantProfile -Root $TenantProfileRoot -SkipAclHardening:$SkipAclHardening -ResolveTenantId:(-not $SkipTenantLookup))
         }
         else {
-            @(Get-TenantProfile -Name $TenantProfile -Root $TenantProfileRoot -SkipAclHardening:$SkipAclHardening)
+            @(Get-TenantProfile -Name $TenantProfile -Root $TenantProfileRoot -SkipAclHardening:$SkipAclHardening -ResolveTenantId:(-not $SkipTenantLookup))
         }
         if ($loaded.Count -eq 0) { throw "No Tenant Profiles found in '$(Get-TenantProfileRoot -Root $TenantProfileRoot)'." }
 
