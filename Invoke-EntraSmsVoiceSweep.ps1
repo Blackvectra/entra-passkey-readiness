@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+#Requires -Version 7.4
 <#
 .SYNOPSIS
     Runs the read-only Entra SMS/voice migration impact assessment across many tenants.
@@ -201,16 +201,6 @@ begin {
         throw 'Parallel sweeps require app-only authentication (-ClientId and -CertificateThumbprint). Interactive sign-in cannot be driven concurrently; run with -ThrottleLimit 1.'
     }
 
-    # A parallel sweep passes each child its parameters through a directory in the shared
-    # temp location, which on Linux and macOS must be owner-only. Before .NET 7 (PowerShell
-    # 7.3) the runtime can neither create one atomically nor set POSIX permissions at all,
-    # so the directory would sit at the umask mode -- readable by every local account --
-    # for the whole sweep. Refuse rather than run exposed. Windows %TEMP% is per-user.
-    if ($ThrottleLimit -gt 1 -and -not $IsWindows -and
-        -not [System.IO.Directory].GetMethod('CreateTempSubdirectory', [type[]]@([string]))) {
-        throw "Parallel sweeps on Linux and macOS need PowerShell 7.3 or later to keep the handoff directory private; this is $($PSVersionTable.PSVersion). Upgrade, or run with -ThrottleLimit 1."
-    }
-
     if (-not (Test-Path -LiteralPath $ReportRoot)) {
         New-Item -ItemType Directory -Path $ReportRoot -Force | Out-Null
     }
@@ -268,8 +258,7 @@ end {
         #
         # Windows: break inheritance, then grant the file owner and local Administrators only.
         # Linux and macOS: 0600 for a file, 0700 for a directory. The API that sets it arrived
-        # in .NET 7, so PowerShell 7.0 to 7.2 cannot call it; there the operator is told what
-        # to run instead of being left believing a control applied when it did not.
+        # in .NET 7; every supported runtime (#Requires 7.4) has it.
         param(
             [Parameter(Mandatory)][string]$Path,
             [switch]$Directory
@@ -293,18 +282,10 @@ end {
                 return
             }
 
-            # Resolved at run time, so this parses on a PowerShell that has never heard of it.
-            $modeType = 'System.IO.UnixFileMode' -as [type]
-            if (-not $modeType) {
-                $octal = if ($Directory) { '700' } else { '600' }
-                Write-Warning "Cannot restrict permissions on $Path. Setting them needs PowerShell 7.3 or later; this is $($PSVersionTable.PSVersion). Run: chmod $octal '$Path'"
-                return
-            }
-
             # 0600 (384) for a file, 0700 (448) for a directory: a directory needs the execute
             # bit or its owner cannot open it, which would break the sweep rather than protect
             # it. File::SetUnixFileMode is the setter for both; there is no Directory:: form.
-            $mode = [Enum]::ToObject($modeType, $(if ($Directory) { 448 } else { 384 }))
+            $mode = [System.IO.UnixFileMode]$(if ($Directory) { 448 } else { 384 })
             [System.IO.File]::SetUnixFileMode($Path, $mode)
         }
         catch {
@@ -510,17 +491,9 @@ end {
         # reused: a local user who pre-created the next few minutes of names received every
         # child's parameter file, and could swap it for one pointing the operator's
         # certificate at any consented tenant before the child read it.
-        # CreateTempSubdirectory (.NET 7, so PowerShell 7.3+) is mkdtemp on Linux and macOS:
-        # random name, created atomically, 0700 from the first instant. Older runtimes get a
-        # random name created without -Force, which errors rather than adopting a directory.
-        $createTemp = [System.IO.Directory].GetMethod('CreateTempSubdirectory', [type[]]@([string]))
-        if ($createTemp) {
-            $handoffRoot = $createTemp.Invoke($null, @('EntraSweep_')).FullName
-        }
-        else {
-            $handoffRoot = Join-Path ([System.IO.Path]::GetTempPath()) "EntraSweep_$([guid]::NewGuid().ToString('n'))"
-            New-Item -ItemType Directory -Path $handoffRoot -ErrorAction Stop | Out-Null
-        }
+        # CreateTempSubdirectory is mkdtemp on Linux and macOS: random name, created
+        # atomically, 0700 from the first instant.
+        $handoffRoot = [System.IO.Directory]::CreateTempSubdirectory('EntraSweep_').FullName
         if (-not $SkipAclHardening) { Protect-OutputFile -Path $handoffRoot -Directory }
 
         $rowFunction = ${function:New-SweepResultRow}.ToString()

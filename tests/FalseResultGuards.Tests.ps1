@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+#Requires -Version 7.4
 #Requires -Modules Pester
 
 # Regression cover for a bug hunt over the whole repository, looking for two things: a loop
