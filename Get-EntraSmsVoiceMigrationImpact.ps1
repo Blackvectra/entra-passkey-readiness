@@ -2619,9 +2619,7 @@ function Save-TicketHistory {
     )
 
     $directory = Split-Path -Parent $Path
-    if ($directory -and -not (Test-Path -LiteralPath $directory)) {
-        New-Item -ItemType Directory -Path $directory -Force | Out-Null
-    }
+    if ($directory) { New-ProtectedDirectory -Path $directory -SkipAclHardening:$SkipAclHardening }
 
     # Object ids and risk bands only. No names, no UPNs: this file sits wherever the
     # operator points it and does not need to carry identifying data to do its job.
@@ -3050,14 +3048,48 @@ function New-RemediationScript {
 
     $content = ($lines -join [Environment]::NewLine)
     $directory = Split-Path -Parent $Path
-    if ($directory -and -not (Test-Path -LiteralPath $directory)) {
-        New-Item -ItemType Directory -Path $directory -Force | Out-Null
-    }
+    if ($directory) { New-ProtectedDirectory -Path $directory -SkipAclHardening:$SkipAclHardening }
     Write-ProtectedFile -TargetPath $Path -SkipAclHardening:$SkipAclHardening -Writer {
         param([string]$Destination)
         Set-Content -LiteralPath $Destination -Value $content -Encoding utf8
     }
     return (Resolve-Path -LiteralPath $Path).Path
+}
+
+function New-ProtectedDirectory {
+    # Creates a report folder, and each missing parent, owner-only. The files inside are
+    # already private, but a folder New-Item creates takes the umask (0755 on most Linux
+    # hosts) or the parent's inherited ACL, so any local account could list it -- and the
+    # file names carry the customer label and say which file is the targeting list.
+    #
+    # Only levels this call creates are restricted. A folder that already exists was chosen
+    # by the operator (C:\Reports, a home directory) and changing its permissions would be
+    # a surprise this tool has no business springing. -SkipAclHardening, as everywhere,
+    # leaves permissions as the location gives them.
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [switch]$SkipAclHardening
+    )
+
+    $full = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+    $missing = [System.Collections.Generic.List[string]]::new()
+    $cursor = $full
+    while ($cursor -and -not (Test-Path -LiteralPath $cursor)) {
+        $missing.Insert(0, $cursor)
+        $cursor = Split-Path -Parent $cursor
+    }
+
+    foreach ($level in $missing) {
+        if (-not $IsWindows -and -not $SkipAclHardening) {
+            # 0700 at creation, so there is no moment the folder is listable. The umask can
+            # only narrow it further.
+            [void][System.IO.Directory]::CreateDirectory($level, [System.IO.UnixFileMode]448)
+        }
+        else {
+            New-Item -ItemType Directory -Path $level -Force | Out-Null
+        }
+        if (-not $SkipAclHardening) { Protect-OutputFile -Path $level -Directory }
+    }
 }
 
 function Write-ProtectedFile {
@@ -3089,9 +3121,7 @@ function Write-ProtectedFile {
         throw "Cannot write $target`: a folder already has that name."
     }
     $directory = Split-Path -Parent $target
-    if (-not (Test-Path -LiteralPath $directory)) {
-        New-Item -ItemType Directory -Path $directory -Force | Out-Null
-    }
+    New-ProtectedDirectory -Path $directory -SkipAclHardening:$SkipAclHardening
     $temp = Join-Path $directory ('.{0}.{1}.partial' -f [System.IO.Path]::GetFileName($target), [guid]::NewGuid().ToString('n'))
 
     # Created 0600 rather than narrowed afterwards where the runtime allows it (.NET 7, so
@@ -3741,9 +3771,7 @@ $exportRows = @($exportRows | Sort-Object `
     @{ Expression = 'DisplayName'; Ascending = $true })
 
 $outputDirectory = Split-Path -Parent $OutputPath
-if ($outputDirectory -and -not (Test-Path -LiteralPath $outputDirectory)) {
-    New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
-}
+if ($outputDirectory) { New-ProtectedDirectory -Path $outputDirectory -SkipAclHardening:$SkipAclHardening }
 
 # The two targeting exports, named here so a copy left by an earlier run is removed BEFORE
 # this run writes anything. Removing them only at the end, and only when this run withheld

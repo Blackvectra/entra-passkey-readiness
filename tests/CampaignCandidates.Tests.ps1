@@ -26,7 +26,7 @@ BeforeAll {
             'Protect-CsvInjection'
             'Export-AssessmentCsv'
             'Protect-OutputFile'
-            'Write-ProtectedFile'
+            'New-ProtectedDirectory', 'Write-ProtectedFile'
         ))
 
     $script:NoReportRowMarker = '(no row in registration report)'

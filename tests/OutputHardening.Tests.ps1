@@ -176,7 +176,7 @@ Describe 'Write-ProtectedFile: no report is readable early or visible half-writt
     # file under its final name that looked like a complete one.
 
     BeforeAll {
-        . (Import-ScriptFunction -Path (Get-AssessmentScriptPath) -Name @('Protect-OutputFile', 'Write-ProtectedFile'))
+        . (Import-ScriptFunction -Path (Get-AssessmentScriptPath) -Name @('Protect-OutputFile', 'New-ProtectedDirectory', 'Write-ProtectedFile'))
         $script:Dir = Join-Path ([System.IO.Path]::GetTempPath()) "protected-$(New-Guid)"
         New-Item -ItemType Directory -Path $script:Dir | Out-Null
     }
@@ -244,7 +244,7 @@ Describe 'Write-ProtectedFile refuses a target that is a folder' {
     # would report a write that never reached the expected path.
 
     BeforeAll {
-        . (Import-ScriptFunction -Path (Get-AssessmentScriptPath) -Name @('Protect-OutputFile', 'Write-ProtectedFile'))
+        . (Import-ScriptFunction -Path (Get-AssessmentScriptPath) -Name @('Protect-OutputFile', 'New-ProtectedDirectory', 'Write-ProtectedFile'))
         $script:FolderDir = Join-Path ([System.IO.Path]::GetTempPath()) "protected-folder-$(New-Guid)"
         New-Item -ItemType Directory -Path (Join-Path $script:FolderDir 'taken.csv') -Force | Out-Null
     }
@@ -336,7 +336,7 @@ Describe 'Write-ProtectedFile writes nothing until the file is private, and publ
     # branch runs here and in CI; the Windows ACL check is not exercised by CI.
 
     BeforeAll {
-        . (Import-ScriptFunction -Path (Get-AssessmentScriptPath) -Name @('Protect-OutputFile', 'Write-ProtectedFile'))
+        . (Import-ScriptFunction -Path (Get-AssessmentScriptPath) -Name @('Protect-OutputFile', 'New-ProtectedDirectory', 'Write-ProtectedFile'))
         $script:OrderDir = Join-Path ([System.IO.Path]::GetTempPath()) "order-$(New-Guid)"
         New-Item -ItemType Directory -Path $script:OrderDir | Out-Null
         ${function:Protect-OutputFileReal} = ${function:Protect-OutputFile}
@@ -382,5 +382,57 @@ Describe 'Write-ProtectedFile writes nothing until the file is private, and publ
         function Protect-OutputFile { param($Path, [switch]$Directory) $null = $Directory, $Path; $script:Hardened = $true }
         Write-ProtectedFile -TargetPath (Join-Path $script:OrderDir 'optout.csv') -SkipAclHardening -Writer { param([string]$Destination) Set-Content -LiteralPath $Destination -Value 'x' }
         $script:Hardened | Should -BeFalse
+    }
+}
+
+Describe 'New-ProtectedDirectory: the folders a run creates are owner-only' {
+
+    # The files inside are 0600, but a folder created by New-Item takes the umask (0755 on
+    # most Linux hosts), so any local account could list it -- and the file names carry the
+    # customer label and the targeting-list names. Only folders the run creates are
+    # restricted: an existing folder the operator chose is theirs, not ours to change.
+
+    BeforeAll {
+        . (Import-ScriptFunction -Path (Get-AssessmentScriptPath) -Name @('Protect-OutputFile', 'New-ProtectedDirectory', 'Write-ProtectedFile'))
+        $script:DirRoot = Join-Path ([System.IO.Path]::GetTempPath()) "protected-dir-$(New-Guid)"
+        New-Item -ItemType Directory -Path $script:DirRoot | Out-Null
+        if (-not $IsWindows) { [System.IO.File]::SetUnixFileMode($script:DirRoot, [System.IO.UnixFileMode]493) }  # 0755
+    }
+
+    AfterAll { Remove-Item -LiteralPath $script:DirRoot -Recurse -Force -ErrorAction SilentlyContinue }
+
+    It 'creates every missing level 0700 and leaves the existing parent alone' -Skip:$IsWindows {
+        $leaf = Join-Path $script:DirRoot 'Contoso/2026-11-22'
+        New-ProtectedDirectory -Path $leaf
+        Get-Mode (Join-Path $script:DirRoot 'Contoso') | Should -Be '700'
+        Get-Mode $leaf | Should -Be '700'
+        Get-Mode $script:DirRoot | Should -Be '755'
+    }
+
+    It 'does not change a folder that already exists' -Skip:$IsWindows {
+        $existing = Join-Path $script:DirRoot 'existing'
+        New-Item -ItemType Directory -Path $existing | Out-Null
+        [System.IO.File]::SetUnixFileMode($existing, [System.IO.UnixFileMode]493)
+        New-ProtectedDirectory -Path $existing
+        Get-Mode $existing | Should -Be '755'
+    }
+
+    It 'gives Write-ProtectedFile an owner-only folder when it has to create one' -Skip:$IsWindows {
+        $target = Join-Path $script:DirRoot 'via-writer/report.csv'
+        Write-ProtectedFile -TargetPath $target -Writer { param([string]$Destination) Set-Content -LiteralPath $Destination -Value 'x' }
+        Get-Mode (Join-Path $script:DirRoot 'via-writer') | Should -Be '700'
+    }
+
+    It 'is the only way the assessment creates a folder' {
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile((Get-AssessmentScriptPath), [ref]$null, [ref]$null)
+        $creates = @($ast.FindAll({
+                    $args[0] -is [System.Management.Automation.Language.CommandAst] -and
+                    $args[0].GetCommandName() -eq 'New-Item' -and $args[0].Extent.Text -match 'Directory'
+                }, $true))
+        foreach ($create in $creates) {
+            $fn = $create.Parent
+            while ($fn -and $fn -isnot [System.Management.Automation.Language.FunctionDefinitionAst]) { $fn = $fn.Parent }
+            $fn.Name | Should -Be 'New-ProtectedDirectory' -Because "line $($create.Extent.StartLineNumber) must create folders through New-ProtectedDirectory"
+        }
     }
 }

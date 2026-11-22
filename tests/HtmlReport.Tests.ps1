@@ -17,7 +17,7 @@ BeforeAll {
             'Get-RemediationStep'
             'Get-ExecutiveSummary'
             'New-HtmlReport'
-            'Write-ProtectedFile'
+            'New-ProtectedDirectory', 'Write-ProtectedFile'
         ))
 
     # New-HtmlReport reads this when deciding whether to harden the output file. It is

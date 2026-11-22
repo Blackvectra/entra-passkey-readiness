@@ -838,7 +838,7 @@ Describe 'Privileged users are held out of the actionable exports' {
         $outDir = Join-Path ([System.IO.Path]::GetTempPath()) ("privexcl-" + [guid]::NewGuid())
         New-Item -ItemType Directory -Path $outDir -Force | Out-Null
         try {
-            . (Import-ScriptFunction -Path $script:AssessmentPath -Name @('Protect-CsvInjection', 'Protect-OutputFile', 'Export-AssessmentCsv', 'Write-ProtectedFile'))
+            . (Import-ScriptFunction -Path $script:AssessmentPath -Name @('Protect-CsvInjection', 'Protect-OutputFile', 'Export-AssessmentCsv', 'New-ProtectedDirectory', 'Write-ProtectedFile'))
             $path = Join-Path $outDir 'all-privileged.csv'
             Export-AssessmentCsv -Data @() -Path $path -HeaderWhenEmpty $script:Columns -SkipAclHardening
 
