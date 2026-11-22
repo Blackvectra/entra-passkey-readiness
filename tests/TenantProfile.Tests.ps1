@@ -321,6 +321,17 @@ Describe 'Merge-TenantProfileSetting' {
             Should -Throw '*needs both ClientId and CertificateThumbprint*'
     }
 
+    It 'never pairs a Tenant Profile <Half> with the other half from the sweep-wide parameters' -TestCases @(
+        @{ Half = 'ClientId'; Profile = @{ ClientId = '00000000-1111-4222-8333-444444444444' } }
+        @{ Half = 'CertificateThumbprint'; Profile = @{ CertificateThumbprint = 'A1B2C3D4E5F60718293A4B5C6D7E8F9012345678' } }
+    ) {
+        $halfOnly = New-Tp @Profile
+        { Merge-TenantProfileSetting -TenantProfile $halfOnly -Mode Sweep -Parameter @{
+                ClientId              = 'ffffffff-1111-4222-8333-444444444444'
+                CertificateThumbprint = 'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF'
+            } } | Should -Throw '*needs both ClientId and CertificateThumbprint*'
+    }
+
     It 'carries the Tenant Profile name' {
         (Merge-TenantProfileSetting -TenantProfile $script:Bare -Mode Single).TenantProfile | Should -Be 'fabrikam'
     }

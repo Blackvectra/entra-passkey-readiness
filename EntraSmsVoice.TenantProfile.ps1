@@ -529,9 +529,17 @@ function Merge-TenantProfileSetting {
             else { $settings[$key] = $null }
         }
     }
-    # App-only sign-in needs both halves, and they can arrive from different places: a
-    # profile thumbprint with a -ClientId typed for this run, or a profile ClientId with a
-    # sweep-wide thumbprint. Checked here, after the merge, so every caller gets it.
+    # In a sweep, ClientId and CertificateThumbprint are one app-only credential and are filled
+    # as a pair: if the Tenant Profile sets either half, both come from the Tenant Profile.
+    # Filling them key by key could pair one client's app registration with another app's
+    # certificate.
+    if ($Mode -eq 'Sweep' -and ($TenantProfile.ClientId -or $TenantProfile.CertificateThumbprint)) {
+        $settings.ClientId = $TenantProfile.ClientId
+        $settings.CertificateThumbprint = $TenantProfile.CertificateThumbprint
+    }
+    # App-only sign-in needs both halves. On a single run they can still arrive from different
+    # places: a Tenant Profile thumbprint with a -ClientId typed for this run. Checked here,
+    # after the merge, so every caller gets it.
     if ([bool]$settings.ClientId -ne [bool]$settings.CertificateThumbprint) {
         throw "Tenant Profile '$($TenantProfile.Name)': app-only sign-in needs both ClientId and CertificateThumbprint, but only one is set after combining the Tenant Profile with the parameters given. Set both, or neither to sign in interactively."
     }
