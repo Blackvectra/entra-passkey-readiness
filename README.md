@@ -1,7 +1,7 @@
 # entra-passkey-readiness
 
 [![CI](https://github.com/Blackvectra/entra-passkey-readiness/actions/workflows/ci.yml/badge.svg)](https://github.com/Blackvectra/entra-passkey-readiness/actions/workflows/ci.yml)
-[![PowerShell 7+](https://img.shields.io/badge/PowerShell-7.0%2B-5391FE)](https://learn.microsoft.com/powershell/scripting/install/installing-powershell)
+[![PowerShell 7+](https://img.shields.io/badge/PowerShell-7.4%2B-5391FE)](https://learn.microsoft.com/powershell/scripting/install/installing-powershell)
 [![Read-only](https://img.shields.io/badge/Graph%20calls-GET%20only-0F9D6E)](#security)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -141,7 +141,7 @@ Treat `Jan 28, 2027` as an artefact of Microsoft's analyzer rather than a publis
 
 | Requirement | Detail |
 |---|---|
-| PowerShell | 7.0 or later (enforced by `#Requires`) |
+| PowerShell | 7.4 or later (enforced by `#Requires`) |
 | Module | `Microsoft.Graph.Authentication` (this is the only dependency) |
 | Entra role | Global Reader. Security Reader works for everything except one read: if any group holds a directory role, Microsoft requires Global Reader (or Privileged Role Administrator) to read that group's PIM for Groups eligibility, and without it the actionable exports are withheld. |
 | Network | Access to `graph.microsoft.com` |
@@ -193,7 +193,7 @@ You cannot run this script on the current system.
 
 nothing is wrong with the script or your account. You downloaded the repository as a **zip**, so Windows tagged every extracted file with the Mark of the Web, and your PowerShell execution policy refuses to run downloaded scripts that are not signed. Fix it step by step:
 
-1. **Open PowerShell 7** (`pwsh`), not Windows PowerShell 5.1 — the scripts require 7.0+ and will refuse 5.1 anyway. If `pwsh` is not installed: `winget install Microsoft.PowerShell`, then open a new terminal.
+1. **Open PowerShell 7** (`pwsh`), not Windows PowerShell 5.1 — the scripts require 7.4+ and will refuse 5.1 anyway. If `pwsh` is not installed: `winget install Microsoft.PowerShell`, then open a new terminal.
 
 2. **Go to the folder you extracted.** Note that extracting the zip usually creates a doubled folder — the scripts are in the *inner* one:
 
@@ -642,7 +642,7 @@ The sweep does this for you: history lives in the per-tenant folder rather than 
 | `-MaxIndividualTickets` | int | 50 | Cap on individual tickets before High findings batch into a campaign ticket. |
 | `-TicketHistoryPath` | string | beside the ticket CSV | Users already ticketed, so a re-run does not raise duplicates. See [Re-running without duplicating tickets](#re-running-without-duplicating-tickets). |
 | `-IgnoreTicketHistory` | switch | off | Ticket every actionable user regardless of previous runs. |
-| `-SkipAclHardening` | switch | off | Skip restricting output file permissions. Without it, a run that cannot make a report file owner-only (a filesystem that ignores permissions, or PowerShell older than 7.3 on Linux and macOS) stops before writing that file. |
+| `-SkipAclHardening` | switch | off | Skip restricting output file permissions. Without it, a run that cannot make a report file owner-only (for example, a filesystem that ignores permissions) stops before writing that file. |
 | `-PassThru` | switch | off | Emit per-user objects to the pipeline in addition to the summary. |
 
 ### `Invoke-EntraSmsVoiceSweep.ps1`

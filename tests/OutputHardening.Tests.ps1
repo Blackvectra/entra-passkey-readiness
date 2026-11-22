@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+#Requires -Version 7.4
 #Requires -Modules Pester
 
 # Covers Protect-OutputFile, the control that decides who can read a finished export.
