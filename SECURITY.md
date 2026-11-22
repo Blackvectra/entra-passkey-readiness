@@ -2,7 +2,7 @@
 
 ## What this tool does and does not do
 
-`Get-EntraSmsVoiceMigrationImpact.ps1` performs **HTTP GET requests only** against Microsoft Graph. It does not create, update, or delete any object. It does not modify users, groups, authentication methods, the Authentication Methods Policy, the registration campaign, or any other tenant setting.
+`Get-EntraSmsVoiceMigrationImpact.ps1` only **reads** from Microsoft Graph: every request is an HTTP GET, apart from the `POST /$batch` envelope that JSON batching requires, which carries nothing but GET requests. It does not create, update, or delete any object. It does not modify users, groups, authentication methods, the Authentication Methods Policy, the registration campaign, or any other tenant setting.
 
 Every run writes two spreadsheets: the full assessment CSV at the path you specify, and an action list CSV beside it. `-HtmlReport`, `-ExportTickets`, and `-ExportFixScript` add further files in the same folder. All of them are written locally. Nothing is uploaded anywhere.
 
@@ -44,7 +44,7 @@ These are implemented, not aspirational. Verify them by reading the script. **Pr
 
 | Control | Where | Why | Proven by |
 |---|---|---|---|
-| Every Graph call is HTTP GET | `Invoke-GraphGet` is the only request function | No create, update, or delete path exists. `grep` for `New-Mg`, `Set-Mg`, `Remove-Mg`, or a non-GET method returns nothing. | Not tested |
+| Every Graph call is a read | `Invoke-GraphGet`, plus `Invoke-GraphBatch` for the legacy per-user MFA read | No create, update, or delete path exists. The one non-GET verb is the `POST /$batch` envelope JSON batching requires, and every request inside it is a GET. No Graph SDK write cmdlet (`New-Mg`, `Update-Mg`, `Remove-Mg`, ...) is called, and every request's method is a literal, never a variable. | `tests/ReadOnlyGraph.Tests.ps1` |
 | CSV formula injection guard | `Protect-CsvInjection`, applied at `Export-AssessmentCsv` | A display name of `=cmd\|'/c calc'!A1` or `=HYPERLINK(...)` executes when the report is opened in Excel and can exfiltrate adjacent rows. Display names are attacker-influenceable in tenants permitting self-service profile edits or B2B invites, and this report is specifically a file a manager opens in Excel. | `tests/Sanitization.Tests.ps1` |
 | HTML output encoding | `ConvertTo-SafeHtml`, applied to every interpolated value | Same untrusted-input problem, different sink. An unencoded display name containing markup is stored XSS in the browser of whoever you emailed the report to. | `tests/Sanitization.Tests.ps1`, `tests/HtmlReport.Tests.ps1` |
 | Content Security Policy on the report | `<meta http-equiv="Content-Security-Policy">` | Defense in depth. Even with an encoding bug, nothing can execute or make an outbound request. `referrer` is also suppressed. | Not tested |

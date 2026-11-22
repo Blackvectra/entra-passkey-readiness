@@ -258,6 +258,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **A parallel sweep on Linux or macOS now refuses to start on PowerShell 7.0-7.2** instead of running with its handoff directory at the umask mode. Those runtimes cannot set POSIX permissions, so the directory holding every child's tenant, app registration and output path was readable by every local account for the whole sweep, and `SECURITY.md` described it as hardened. The error names the two ways forward: PowerShell 7.3 or later, or `-ThrottleLimit 1`. Sequential sweeps and Windows are unaffected.
 
+- **The read-only claim is now tested, and stated accurately.** `SECURITY.md` said every Graph call was a GET made by `Invoke-GraphGet`; the legacy per-user MFA read has always gone out as `POST /$batch`, which JSON batching requires. That is still a read, since every request inside the envelope is a GET, but the claim is now worded that way. `tests/ReadOnlyGraph.Tests.ps1` scans every shipped script for Graph SDK write cmdlets and for any request whose method is not a literal GET (the batch envelope excepted), and drives the batch path to check that only GETs go inside it.
+
 ### Planned
 
 - Optional HTML summary output for client-facing delivery.
