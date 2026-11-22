@@ -60,6 +60,76 @@ function Get-SweepGuiScriptPath {
     Join-Path (Split-Path -Parent $PSScriptRoot) 'Show-EntraSmsVoiceSweepGui.ps1'
 }
 
+function New-GraphError {
+    <#
+    .SYNOPSIS
+        An exception shaped like the one Invoke-MgGraphRequest throws, carrying a status code.
+    .DESCRIPTION
+        The production code reads the status off $_.Exception.Response.StatusCode to tell an
+        answer (404: the principal was not a group) from a gap (403: the read was refused).
+        A bare [Exception] has no Response, so a test that threw one would exercise only the
+        default branch and the 404-is-not-a-gap path would never be covered.
+    #>
+    param(
+        [Parameter(Mandatory)][int]$Status,
+        [Parameter(Mandatory)][string]$Message
+    )
+
+    $exception = [System.Exception]::new($Message)
+    $exception | Add-Member -NotePropertyName Response -NotePropertyValue ([PSCustomObject]@{ StatusCode = $Status }) -Force
+    return $exception
+}
+
+function New-ErrorRecord {
+    <#
+    .SYNOPSIS
+        An ErrorRecord wrapping New-GraphError, for functions that take $_ rather than an exception.
+    #>
+    param(
+        [Parameter(Mandatory)][int]$Status,
+        [Parameter(Mandatory)][string]$Message
+    )
+
+    return [System.Management.Automation.ErrorRecord]::new(
+        (New-GraphError -Status $Status -Message $Message), 'GraphError',
+        [System.Management.Automation.ErrorCategory]::InvalidResult, $null)
+}
+
+function Get-ScriptArrayVariable {
+    <#
+    .SYNOPSIS
+        Returns one script-scope array literal from a .ps1 file, by name.
+    .DESCRIPTION
+        The general form of Get-MethodListsFromScript below, for an array that is part of a
+        function's contract rather than part of the method classification -- currently
+        $script:CampaignCandidateColumns, the campaign file's header.
+
+        A test or a sample generator that retyped such a list would pass while the shipped
+        file carried different columns, which is the whole failure mode the AST lift exists
+        to remove. Matches the bare name and the $script: form, because the assignment may
+        carry either prefix.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Name
+    )
+
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+        (Resolve-Path -LiteralPath $Path).Path, [ref]$null, [ref]$null)
+
+    $assignment = $ast.FindAll({
+            $args[0] -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+            $args[0].Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+            $args[0].Left.VariablePath.UserPath -in @($Name, "script:$Name")
+        }, $true) | Select-Object -First 1
+
+    if (-not $assignment) { throw "Array '`$$Name' was not found in $Path." }
+
+    # An array literal of constant strings, so evaluating the right-hand side alone keeps
+    # this to data with nothing from the script body running.
+    return @([scriptblock]::Create($assignment.Right.Extent.Text).Invoke())
+}
+
 function Get-MethodListsFromScript {
     <#
     .SYNOPSIS

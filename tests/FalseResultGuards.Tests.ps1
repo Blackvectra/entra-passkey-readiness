@@ -330,6 +330,7 @@ Describe 'Tickets put the stranded ahead of the merely unmigrated' {
                 'Protect-CsvInjection'
                 'Export-AssessmentCsv'
                 'Protect-OutputFile'
+                'Write-ProtectedFile'
             ))
         $script:NoReportRowMarker = '(no row in registration report)'
 
@@ -481,5 +482,54 @@ Describe 'Numbers beside each other in one report agree with each other' {
         # The green MFA line was already fixed to stop naming disabled policies as if they
         # enforced something. The yellow strength line one above it had the same problem.
         $script:AssessmentText | Should -Match "\[\`$\(\`$_\.State\)\] via strength"
+    }
+}
+
+Describe 'Next-page links are followed only to the Graph host the read started on' {
+
+    # @odata.nextLink is server-supplied and followed verbatim. Microsoft.Graph.Authentication
+    # (2.41.2, observed) does not attach the token to a foreign host, but it does send the
+    # request, and the reply would be read as this tenant's data.
+
+    BeforeAll {
+        . (Import-ScriptFunction -Path (Get-AssessmentScriptPath) -Name @('Get-PropertyValue', 'Get-GraphCollection'))
+        function Invoke-GraphGet {
+            param($Uri)
+            $script:Requested.Add($Uri)
+            if ($script:Requested.Count -eq 1) {
+                return [PSCustomObject]@{ value = @([PSCustomObject]@{ id = 'u1' }); '@odata.nextLink' = $script:NextLink }
+            }
+            [PSCustomObject]@{ value = @([PSCustomObject]@{ id = 'u2' }) }
+        }
+    }
+
+    BeforeEach { $script:Requested = [System.Collections.Generic.List[string]]::new() }
+
+    It 'follows a next page on the same host, keeping its path and query exactly' {
+        $script:NextLink = 'https://graph.microsoft.com/v1.0/users?$select=id&$top=999&$skiptoken=X%2BY%3D'
+        $result = @(Get-GraphCollection -Uri 'https://graph.microsoft.com/v1.0/users?$select=id&$top=999')
+        $result.Count | Should -Be 2
+        $script:Requested[1] | Should -BeExactly $script:NextLink
+    }
+
+    It 'accepts a host that differs only in letter case' {
+        $script:NextLink = 'https://Graph.Microsoft.com/beta/users?$skiptoken=1'
+        @(Get-GraphCollection -Uri 'https://graph.microsoft.com/beta/users').Count | Should -Be 2
+    }
+
+    It 'refuses <Name> and requests nothing from it' -ForEach @(
+        @{ Name = 'another host'; Link = 'https://attacker.example/v1.0/users?$skiptoken=1' }
+        @{ Name = 'plain HTTP to the Graph host'; Link = 'http://graph.microsoft.com/v1.0/users?$skiptoken=1' }
+        @{ Name = 'a look-alike suffix'; Link = 'https://graph.microsoft.com.attacker.example/v1.0/users' }
+        @{ Name = 'a look-alike prefix'; Link = 'https://evilgraph.microsoft.com/v1.0/users' }
+        @{ Name = 'user info before the host'; Link = 'https://graph.microsoft.com@attacker.example/v1.0/users' }
+        @{ Name = 'credentials in user info'; Link = 'https://user:pass@graph.microsoft.com/v1.0/users' }
+        @{ Name = 'a different port'; Link = 'https://graph.microsoft.com:8443/v1.0/users' }
+        @{ Name = 'a relative link'; Link = '/v1.0/users?$skiptoken=1' }
+        @{ Name = 'a scheme-relative link'; Link = '//attacker.example/v1.0/users' }
+    ) {
+        $script:NextLink = $Link
+        { Get-GraphCollection -Uri 'https://graph.microsoft.com/v1.0/users' } | Should -Throw '*unexpected destination*'
+        $script:Requested.Count | Should -Be 1 -Because 'the foreign link must never be requested'
     }
 }

@@ -30,7 +30,7 @@ function Get-MgContext {
     [PSCustomObject]@{
         TenantId = 'c0ffee00-1111-4222-8333-444455556666'
         Account  = 'analyst@fabrikam-example.com'
-        Scopes   = @('Policy.Read.All','AuditLog.Read.All','User.Read.All','GroupMember.Read.All')
+        Scopes   = @('Policy.Read.All','AuditLog.Read.All','User.Read.All','GroupMember.Read.All','RoleManagement.Read.Directory','PrivilegedEligibilitySchedule.Read.AzureADGroup')
     }
 }
 
@@ -41,7 +41,7 @@ function Get-MgContext {
 $script:LegacyMfaState = @{
     'u-admin'  = 'disabled'; 'u-member' = 'disabled'; 'u-safe' = 'disabled'
     'u-legacy' = 'enforced'; 'u-clear'  = 'enabled';  'u-svc'  = 'disabled'
-    'u-fine'   = 'disabled'
+    'u-fine'   = 'disabled'; 'u-nophone' = 'disabled'; 'u-pimgroup' = 'disabled'; 'u-owner' = 'disabled'
 }
 $script:ThrottledOnce = @{}
 
@@ -100,6 +100,16 @@ function Invoke-MgGraphRequest {
             [PSCustomObject]@{ id='u-clear'; signInActivity=(& $act $recent);  displayName='Out Of Scope'; userPrincipalName='clear@fabrikam-example.com';  userType='Member'; accountEnabled=$true }
             [PSCustomObject]@{ id='u-svc';    displayName='Service Account - Scanner'; userPrincipalName='svc-scanner@fabrikam-example.com'; userType='Member'; accountEnabled=$true; signInActivity=(& $act $stale) }
             [PSCustomObject]@{ id='u-fine'; signInActivity=(& $act $recent);   displayName='Perfectly Fine'; userPrincipalName='fine@fabrikam-example.com'; userType='Member'; accountEnabled=$true }
+            # The acceptance shape for the wider export: enabled, nonprivileged, a known
+            # registration row, no passkey and NO phone method. On the no-passkey list, off
+            # the SMS/voice list.
+            [PSCustomObject]@{ id='u-nophone'; signInActivity=(& $act $recent); displayName='Tobias Lindqvist'; userPrincipalName='tobias@fabrikam-example.com'; userType='Member'; accountEnabled=$true }
+            # Holds no role and is in no role group today, but is PIM for Groups eligible to
+            # join g-helpdesk, which holds one. One activation from privileged.
+            [PSCustomObject]@{ id='u-pimgroup'; signInActivity=(& $act $recent); displayName='Ingrid Solberg'; userPrincipalName='ingrid@fabrikam-example.com'; userType='Member'; accountEnabled=$true }
+            # A standing owner of g-helpdesk, which holds a directory role. Holds no role and
+            # is in no role group, and is held back anyway: a conservative campaign exclusion.
+            [PSCustomObject]@{ id='u-owner'; signInActivity=(& $act $recent); displayName='Sofia Marchetti'; userPrincipalName='sofia@fabrikam-example.com'; userType='Member'; accountEnabled=$true }
             [PSCustomObject]@{ id='u-off';    displayName='Disabled Person'; userPrincipalName='off@fabrikam-example.com';   userType='Member'; accountEnabled=$false }
         )}
     }
@@ -110,6 +120,57 @@ function Invoke-MgGraphRequest {
         return [PSCustomObject]@{ state='enabled'
             includeTargets=@([PSCustomObject]@{ id='g-sms-users'; targetType='group'; isUsableForSignIn=$true })
             excludeTargets=@() }
+    }
+    # --- Directory roles. A mixed tenant, so the privileged-exclusion path is exercised
+    #     by the same run that exercises everything else:
+    #       u-admin  direct active role, holds mobilePhone and no passkey
+    #       g-helpdesk  role-assignable group whose only enabled member is u-svc
+    #       u-fine   direct active role AND a registered passkey, so it must stay counted
+    #                in the tenant-wide passkey figures while being off the targeting lists
+    #       u-legacy PIM-eligible, holds officePhone and no passkey
+    #     Deliberately not Global Administrator throughout: the roleDefinitionIds below are
+    #     arbitrary, because the tool must treat ANY directory role as privileged.
+    if ($Uri -match '/roleManagement/directory/roleAssignments') {
+        return [PSCustomObject]@{ value = @(
+            [PSCustomObject]@{ principalId='u-admin'; roleDefinitionId='62e90394-69f5-4237-9190-012177145e10' }
+            [PSCustomObject]@{ principalId='g-helpdesk'; roleDefinitionId='729827e3-9c14-49f7-bb1b-9608f156bbb8' }
+            [PSCustomObject]@{ principalId='u-fine'; roleDefinitionId='fe930be7-5e62-47db-91af-98c3a49a38b1' }
+            # A service principal holding a role. Not a user, not a row in any export, and
+            # a 404 on the group expansion below rather than a discovery gap.
+            [PSCustomObject]@{ principalId='sp-automation'; roleDefinitionId='729827e3-9c14-49f7-bb1b-9608f156bbb8' }
+        )}
+    }
+    if ($Uri -match '/roleManagement/directory/roleEligibilityScheduleInstances') {
+        return [PSCustomObject]@{ value = @(
+            [PSCustomObject]@{ principalId='u-legacy'; roleDefinitionId='b0f54661-2d74-4c50-afa3-1ec803f12efe'
+                               startDateTime='2026-01-01T00:00:00Z'; endDateTime=$null }
+            # Expired, so it must not make anybody privileged.
+            [PSCustomObject]@{ principalId='u-member'; roleDefinitionId='b0f54661-2d74-4c50-afa3-1ec803f12efe'
+                               startDateTime='2026-01-01T00:00:00Z'; endDateTime='2026-02-01T00:00:00Z' }
+        )}
+    }
+    if ($Uri -match '/identityGovernance/privilegedAccess/group/eligibilityScheduleInstances') {
+        if ($Uri -match 'g-helpdesk') {
+            return [PSCustomObject]@{ value = @(
+                [PSCustomObject]@{ principalId='u-pimgroup'; groupId='g-helpdesk'; accessId='member'
+                                   startDateTime='2026-01-01T00:00:00Z'; endDateTime=$null }
+            )}
+        }
+        return [PSCustomObject]@{ value = @() }
+    }
+    if ($Uri -match '/groups/g-helpdesk/owners$') {
+        # A standing owner and a disabled one. Only enabled users can be held back.
+        return [PSCustomObject]@{ value = @([PSCustomObject]@{ id='u-owner' }; [PSCustomObject]@{ id='u-off' }) }
+    }
+    if ($Uri -match '/groups/g-helpdesk/transitiveMembers') {
+        return [PSCustomObject]@{ value = @([PSCustomObject]@{ id='u-svc' }) }
+    }
+    if ($Uri -match '/groups/sp-automation/transitiveMembers') {
+        # What Graph does when the principal is not a group: 404, which is an answer.
+        $response = [PSCustomObject]@{ StatusCode = 404 }
+        $exception = [System.Exception]::new('Request_ResourceNotFound')
+        $exception | Add-Member -NotePropertyName Response -NotePropertyValue $response -Force
+        throw $exception
     }
     if ($Uri -match '/groups/g-sms-users/transitiveMembers') {
         return [PSCustomObject]@{ value = @(
@@ -206,6 +267,18 @@ function Invoke-MgGraphRequest {
                                methodsRegistered=@('passKeyDeviceBound'); systemPreferredAuthenticationMethods=@()
                                isSystemPreferredAuthenticationMethodEnabled=$true
                                lastUpdatedDateTime='2026-08-17T03:12:44Z' }
+            [PSCustomObject]@{ id='u-nophone'; isAdmin=$false; isMfaCapable=$true; isMfaRegistered=$true; isPasswordlessCapable=$false
+                               methodsRegistered=@('softwareOneTimePasscode'); systemPreferredAuthenticationMethods=@('oath')
+                               isSystemPreferredAuthenticationMethodEnabled=$true
+                               lastUpdatedDateTime='2026-08-17T03:12:44Z' }
+            [PSCustomObject]@{ id='u-owner'; isAdmin=$false; isMfaCapable=$true; isMfaRegistered=$true; isPasswordlessCapable=$false
+                               methodsRegistered=@('mobilePhone','microsoftAuthenticatorPush'); systemPreferredAuthenticationMethods=@('push')
+                               isSystemPreferredAuthenticationMethodEnabled=$true
+                               lastUpdatedDateTime='2026-08-17T03:12:44Z' }
+            [PSCustomObject]@{ id='u-pimgroup'; isAdmin=$false; isMfaCapable=$true; isMfaRegistered=$true; isPasswordlessCapable=$false
+                               methodsRegistered=@('mobilePhone','microsoftAuthenticatorPush'); systemPreferredAuthenticationMethods=@('push')
+                               isSystemPreferredAuthenticationMethodEnabled=$true
+                               lastUpdatedDateTime='2026-08-17T03:12:44Z' }
             [PSCustomObject]@{ id='u-svc';    isAdmin=$false; isMfaCapable=$true; isMfaRegistered=$true; isPasswordlessCapable=$false
                                methodsRegistered=@('alternateMobilePhone'); systemPreferredAuthenticationMethods=@('sms')
                                isSystemPreferredAuthenticationMethodEnabled=$true
@@ -277,13 +350,13 @@ Describe 'A default run against a stubbed tenant' {
         (Join-Path $script:OutDir 'assessment.html') | Should -Not -Exist
     }
 
-    It 'writes the trimmed eighteen-column schema' {
-        $columns = (Import-Csv -LiteralPath $script:CsvPath)[0].PSObject.Properties.Name
+    It 'writes the trimmed nineteen-column schema' {
+        $columns = @(Import-Csv -LiteralPath $script:CsvPath)[0].PSObject.Properties.Name
         $columns | Should -Be @(
             'Risk', 'Reason', 'NextStep', 'BlockedAtRetirement', 'DisplayName', 'UserPrincipalName',
             'UserType', 'IsAdmin', 'InSmsPolicyScope', 'InVoicePolicyScope', 'PerUserMfaState',
             'DaysSinceLastSignIn', 'PhoneMethodsRegistered', 'AllMethodsRegistered', 'PasskeyMethods',
-            'PreferredMethod', 'IsPasswordlessCapable', 'UserId'
+            'PrivilegeSource', 'PreferredMethod', 'IsPasswordlessCapable', 'UserId'
         )
     }
 
@@ -456,8 +529,16 @@ Describe 'A default run against a stubbed tenant' {
         # need a single passkey, so adoption has to be reported on its own. Asserted
         # against the real run rather than the function, because the console line and
         # the summary fields are what somebody reads.
-        $script:StdOut | Should -Match 'Passkeys: \d+ of \d+ enabled user\(s\) hold one'
-        $script:StdOut | Should -Match 'blank is no passkey'
+        # The five figures an operator asks for, each naming its own population.
+        $script:StdOut | Should -Match 'Enabled users assessed\s+\d+'
+        $script:StdOut | Should -Match 'Users with a registered passkey\s+\d+'
+        $script:StdOut | Should -Match 'Users without a registered passkey\s+\d+'
+        $script:StdOut | Should -Match 'Users with unknown status\s+\d+'
+        $script:StdOut | Should -Match 'SMS/voice users without a passkey\s+\d+'
+        # The subset relationship, said rather than left to be inferred.
+        $script:StdOut | Should -Match 'a subset of the line above it, not the whole of it'
+        # No label claiming policy eligibility or verified use.
+        $script:StdOut | Should -Not -Match '(?i)passkey.{0,20}(ready|compliant)'
 
         # u-safe and u-fine hold passKeyDeviceBound, u-clear a fido2SecurityKey.
         $script:Summary.UsersWithPasskey | Should -Be 3
@@ -483,6 +564,185 @@ Describe 'A default run against a stubbed tenant' {
             $script:Summary.UsersWithoutPasskey +
             $script:Summary.UsersMissingFromReport) |
             Should -Be $script:Summary.EnabledUsersAssessed
+    }
+
+    It 'writes the campaign targeting list beside the other exports' {
+        # The deliverable: an operator runs the assessment and finds this file without
+        # asking for it. Asserted against a real run of the whole script, not the function.
+        $path = Join-Path $script:OutDir 'assessment_SmsVoiceUsers_NoPasskey.csv'
+        $path | Should -Exist
+
+        $rows = @(Import-Csv -LiteralPath $path)
+        $rows[0].PSObject.Properties.Name | Should -Be @(
+            'TenantId', 'Risk', 'DisplayName', 'UserPrincipalName', 'UserType',
+            'PhoneMethodsRegistered', 'OtherSurvivingMfaMethods', 'AllMethodsRegistered', 'UserId'
+        )
+
+        # The console line, the summary field and the file must be the same number.
+        $script:Summary.CampaignCandidates | Should -Be $rows.Count
+        $script:StdOut | Should -Match "Of those, SMS/voice registered \($($rows.Count)\)"
+        $script:Summary.CampaignCandidateListPath | Should -BeExactly (Resolve-Path -LiteralPath $path).Path
+    }
+
+    It 'targets the phone holders without a passkey and nobody else' {
+        # u-safe and u-fine hold passKeyDeviceBound, u-clear a fido2SecurityKey: all three
+        # are off the list however exposed they look elsewhere. Everybody on it holds a
+        # phone method and no passkey.
+        $rows = @(Import-Csv -LiteralPath (Join-Path $script:OutDir 'assessment_SmsVoiceUsers_NoPasskey.csv'))
+        $assessment = @(Import-Csv -LiteralPath $script:CsvPath)
+
+        foreach ($row in $rows) {
+            $row.PhoneMethodsRegistered | Should -Not -BeNullOrEmpty
+            $row.AllMethodsRegistered | Should -Not -Match 'passKey|fido'
+            $row.AllMethodsRegistered | Should -Not -BeExactly '(no row in registration report)'
+        }
+
+        # Nobody with a passkey slipped on, read from the assessment CSV's own column.
+        $withPasskey = @($assessment | Where-Object { $_.PasskeyMethods }) | ForEach-Object { $_.UserPrincipalName }
+        foreach ($upn in $withPasskey) {
+            $rows.UserPrincipalName | Should -Not -Contain $upn
+        }
+    }
+
+    It 'carries the tenant identifier so an estate of these files can be pooled' {
+        $rows = @(Import-Csv -LiteralPath (Join-Path $script:OutDir 'assessment_SmsVoiceUsers_NoPasskey.csv'))
+        foreach ($row in $rows) {
+            $row.TenantId | Should -Not -BeNullOrEmpty
+            $row.TenantId | Should -BeExactly $script:Summary.TenantId
+        }
+    }
+
+    It 'says what the list does not claim' {
+        # The filename invites two wrong readings -- recent SMS usage, and guaranteed
+        # lockout -- so the run says so where the operator is already looking.
+        $script:StdOut | Should -Match 'Registration, not usage'
+        $script:StdOut | Should -Match 'Not a lockout list'
+        $script:StdOut | Should -Match 'configure the registration campaign BY HAND'
+        $script:StdOut | Should -Match 'makes no change to the tenant'
+    }
+
+    It 'holds privileged users out of both actionable exports' {
+        # The stub tenant is mixed on purpose: u-admin holds a role directly, u-svc through
+        # a role-assignable group, u-legacy is PIM-eligible, and u-fine holds a role AND a
+        # passkey. Only u-member should survive into the campaign list.
+        $campaign = @(Import-Csv -LiteralPath (Join-Path $script:OutDir 'assessment_SmsVoiceUsers_NoPasskey.csv'))
+        $wider = @(Import-Csv -LiteralPath (Join-Path $script:OutDir 'assessment_NoPasskey_Nonprivileged.csv'))
+        $assessment = @(Import-Csv -LiteralPath $script:CsvPath)
+
+        $privileged = @($assessment | Where-Object { $_.PrivilegeSource -and $_.PrivilegeSource -ne '(not determined)' })
+        $privileged.Count | Should -BeGreaterThan 0
+
+        foreach ($row in $privileged) {
+            $campaign.UserPrincipalName | Should -Not -Contain $row.UserPrincipalName
+            $wider.UserPrincipalName | Should -Not -Contain $row.UserPrincipalName
+        }
+    }
+
+    It 'keeps privileged users visible and identified in the tenant-wide assessment' {
+        # Held out of the targeting lists, never hidden from the evidence record, and the
+        # column says which kind of assignment held them back.
+        $assessment = @(Import-Csv -LiteralPath $script:CsvPath)
+        $sources = @($assessment | Where-Object { $_.PrivilegeSource } | ForEach-Object { $_.PrivilegeSource } | Sort-Object -Unique)
+
+        $sources | Should -Contain 'Active role'
+        $sources | Should -Contain 'Active role via group'
+        $sources | Should -Contain 'PIM-eligible role'
+        # An expired eligibility must not make anybody privileged. u-member carries one
+        # with an endDateTime in the past.
+        $marcus = $assessment | Where-Object UserPrincipalName -eq 'marcus@fabrikam-example.com'
+        $marcus | Should -Not -BeNullOrEmpty
+        $marcus.PrivilegeSource | Should -BeExactly ''
+    }
+
+    It 'counts a privileged passkey holder in the tenant-wide passkey figures' {
+        # u-fine holds a directory role AND a passkey, and holds no phone method -- so the
+        # default export legitimately drops them while the tenant-wide figure must not.
+        # Asserted against the summary for that reason: u-safe, u-clear and u-fine hold
+        # passkeys, and excluding one of them from a targeting list changes no count here.
+        $script:Summary.UsersWithPasskey | Should -Be 3
+        $script:Summary.PrivilegedUsersFound | Should -BeGreaterThan 0
+
+        # The identity that makes the three known populations auditable.
+        ($script:Summary.UsersWithPasskey + $script:Summary.UsersWithoutPasskey +
+            $script:Summary.UsersMissingFromReport) | Should -Be $script:Summary.EnabledUsersAssessed
+    }
+
+    It 'puts a nonprivileged user with no phone method on the wider export only' {
+        # The acceptance shape: enabled, nonprivileged, a known registration row, no
+        # passkey, no SMS or voice method. Still needs a passkey; was never a campaign target.
+        $campaign = @(Import-Csv -LiteralPath (Join-Path $script:OutDir 'assessment_SmsVoiceUsers_NoPasskey.csv'))
+        $wider = @(Import-Csv -LiteralPath (Join-Path $script:OutDir 'assessment_NoPasskey_Nonprivileged.csv'))
+
+        $tobias = $wider | Where-Object UserPrincipalName -eq 'tobias@fabrikam-example.com'
+        $tobias | Should -Not -BeNullOrEmpty
+        $tobias.PhoneMethodsRegistered | Should -BeExactly ''
+        $tobias.OtherSurvivingMfaMethods | Should -BeExactly 'softwareOneTimePasscode'
+        $campaign.UserPrincipalName | Should -Not -Contain 'tobias@fabrikam-example.com'
+
+        # And the counts: he is in UsersWithoutPasskey and NoPasskeyNonprivileged, and is
+        # exactly the difference between the two files for this tenant's kept rows.
+        $script:Summary.NoPasskeyNonprivileged | Should -Be $wider.Count
+        $script:Summary.CampaignCandidates | Should -Be $campaign.Count
+        @($wider | Where-Object { -not $_.PhoneMethodsRegistered }).UserPrincipalName |
+            Should -Contain 'tobias@fabrikam-example.com'
+        $wider.Count | Should -BeGreaterThan $campaign.Count
+    }
+
+    It 'holds back a user who is only PIM for Groups eligible for a role-holding group' {
+        # u-pimgroup holds no role and is in no role group today. Eligible to join
+        # g-helpdesk, which holds one, so one activation from privileged -- and off both lists.
+        $campaign = @(Import-Csv -LiteralPath (Join-Path $script:OutDir 'assessment_SmsVoiceUsers_NoPasskey.csv'))
+        $wider = @(Import-Csv -LiteralPath (Join-Path $script:OutDir 'assessment_NoPasskey_Nonprivileged.csv'))
+        $assessment = @(Import-Csv -LiteralPath $script:CsvPath)
+
+        $campaign.UserPrincipalName | Should -Not -Contain 'ingrid@fabrikam-example.com'
+        $wider.UserPrincipalName | Should -Not -Contain 'ingrid@fabrikam-example.com'
+        ($assessment | Where-Object UserPrincipalName -eq 'ingrid@fabrikam-example.com').PrivilegeSource |
+            Should -BeExactly 'PIM for Groups eligible member of role-holding group'
+    }
+
+    It 'holds back a standing owner of a role-holding group as its own kind of exclusion' {
+        $campaign = @(Import-Csv -LiteralPath (Join-Path $script:OutDir 'assessment_SmsVoiceUsers_NoPasskey.csv'))
+        $wider = @(Import-Csv -LiteralPath (Join-Path $script:OutDir 'assessment_NoPasskey_Nonprivileged.csv'))
+        $assessment = @(Import-Csv -LiteralPath $script:CsvPath)
+
+        $campaign.UserPrincipalName | Should -Not -Contain 'sofia@fabrikam-example.com'
+        $wider.UserPrincipalName | Should -Not -Contain 'sofia@fabrikam-example.com'
+
+        # Kept in the tenant-wide assessment, with a source that is not a role.
+        $sofia = $assessment | Where-Object UserPrincipalName -eq 'sofia@fabrikam-example.com'
+        $sofia | Should -Not -BeNullOrEmpty
+        $sofia.PrivilegeSource | Should -BeExactly 'RoleHoldingGroupOwner'
+        $script:StdOut | Should -Match 'conservative exclusion, not a role'
+    }
+
+    It 'reports the two omitted counts separately, and they can differ' {
+        $script:Summary.PrivilegeDiscoveryComplete | Should -BeTrue
+        $script:Summary.NoPasskeyPrivilegedOmitted | Should -BeGreaterThan 0
+        # The wider file's omitted count is at least the campaign file's, because every
+        # campaign candidate is also a no-passkey candidate.
+        $script:Summary.NoPasskeyPrivilegedOmitted |
+            Should -BeGreaterOrEqual $script:Summary.CampaignPrivilegedOmitted
+    }
+
+    It 'agrees between the console, the summary and both files' {
+        $campaign = @(Import-Csv -LiteralPath (Join-Path $script:OutDir 'assessment_SmsVoiceUsers_NoPasskey.csv'))
+        $wider = @(Import-Csv -LiteralPath (Join-Path $script:OutDir 'assessment_NoPasskey_Nonprivileged.csv'))
+
+        $script:Summary.CampaignCandidates | Should -Be $campaign.Count
+        $script:Summary.NoPasskeyNonprivileged | Should -Be $wider.Count
+        $script:StdOut | Should -Match "Users without a passkey, nonprivileged \($($wider.Count)\)"
+        $script:StdOut | Should -Match "Of those, SMS/voice registered \($($campaign.Count)\)"
+        $script:StdOut | Should -Match 'Held back as privileged: \d+ enabled user\(s\), of whom 1 are held back only for standing ownership of a role-holding group'
+        # The campaign list is a subset of the wider one, never the whole of it.
+        $campaign.Count | Should -BeLessOrEqual $wider.Count
+    }
+
+    It 'says that omission is deferral, not safety' {
+        $script:StdOut | Should -Match 'NOT lower risk'
+        $script:StdOut | Should -Match 'Work those by hand'
+        # And names the coverage limit rather than implying the detection is total.
+        $script:StdOut | Should -Match 'PIM for Groups eligibility \(member or owner\)'
     }
 
     It 'names the files from the customer when -OutputPath is not given' {
@@ -656,6 +916,231 @@ Describe 'A run with no -OutputPath' {
     }
 }
 
+
+Describe 'A run whose privilege discovery fails' {
+
+    # The documented failure policy, proved against a real run rather than against the
+    # script's text: a tenant whose role reads are refused gets its assessment and loses
+    # only the targeting lists.
+
+    BeforeAll {
+        $pwshPath = if ($IsWindows) { Join-Path $PSHOME 'pwsh.exe' } else { Join-Path $PSHOME 'pwsh' }
+        if (-not (Test-Path -LiteralPath $pwshPath)) { $pwshPath = 'pwsh' }
+
+        $script:DenyRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("e2e-deny-" + [guid]::NewGuid())
+        $denyModuleDir = Join-Path $script:DenyRoot 'Modules/Microsoft.Graph.Authentication'
+        New-Item -ItemType Directory -Path $denyModuleDir -Force | Out-Null
+        $script:DenyOut = Join-Path $script:DenyRoot 'out'
+        New-Item -ItemType Directory -Path $script:DenyOut -Force | Out-Null
+
+        # The same stub as the successful run, with the two role endpoints refused. Built by
+        # rewriting that module rather than by a second copy, so the two runs cannot drift.
+        $stub = Get-Content -LiteralPath (Join-Path $script:ModuleDir 'Microsoft.Graph.Authentication.psm1') -Raw
+        $denyInjection = @'
+    if ($Uri -match '/roleManagement/directory/') {
+        $response = [PSCustomObject]@{ StatusCode = 403 }
+        $exception = [System.Exception]::new('Authorization_RequestDenied')
+        $exception | Add-Member -NotePropertyName Response -NotePropertyValue $response -Force
+        throw $exception
+    }
+'@
+        $marker = "    if (`$Uri -match '/roleManagement/directory/roleAssignments') {"
+        $stub.IndexOf($marker) | Should -BeGreaterThan 0
+        $stub = $stub.Replace($marker, $denyInjection + $marker)
+        $stub | Set-Content -LiteralPath (Join-Path $denyModuleDir 'Microsoft.Graph.Authentication.psm1')
+        Copy-Item -LiteralPath (Join-Path $script:ModuleDir 'Microsoft.Graph.Authentication.psd1') `
+            -Destination (Join-Path $denyModuleDir 'Microsoft.Graph.Authentication.psd1')
+
+        $script:DenyCsv = Join-Path $script:DenyOut 'denied.csv'
+        $script:DenyCampaign = Join-Path $script:DenyOut 'denied_SmsVoiceUsers_NoPasskey.csv'
+        $script:DenyWider = Join-Path $script:DenyOut 'denied_NoPasskey_Nonprivileged.csv'
+
+        # A stale export from an earlier, successful run, sitting exactly where this run
+        # would write. It must not survive, or it reads as today's result.
+        'STALE,DATA' | Set-Content -LiteralPath $script:DenyCampaign
+        'STALE,DATA' | Set-Content -LiteralPath $script:DenyWider
+
+        $script:DenySummaryPath = Join-Path $script:DenyRoot 'denied-summary.json'
+        $denyStdOut = Join-Path $script:DenyRoot 'denied-stdout.txt'
+        $denyStdErr = Join-Path $script:DenyRoot 'denied-stderr.txt'
+
+        $denyCommand = @"
+`$env:PSModulePath = '$(Join-Path $script:DenyRoot 'Modules')' + [IO.Path]::PathSeparator + `$env:PSModulePath
+`$summary = & '$(Get-AssessmentScriptPath)' -TenantId 'fabrikam-example.com' ``
+    -OutputPath '$script:DenyCsv' -SkipAclHardening
+`$summary | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath '$script:DenySummaryPath'
+"@
+
+        $denyProcess = Start-Process -FilePath $pwshPath -PassThru -Wait -NoNewWindow `
+            -RedirectStandardOutput $denyStdOut -RedirectStandardError $denyStdErr `
+            -ArgumentList @('-NoProfile', '-NonInteractive', '-Command', $denyCommand)
+
+        $script:DenyExit = $denyProcess.ExitCode
+        $script:DenyStdOut = if (Test-Path $denyStdOut) { Get-Content -LiteralPath $denyStdOut -Raw } else { '' }
+        $script:DenyStdErr = if (Test-Path $denyStdErr) { Get-Content -LiteralPath $denyStdErr -Raw } else { '' }
+        $script:DenySummary = if (Test-Path $script:DenySummaryPath) {
+            Get-Content -LiteralPath $script:DenySummaryPath -Raw | ConvertFrom-Json
+        } else { $null }
+    }
+
+    AfterAll {
+        Remove-Item -LiteralPath $script:DenyRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'still completes, and still writes the assessment it can vouch for' {
+        $script:DenyExit | Should -Be 0 -Because "the run failed outright: $script:DenyStdErr"
+        $script:DenyCsv | Should -Exist
+        (Join-Path $script:DenyOut 'denied_ActionList.csv') | Should -Exist
+        @(Import-Csv -LiteralPath $script:DenyCsv).Count | Should -BeGreaterThan 0
+    }
+
+    It 'writes neither targeting export' {
+        $script:DenyCampaign | Should -Not -Exist
+        $script:DenyWider | Should -Not -Exist
+    }
+
+    It 'removes the stale export rather than leaving it to be read as this run''s' {
+        # Both files existed before the run with obviously wrong contents. Still existing,
+        # or existing with that content, is the failure this policy is for.
+        Test-Path -LiteralPath $script:DenyCampaign | Should -BeFalse
+        $script:DenyStdOut | Should -Match "cannot be read as this run's result"
+    }
+
+    It 'reports the withheld counts as unknown, not zero' {
+        $script:DenySummary.PrivilegeDiscoveryComplete | Should -BeFalse
+        $script:DenySummary.CampaignCandidates | Should -BeNullOrEmpty
+        $script:DenySummary.NoPasskeyNonprivileged | Should -BeNullOrEmpty
+        $script:DenySummary.PrivilegedUsersFound | Should -BeNullOrEmpty
+        # A zero here would read as a measured result rather than a missing one.
+        $script:DenySummary.CampaignCandidates | Should -Not -Be 0
+    }
+
+    It 'marks every row not determined rather than blank' {
+        # A blank would assert that the user holds no directory role, which is the one
+        # thing this run cannot say -- and the assertion that would sweep an administrator
+        # into a campaign.
+        $rows = @(Import-Csv -LiteralPath $script:DenyCsv)
+        foreach ($row in $rows) { $row.PrivilegeSource | Should -BeExactly '(not determined)' }
+    }
+
+    It 'names the missing coverage and what to consent to' {
+        $script:DenyStdOut | Should -Match 'Privileged-account discovery did not complete'
+        $script:DenyStdOut | Should -Match 'RoleManagement\.Read\.Directory'
+        $script:DenySummary.PrivilegeDiscoveryGaps | Should -Match 'could not be read'
+    }
+
+    It 'still reports the tenant-wide passkey figures, which do not depend on privilege' {
+        $script:DenySummary.UsersWithPasskey | Should -Be 3
+        $script:DenyStdOut | Should -Match 'Users with a registered passkey\s+3'
+        # And says plainly which part of the output is still good.
+        $script:DenyStdOut | Should -Match 'still accurate for the tenant'
+    }
+}
+
+Describe 'A run where role discovery succeeds but the PIM for Groups read is refused' {
+
+    # The likeliest real-world partial failure: signed in as Security Reader, which can read
+    # directory roles but which Microsoft refuses for PIM for Groups eligibility on a
+    # role-assignable group. Everything else about the run succeeds.
+
+    BeforeAll {
+        $pwshPath = if ($IsWindows) { Join-Path $PSHOME 'pwsh.exe' } else { Join-Path $PSHOME 'pwsh' }
+        if (-not (Test-Path -LiteralPath $pwshPath)) { $pwshPath = 'pwsh' }
+
+        $script:PgRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("e2e-pimgroups-" + [guid]::NewGuid())
+        $pgModuleDir = Join-Path $script:PgRoot 'Modules/Microsoft.Graph.Authentication'
+        New-Item -ItemType Directory -Path $pgModuleDir -Force | Out-Null
+        $script:PgOut = Join-Path $script:PgRoot 'out'
+        New-Item -ItemType Directory -Path $script:PgOut -Force | Out-Null
+
+        $stub = Get-Content -LiteralPath (Join-Path $script:ModuleDir 'Microsoft.Graph.Authentication.psm1') -Raw
+        $refuse = @'
+    if ($Uri -match '/identityGovernance/privilegedAccess/group/') {
+        $response = [PSCustomObject]@{ StatusCode = 403 }
+        $exception = [System.Exception]::new('Authorization_RequestDenied')
+        $exception | Add-Member -NotePropertyName Response -NotePropertyValue $response -Force
+        throw $exception
+    }
+'@
+        $marker = "    if (`$Uri -match '/identityGovernance/privilegedAccess/group/eligibilityScheduleInstances') {"
+        $stub.IndexOf($marker) | Should -BeGreaterThan 0
+        $stub.Replace($marker, $refuse + $marker) | Set-Content -LiteralPath (Join-Path $pgModuleDir 'Microsoft.Graph.Authentication.psm1')
+        Copy-Item -LiteralPath (Join-Path $script:ModuleDir 'Microsoft.Graph.Authentication.psd1') `
+            -Destination (Join-Path $pgModuleDir 'Microsoft.Graph.Authentication.psd1')
+
+        $script:PgCsv = Join-Path $script:PgOut 'partial.csv'
+        $script:PgCampaign = Join-Path $script:PgOut 'partial_SmsVoiceUsers_NoPasskey.csv'
+        $script:PgWider = Join-Path $script:PgOut 'partial_NoPasskey_Nonprivileged.csv'
+        $script:PgHtml = Join-Path $script:PgOut 'partial.html'
+
+        # Yesterday's successful exports, exactly where today's would go.
+        'STALE,DATA' | Set-Content -LiteralPath $script:PgCampaign
+        'STALE,DATA' | Set-Content -LiteralPath $script:PgWider
+
+        $script:PgSummaryPath = Join-Path $script:PgRoot 'summary.json'
+        $pgStdOut = Join-Path $script:PgRoot 'stdout.txt'
+        $pgStdErr = Join-Path $script:PgRoot 'stderr.txt'
+        $command = @"
+`$env:PSModulePath = '$(Join-Path $script:PgRoot 'Modules')' + [IO.Path]::PathSeparator + `$env:PSModulePath
+`$summary = & '$(Get-AssessmentScriptPath)' -TenantId 'fabrikam-example.com' ``
+    -OutputPath '$script:PgCsv' -HtmlReport -SkipAclHardening
+`$summary | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath '$script:PgSummaryPath'
+"@
+        $process = Start-Process -FilePath $pwshPath -PassThru -Wait -NoNewWindow `
+            -RedirectStandardOutput $pgStdOut -RedirectStandardError $pgStdErr `
+            -ArgumentList @('-NoProfile', '-NonInteractive', '-Command', $command)
+
+        $script:PgExit = $process.ExitCode
+        $script:PgStdOut = if (Test-Path $pgStdOut) { Get-Content -LiteralPath $pgStdOut -Raw } else { '' }
+        $script:PgStdErr = if (Test-Path $pgStdErr) { Get-Content -LiteralPath $pgStdErr -Raw } else { '' }
+        $script:PgSummary = if (Test-Path $script:PgSummaryPath) { Get-Content -LiteralPath $script:PgSummaryPath -Raw | ConvertFrom-Json } else { $null }
+        $script:PgHtmlPath = @(Get-ChildItem -LiteralPath $script:PgOut -Filter '*.html' | Select-Object -ExpandProperty FullName)[0]
+    }
+
+    AfterAll { Remove-Item -LiteralPath $script:PgRoot -Recurse -Force -ErrorAction SilentlyContinue }
+
+    It 'completes, and the role reads themselves succeeded' {
+        $script:PgExit | Should -Be 0 -Because "the run failed outright: $script:PgStdErr"
+        $script:PgSummary.PrivilegeDiscoveryGaps | Should -Not -Match 'Active directory role assignments could not be read'
+        $script:PgSummary.PrivilegeDiscoveryGaps | Should -Not -Match 'PIM role eligibility could not be read'
+    }
+
+    It 'withholds both actionable exports' {
+        $script:PgCampaign | Should -Not -Exist
+        $script:PgWider | Should -Not -Exist
+    }
+
+    It 'does not leave yesterday''s exports available as today''s result' {
+        @(Get-ChildItem -LiteralPath $script:PgOut -Filter '*NoPasskey*').Count | Should -Be 0
+        $script:PgStdOut | Should -Match "cannot be read as this run's result"
+    }
+
+    It 'names the refused read, its scope and the role it needs' {
+        $script:PgSummary.PrivilegeDiscoveryComplete | Should -BeFalse
+        $script:PgSummary.PrivilegeDiscoveryGaps | Should -Match 'PIM for Groups eligibility for role-holding group g-helpdesk could not be read'
+        $script:PgSummary.PrivilegeDiscoveryGaps | Should -Match 'PrivilegedEligibilitySchedule\.Read\.AzureADGroup'
+        $script:PgStdOut | Should -Match 'Privileged-account discovery did not complete'
+        $script:PgStdOut | Should -Match 'Global Reader or Privileged Role Administrator'
+    }
+
+    It 'shows incomplete privilege discovery in the tenant-wide report' {
+        $script:PgHtmlPath | Should -Not -BeNullOrEmpty
+        $html = Get-Content -LiteralPath $script:PgHtmlPath -Raw
+        $html | Should -Match 'Privileged-account discovery did not complete on this run, so no targeting list was produced'
+        $html | Should -Match 'PIM for Groups eligibility for role-holding group g-helpdesk could not be read'
+        # Withheld counts render as not available, never as a measured zero.
+        $html | Should -Match 'not available</div><div class="l">SMS/voice, no passkey'
+    }
+
+    It 'keeps the tenant-wide figures, and claims nothing about privilege on any row' {
+        $script:PgSummary.UsersWithPasskey | Should -Be 3
+        $script:PgSummary.CampaignCandidates | Should -BeNullOrEmpty
+        $script:PgSummary.NoPasskeyNonprivileged | Should -BeNullOrEmpty
+        foreach ($row in @(Import-Csv -LiteralPath $script:PgCsv)) {
+            $row.PrivilegeSource | Should -BeExactly '(not determined)'
+        }
+    }
+}
 
 Describe 'A run with -ExcludeUpnPattern' {
 
@@ -908,5 +1393,117 @@ Describe 'A run where nobody needs action' {
         # Empty action list must not mean empty assessment: the excluded rows are the
         # record of what the pattern removed.
         @(Import-Csv -LiteralPath $script:CleanCsv).Count | Should -BeGreaterThan 0
+    }
+}
+
+Describe 'Earlier targeting lists never sit beside a newer assessment' {
+
+    # Both runs pre-seed a previous run's targeting lists exactly where this run's would go.
+    # Before the fix, the lists were only removed at the end and only on a withheld run, so
+    # a run that stopped part-way kept them beside a fresh assessment; and a list that could
+    # not be deleted (open in Excel) was reported removed while it stayed in place.
+
+    BeforeAll {
+        $pwshPath = if ($IsWindows) { Join-Path $PSHOME 'pwsh.exe' } else { Join-Path $PSHOME 'pwsh' }
+        if (-not (Test-Path -LiteralPath $pwshPath)) { $pwshPath = 'pwsh' }
+
+        function Invoke-SeededRun {
+            param([string]$Name, [string]$Prelude = '', [scriptblock]$Arrange, [switch]$RefusePimForGroups)
+            $root = Join-Path ([System.IO.Path]::GetTempPath()) ("e2e-$Name-" + [guid]::NewGuid())
+            $out = Join-Path $root 'out'
+            New-Item -ItemType Directory -Path $out -Force | Out-Null
+
+            # The stub tenant, optionally with the PIM for Groups read refused -- the withheld-
+            # export path, which is where the false "removed" message used to be printed.
+            $modules = Join-Path $script:Root 'Modules'
+            if ($RefusePimForGroups) {
+                $modules = Join-Path $root 'Modules'
+                $moduleDir = Join-Path $modules 'Microsoft.Graph.Authentication'
+                New-Item -ItemType Directory -Path $moduleDir -Force | Out-Null
+                $stub = Get-Content -LiteralPath (Join-Path $script:ModuleDir 'Microsoft.Graph.Authentication.psm1') -Raw
+                $marker = "    if (`$Uri -match '/identityGovernance/privilegedAccess/group/eligibilityScheduleInstances') {"
+                $refuse = @'
+    if ($Uri -match '/identityGovernance/privilegedAccess/group/') {
+        $exception = [System.Exception]::new('Authorization_RequestDenied')
+        $exception | Add-Member -NotePropertyName Response -NotePropertyValue ([PSCustomObject]@{ StatusCode = 403 }) -Force
+        throw $exception
+    }
+'@
+                $stub.IndexOf($marker) | Should -BeGreaterThan 0
+                $stub.Replace($marker, $refuse + $marker) | Set-Content -LiteralPath (Join-Path $moduleDir 'Microsoft.Graph.Authentication.psm1')
+                Copy-Item -LiteralPath (Join-Path $script:ModuleDir 'Microsoft.Graph.Authentication.psd1') -Destination $moduleDir
+            }
+            $csv = Join-Path $out 'run.csv'
+            $campaign = Join-Path $out 'run_SmsVoiceUsers_NoPasskey.csv'
+            $wider = Join-Path $out 'run_NoPasskey_Nonprivileged.csv'
+            'OLD-ASSESSMENT' | Set-Content -LiteralPath $csv
+            'STALE-LIST' | Set-Content -LiteralPath $campaign
+            'STALE-LIST' | Set-Content -LiteralPath $wider
+            if ($Arrange) { & $Arrange $out }
+
+            $stdout = Join-Path $root 'stdout.txt'; $stderr = Join-Path $root 'stderr.txt'
+            # The terminating error is written to its own file rather than scraped from
+            # stderr: the console renders it in colour and wraps it at the host's width, which
+            # differs between machines and splits a long path across lines.
+            $errorFile = Join-Path $root 'error.txt'
+            $command = @"
+`$PSStyle.OutputRendering = 'PlainText'
+`$env:PSModulePath = '$modules' + [IO.Path]::PathSeparator + `$env:PSModulePath
+$Prelude
+try { & '$(Get-AssessmentScriptPath)' -TenantId 'fabrikam-example.com' -OutputPath '$csv' -SkipAclHardening | Out-Null }
+catch { Set-Content -LiteralPath '$errorFile' -Value `$_.Exception.Message; exit 1 }
+"@
+            $process = Start-Process -FilePath $pwshPath -PassThru -Wait -NoNewWindow `
+                -RedirectStandardOutput $stdout -RedirectStandardError $stderr `
+                -ArgumentList @('-NoProfile', '-NonInteractive', '-Command', $command)
+            [PSCustomObject]@{
+                Root = $root; Out = $out; Csv = $csv; Campaign = $campaign; Wider = $wider
+                Exit = $process.ExitCode
+                Text = ((Get-Content -LiteralPath $stdout -Raw -ErrorAction SilentlyContinue) + (Get-Content -LiteralPath $stderr -Raw -ErrorAction SilentlyContinue))
+                Error = [string](Get-Content -LiteralPath $errorFile -Raw -ErrorAction SilentlyContinue)
+            }
+        }
+
+        # A previous list that cannot be deleted. An advanced function honours -ErrorAction
+        # exactly as Remove-Item does on a sharing violation.
+        $script:Locked = Invoke-SeededRun -Name locked -RefusePimForGroups -Prelude @'
+function global:Remove-Item {
+    [CmdletBinding()] param([string]$LiteralPath, [switch]$Force, [switch]$Recurse)
+    Write-Error "The process cannot access the file '$LiteralPath' because it is being used by another process."
+}
+'@
+        # A run that stops after the assessment is written: the action list path is taken
+        # by a folder, so that write fails. Stands in for a crash or Ctrl+C at that point.
+        $script:Stopped = Invoke-SeededRun -Name stopped -Arrange {
+            param($out) New-Item -ItemType Directory -Path (Join-Path $out 'run_ActionList.csv') | Out-Null
+        }
+    }
+
+    AfterAll {
+        foreach ($run in @($script:Locked, $script:Stopped)) {
+            if ($run) { Remove-Item -LiteralPath $run.Root -Recurse -Force -ErrorAction SilentlyContinue }
+        }
+    }
+
+    It 'stops before writing anything when an earlier list cannot be removed' {
+        $script:Locked.Exit | Should -Not -Be 0
+        $script:Locked.Error | Should -Match 'Could not remove .*run_NoPasskey_Nonprivileged\.csv'
+        (Get-Content -LiteralPath $script:Locked.Csv -Raw) | Should -Match 'OLD-ASSESSMENT' -Because 'nothing from this run may be written beside a list it could not remove'
+        Test-Path -LiteralPath (Join-Path $script:Locked.Out 'run_ActionList.csv') | Should -BeFalse
+    }
+
+    It 'never says a list was removed when it was not' {
+        $script:Locked.Text | Should -Not -Match "Removed a previous run's"
+    }
+
+    It 'has removed the earlier lists by the time a run that stops part-way has written its assessment' {
+        $script:Stopped.Exit | Should -Not -Be 0
+        (Get-Content -LiteralPath $script:Stopped.Csv -Raw) | Should -Not -Match 'OLD-ASSESSMENT' -Because 'this run wrote its assessment before stopping'
+        Test-Path -LiteralPath $script:Stopped.Campaign | Should -BeFalse
+        Test-Path -LiteralPath $script:Stopped.Wider | Should -BeFalse
+    }
+
+    It 'leaves no half-written file behind' {
+        @(Get-ChildItem -LiteralPath $script:Stopped.Out -Force -Filter '*.partial').Count | Should -Be 0
     }
 }

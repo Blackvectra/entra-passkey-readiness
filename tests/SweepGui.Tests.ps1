@@ -78,6 +78,14 @@ Describe 'Test-CustomerNameInput' {
         }
     }
 
+    It 'rejects a formula hidden behind padding, a control character or a full-width trigger' {
+        foreach ($value in @(' =Contoso', "`t+Contoso", ([string][char]0x00A0 + '@Fabrikam'),
+                ([string][char]0x01 + 'Contoso'), ([string][char]0xFF1D + 'Contoso'), ([string][char]0xFF0D + 'Northwind'))) {
+            Test-CustomerNameInput -Value $value | Should -BeFalse -Because 'padding must not hide a formula trigger'
+        }
+        Test-CustomerNameInput -Value 'Mary-Jane Consulting' | Should -BeTrue
+    }
+
     It 'rejects characters a folder name cannot hold' {
         # Rejected rather than silently replaced. Silent replacement is how two customers
         # end up sharing one output folder, which is the collision the sweep now refuses.

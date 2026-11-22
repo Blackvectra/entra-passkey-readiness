@@ -20,6 +20,8 @@ BeforeAll {
         '_ActionList\.csv$'
         '_RemediationGroup\.csv$'
         '_Tickets\.csv$'
+        '_SmsVoiceUsers_NoPasskey\.csv$'
+        '_NoPasskey_Nonprivileged\.csv$'
         '_TicketHistory\.json$'
         '^TicketHistory\.json$'
     )
@@ -165,7 +167,7 @@ Describe 'Evidence hygiene' {
         $literals = [System.Collections.Generic.HashSet[string]]::new()
         foreach ($file in Get-ChildItem -Path $script:RepoRoot -Filter '*.ps1' -File) {
             $content = Get-Content -LiteralPath $file.FullName -Raw
-            foreach ($match in [regex]::Matches($content, "'(?<s>_[A-Za-z]+\.(?:csv|json))'")) {
+            foreach ($match in [regex]::Matches($content, "'(?<s>_[A-Za-z][A-Za-z_]*\.(?:csv|json))'")) {
                 [void]$literals.Add($match.Groups['s'].Value)
             }
         }
@@ -230,6 +232,54 @@ Describe 'Functions do not reach into the script param block' {
         }
 
         $offenders -join ' | ' | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'App-only setup lists every permission the assessment requests' {
+
+    # An app-only sweep set up from instructions that list fewer permissions than the script
+    # requests is refused the privilege reads in every tenant, and every tenant's targeting
+    # exports are withheld. The instructions said four after two more were added.
+
+    BeforeAll {
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile((Get-AssessmentScriptPath), [ref]$null, [ref]$null)
+        $assignment = @($ast.FindAll({
+                    $args[0] -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                    $args[0].Left.Extent.Text -eq '$requiredScopes'
+                }, $true))
+        $assignment.Count | Should -Be 1
+        $script:Scopes = @([scriptblock]::Create($assignment[0].Right.Extent.Text).Invoke())
+        $script:Scopes.Count | Should -BeGreaterThan 4
+
+        $root = Split-Path -Parent (Get-AssessmentScriptPath)
+        $playbook = Get-Content -LiteralPath (Join-Path $root 'docs/Operations-Playbook.md') -Raw
+        $start = $playbook.IndexOf('### 1. App registration and consent')
+        $script:PlaybookSection = $playbook.Substring($start, $playbook.IndexOf('###', $start + 5) - $start)
+
+        # The sweep's comment-based help, read as text: the .NOTES block is where an
+        # operator setting up app-only access looks for the permission list.
+        $sweep = Get-Content -LiteralPath (Get-SweepScriptPath) -Raw
+        $notes = $sweep.IndexOf('.NOTES')
+        $notes | Should -BeGreaterThan 0
+        $script:SweepNotes = $sweep.Substring($notes, $sweep.IndexOf('#>', $notes) - $notes)
+    }
+
+    It 'names <_> in the playbook''s app registration step' -ForEach @(
+        'Policy.Read.All', 'AuditLog.Read.All', 'User.Read.All', 'GroupMember.Read.All',
+        'RoleManagement.Read.Directory', 'PrivilegedEligibilitySchedule.Read.AzureADGroup'
+    ) {
+        $_ | Should -BeIn $script:Scopes -Because 'the list here must match the script'
+        $script:PlaybookSection | Should -Match ([regex]::Escape($_))
+        $script:SweepNotes | Should -Match ([regex]::Escape($_))
+    }
+
+    It 'states the same count everywhere it states one' {
+        $count = @('zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight')[$script:Scopes.Count]
+        $root = Split-Path -Parent (Get-AssessmentScriptPath)
+        (Get-Content -LiteralPath (Join-Path $root 'README.md') -Raw) | Should -Match "App-only runs need the same $count Graph permissions"
+        $script:PlaybookSection | Should -Match "The $count permissions are required"
+        $script:SweepNotes | Should -Match "require the $count Graph permissions"
+        (Get-Content -LiteralPath (Get-AssessmentScriptPath) -Raw) | Should -Match "App-only: the same $count must be granted"
     }
 }
 

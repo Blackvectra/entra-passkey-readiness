@@ -135,3 +135,34 @@ TenantId,CustomerName
         $message | Should -Not -Match 'share the customer label'
     }
 }
+
+Describe 'The parallel sweep quotes paths into its child command safely' {
+
+    # PowerShell ends a single-quoted string at U+2018 to U+201B as well as at the ASCII
+    # apostrophe. Doubling only the ASCII one let a folder named with a typographic
+    # apostrophe end the string early and change the command the child process ran.
+
+    BeforeAll {
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile((Get-SweepScriptPath), [ref]$null, [ref]$null)
+        $assignment = @($ast.FindAll({
+                    $args[0] -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                    $args[0].Left.Extent.Text -eq '$q'
+                }, $true))
+        $assignment.Count | Should -Be 1
+        $script:Quote = [scriptblock]::Create($assignment[0].Right.Extent.Text).Invoke()[0]
+    }
+
+    It 'keeps <Name> inside one string literal' -ForEach @(
+        @{ Name = 'an ASCII apostrophe'; Path = "/srv/MSP's Tools/Get-Impact.ps1" }
+        @{ Name = 'a typographic apostrophe'; Path = "/srv/MSP$([char]0x2019)s Tools/Get-Impact.ps1" }
+        @{ Name = 'an opening typographic quote'; Path = "/srv/$([char]0x2018)x$([char]0x201B)/a.ps1" }
+    ) {
+        $command = "& $(& $script:Quote $Path) @splat"
+        $tokens = $null; $errors = $null
+        [void][System.Management.Automation.Language.Parser]::ParseInput($command, [ref]$tokens, [ref]$errors)
+        $errors.Count | Should -Be 0
+        $strings = @($tokens | Where-Object Kind -eq 'StringLiteral')
+        $strings.Count | Should -Be 1
+        $strings[0].Value | Should -Be $Path
+    }
+}
