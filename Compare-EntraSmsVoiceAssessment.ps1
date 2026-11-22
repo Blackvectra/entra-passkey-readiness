@@ -24,15 +24,19 @@
 
 .PARAMETER TenantProfile
     Compare the two newest exports for this Tenant Profile instead of naming the files.
-    They are found in <ReportRoot>/<profile name>/. Cannot be combined with -BaselinePath
+    They are found in <ReportRoot>/<Tenant Profile name>/. Cannot be combined with -BaselinePath
     or -CurrentPath.
 
+.PARAMETER TenantProfilePath
+    Full path to a Tenant Profile file, instead of a name. Cannot be combined with
+    -TenantProfile, -BaselinePath or -CurrentPath.
+
 .PARAMETER TenantProfileRoot
-    Folder that holds Tenant Profiles. Defaults to $env:ENTRA_SMSVOICE_PROFILE_ROOT, then a
-    profiles folder beside this script.
+    Folder that holds Tenant Profiles. Defaults to $env:ENTRA_SMSVOICE_PROFILE_ROOT, then
+    a folder named profiles beside this script.
 
 .PARAMETER ReportRoot
-    With -TenantProfile: where the exports were written. Defaults to the reports folder
+    With -TenantProfile or -TenantProfilePath: where the exports were written. Defaults to the reports folder
     beside the scripts, where a single assessment run writes. For exports from a sweep,
     pass the sweep's -ReportRoot.
 
@@ -80,10 +84,14 @@ param(
     # that rule lives; a param attribute cannot call the helper, which loads after binding.
     [string]$TenantProfile,
 
+    [Parameter(Mandatory, ParameterSetName = 'TenantProfilePath')]
+    [string]$TenantProfilePath,
+
     [Parameter(ParameterSetName = 'TenantProfile')]
     [string]$TenantProfileRoot,
 
     [Parameter(ParameterSetName = 'TenantProfile')]
+    [Parameter(ParameterSetName = 'TenantProfilePath')]
     [string]$ReportRoot,
 
     [Parameter()]
@@ -323,10 +331,15 @@ if (-not $tenantProfileHelper -or -not (Test-Path -LiteralPath $tenantProfileHel
 }
 . $tenantProfileHelper
 
-if ($PSCmdlet.ParameterSetName -eq 'TenantProfile') {
+if ($PSCmdlet.ParameterSetName -ne 'Paths') {
     # Loading the Tenant Profile confirms it exists and is valid, and gives the canonical name
     # the exports were filed under. Nothing else in it is needed: this script reads files only.
-    $loadedProfile = Import-TenantProfile -Name $TenantProfile -Root $TenantProfileRoot -SkipAclHardening:$SkipAclHardening
+    $loadedProfile = if ($PSCmdlet.ParameterSetName -eq 'TenantProfilePath') {
+        Import-TenantProfile -Path $TenantProfilePath -SkipAclHardening:$SkipAclHardening
+    }
+    else {
+        Import-TenantProfile -Name $TenantProfile -Root $TenantProfileRoot -SkipAclHardening:$SkipAclHardening
+    }
     $exports = @(Find-TenantProfileExport -TenantProfileName $loadedProfile.Name -ReportRoot $ReportRoot)
     if ($exports.Count -lt 2) {
         $where = if ($ReportRoot) { $ReportRoot } else { Join-Path $PSScriptRoot 'reports' }

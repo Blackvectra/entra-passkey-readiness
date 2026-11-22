@@ -205,7 +205,7 @@ function Protect-TenantProfileRoot {
 
     try {
         if (Test-TenantProfileRootExposed -Path $Path) {
-            Write-Warning "The Tenant Profile folder $Path can be read by other users on this machine. Profiles name clients, their tenants and certificate thumbprints; restrict the folder to yourself."
+            Write-Warning "The Tenant Profile folder $Path can be read by other users on this machine. Tenant Profiles name clients, their tenants and certificate thumbprints; restrict the folder to yourself."
         }
     }
     catch {
@@ -455,7 +455,7 @@ function Find-TenantProfileExport {
         Lists a Tenant's assessment exports, newest first.
     .DESCRIPTION
         A run from a Tenant Profile writes its exports to a folder named after the Tenant Profile:
-        <ReportRoot>/<profile name>/. A single run's default ReportRoot is the reports
+        <ReportRoot>/<Tenant Profile name>/. A single run's default ReportRoot is the reports
         folder beside the scripts; a sweep's is whatever -ReportRoot it was given.
 
         Only the main assessment CSV counts. The action list, ticket queue and other

@@ -4,4 +4,4 @@ A Customer can own several Tenants, so several Tenant Profiles can share a `Cust
 
 ## Consequences
 
-Moving a client from `tenants.csv` to a profile changes its sweep folder from `ReportRoot/<CustomerName>/` to `ReportRoot/<profile name>/`. Its existing ticket history is not found unless the profile's `TicketHistoryPath` points at the old file. A `-Resume` across that switch re-assesses the client.
+Moving a client from `tenants.csv` to a Tenant Profile changes its sweep folder from `ReportRoot/<CustomerName>/` to `ReportRoot/<Tenant Profile name>/`. Its existing ticket history is not found unless the Tenant Profile's `TicketHistoryPath` points at the old file. A `-Resume` across that switch re-assesses the client.

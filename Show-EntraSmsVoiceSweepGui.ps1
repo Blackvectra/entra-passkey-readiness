@@ -28,8 +28,8 @@
     Pre-fills the output folder. Otherwise the window starts with it empty.
 
 .PARAMETER TenantProfileRoot
-    Folder that holds Tenant Profiles. Defaults to $env:ENTRA_SMSVOICE_PROFILE_ROOT, then a
-    profiles folder beside this script. When it holds Tenant Profiles, the window opens on a
+    Folder that holds Tenant Profiles. Defaults to $env:ENTRA_SMSVOICE_PROFILE_ROOT, then
+    a folder named profiles beside this script. When it holds Tenant Profiles, the window opens on a
     checklist of them; the hand-typed tenant list stays available on its own tab.
 
 .PARAMETER TenantListPath
@@ -422,7 +422,7 @@ if (-not (Test-Path -LiteralPath $tenantProfileHelper -PathType Leaf)) {
                     RowHeight="26" Background="White">
             <DataGrid.Columns>
               <DataGridCheckBoxColumn Header="Sweep" Binding="{Binding Selected, UpdateSourceTrigger=PropertyChanged}" Width="60"/>
-              <DataGridTextColumn Header="Profile" Binding="{Binding Name}" IsReadOnly="True" Width="2*"/>
+              <DataGridTextColumn Header="Tenant Profile" Binding="{Binding Name}" IsReadOnly="True" Width="2*"/>
               <DataGridTextColumn Header="Customer" Binding="{Binding CustomerName}" IsReadOnly="True" Width="3*"/>
               <DataGridTextColumn Header="Tenant" Binding="{Binding TenantId}" IsReadOnly="True" Width="3*"/>
             </DataGrid.Columns>
@@ -689,7 +689,7 @@ $controls.BtnRun.Add_Click({
         }
         $handoff = $null
         if ($useProfiles) {
-            # Profiles are passed by name; the sweep reads them itself, so no temp file.
+            # Tenant Profiles are passed by name; the sweep reads them itself, so no temp file.
             $arguments = New-SweepArgumentList @common -TenantProfile $validation.Names -TenantProfileRoot $script:ProfileRootChoice
             $tenantCount = $validation.Names.Count
         }

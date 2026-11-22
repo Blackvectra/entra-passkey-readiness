@@ -30,8 +30,8 @@
     Sweep every Tenant Profile in the Tenant Profile folder.
 
 .PARAMETER TenantProfileRoot
-    Folder that holds Tenant Profiles. Defaults to $env:ENTRA_SMSVOICE_PROFILE_ROOT, then a
-    profiles folder beside this script.
+    Folder that holds Tenant Profiles. Defaults to $env:ENTRA_SMSVOICE_PROFILE_ROOT, then
+    a folder named profiles beside this script.
 
     In a Tenant Profile sweep, a Tenant Profile's own values win. -ClientId, -CertificateThumbprint and
     -ExcludeUpnPattern only fill in what a Tenant Profile leaves blank, so one shared app
@@ -199,7 +199,7 @@ param(
     [Parameter()]
     [switch]$SkipAclHardening,
 
-    # Profile sweeps only. Skip looking up the tenant GUID behind each domain-form TenantId
+    # Tenant Profile sweeps only. Skip looking up the tenant GUID behind each domain-form TenantId
     # (an anonymous GET to login.microsoftonline.com). Without the lookup, a tenant written as
     # a domain in one Tenant Profile and a GUID in another is not caught before connecting.
     [Parameter()]
@@ -534,7 +534,7 @@ end {
             OutputPath = $csvPath
         }
         if ($target.CertificateThumbprint) {
-            # Profile sweep: this tenant's own app registration, already merged with the
+            # Tenant Profile sweep: this tenant's own app registration, already merged with the
             # sweep-wide values.
             $arguments.ClientId = $target.ClientId
             $arguments.CertificateThumbprint = $target.CertificateThumbprint

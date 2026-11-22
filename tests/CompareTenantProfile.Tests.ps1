@@ -86,3 +86,14 @@ Describe 'A single run from a profile files its exports under the profile name' 
                 -RunDate ([datetime]'2026-12-01') -TenantProfileName 'fabrikam') | Should -Match '^.+_\d{4}-\d{2}-\d{2}\.csv$'
     }
 }
+
+Describe 'Compare-EntraSmsVoiceAssessment -TenantProfilePath' {
+
+    It 'compares the two newest exports of a Tenant Profile picked by file path' {
+        $out = Join-Path $script:Root 'change-by-path.csv'
+        $summary = & (Get-CompareScriptPath) -TenantProfilePath (Join-Path $script:Profiles 'fabrikam.profile.psd1') `
+            -ReportRoot $script:Reports -OutputPath $out -SkipAclHardening 6>$null 3>$null
+        (Split-Path -Leaf $summary.BaselinePath) | Should -Be 'fabrikam_2026-11-01.csv'
+        (Split-Path -Leaf $summary.CurrentPath) | Should -Be 'EntraSmsVoiceMigrationImpact_20261120_090000.csv'
+    }
+}

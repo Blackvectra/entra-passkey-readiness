@@ -43,7 +43,7 @@
 
 .PARAMETER TenantProfileRoot
     Folder that holds Tenant Profiles. Defaults to $env:ENTRA_SMSVOICE_PROFILE_ROOT, then
-    a profiles folder beside this script.
+    a folder named profiles beside this script.
 
 .PARAMETER OutputPath
     CSV output path. Defaults to a timestamped file beside this script, or in the

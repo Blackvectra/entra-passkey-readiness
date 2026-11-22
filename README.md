@@ -326,7 +326,7 @@ It is a PowerShell data file, `profiles\<name>.profile.psd1`, one per tenant. St
 
 **Never committed.** `.gitignore` excludes `profiles/` and `*.profile.psd1`; only the fictional example is tracked, and a test fails if a real one ever is. Tenant Profiles are read from `-TenantProfileRoot`, then `$env:ENTRA_SMSVOICE_PROFILE_ROOT`, then `profiles\` beside the scripts, so an MSP can keep them on a protected share. That folder is restricted to you when read, and you are warned if other users can still read it.
 
-**Who wins.** On a single run, a parameter you type overrides the Tenant Profile for that run, and `-Verbose` names each override. In a sweep, each Tenant Profile's own values win, and the sweep-wide `-ClientId`, `-CertificateThumbprint` and `-ExcludeUpnPattern` only fill in what a Tenant Profile leaves out.
+**Who wins.** On a single run, a parameter you type overrides the Tenant Profile for that run, and `-Verbose` names each override. In a sweep, each Tenant Profile's own values win, and the sweep-wide `-ClientId`, `-CertificateThumbprint` and `-ExcludeUpnPattern` only fill in what a Tenant Profile leaves out. `-ClientId` and `-CertificateThumbprint` are one credential and are filled as a pair: a Tenant Profile that sets either one never borrows the other from the sweep.
 
 **Where output goes.** A run from a Tenant Profile files its output under the **Tenant Profile name** — `reports\<profile>\` for a single run, `<ReportRoot>\<profile>\` in a sweep — because a Customer with two tenants would otherwise have them overwrite each other. See [ADR 0002](docs/adr/0002-profile-sweep-folders-by-profile-name.md). If you move a client from `tenants.csv` to a Tenant Profile, set the Tenant Profile's `TicketHistoryPath` to the client's existing history file, or the first Tenant Profile run will raise its tickets again.
 
@@ -340,7 +340,7 @@ It is a PowerShell data file, `profiles\<name>.profile.psd1`, one per tenant. St
 .\Compare-EntraSmsVoiceAssessment.ps1 -TenantProfile fabrikam -ReportRoot D:\ClientEvidence\EntraMigration
 ```
 
-Every Tenant Profile in a sweep is validated, and two Tenant Profiles naming the same tenant are refused, before any tenant is contacted. The sweep summary records which Tenant Profile produced each row in a `TenantProfile` column (the name only).
+Every Tenant Profile in a sweep is validated, and two Tenant Profiles naming the same tenant are refused, before any tenant is contacted. That includes one tenant written as a domain in one Tenant Profile and as its GUID in another: the sweep looks up the GUID behind each domain through Entra ID's public OpenID configuration (an anonymous request to `login.microsoftonline.com`, no credentials, no Graph). If a lookup fails, the sweep warns and compares that Tenant Profile as written. `-SkipTenantLookup` turns the lookup off. The sweep summary records which Tenant Profile produced each row in a `TenantProfile` column (the name only).
 
 ### Multi-tenant sweep (MSP scale)
 
@@ -619,16 +619,18 @@ Accepts and passes through `-IncludeUnaffected`, `-SkipLegacyPerUserMfa`, `-Excl
 | `-AssessmentScriptPath` | string | same directory | Path to the assessment script. |
 | `-ThrottleLimit` | int | 1 | Tenants assessed concurrently, 1 to 16. Above 1 requires app-only auth. |
 | `-Resume` | switch | off | Skip tenants already recorded as `Success` in the newest sweep summary under `-ReportRoot`. |
+| `-SkipTenantLookup` | switch | off | Tenant Profile sweeps: don't look up the tenant GUID behind domain-form `TenantId`s, for example offline. A domain and a GUID naming the same tenant then aren't caught before connecting. |
 
 ### `Compare-EntraSmsVoiceAssessment.ps1`
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `-BaselinePath` | string | **required** unless `-TenantProfile` | The earlier assessment CSV. |
-| `-CurrentPath` | string | **required** unless `-TenantProfile` | The later assessment CSV. |
+| `-BaselinePath` | string | **required** unless `-TenantProfile` or `-TenantProfilePath` | The earlier assessment CSV. |
+| `-CurrentPath` | string | **required** unless `-TenantProfile` or `-TenantProfilePath` | The later assessment CSV. |
 | `-TenantProfile` | string | none | Compare this Tenant Profile's two newest exports instead of naming files. |
+| `-TenantProfilePath` | string | none | Full path to a Tenant Profile file, instead of a name. |
 | `-TenantProfileRoot` | string | `$env:ENTRA_SMSVOICE_PROFILE_ROOT`, then `profiles\` | Folder that holds Tenant Profiles. |
-| `-ReportRoot` | string | `reports\` beside the scripts | With `-TenantProfile`: where the exports are. Pass the sweep's `-ReportRoot` for sweep exports. |
+| `-ReportRoot` | string | `reports\` beside the scripts | With `-TenantProfile` or `-TenantProfilePath`: where the exports are. Pass the sweep's `-ReportRoot` for sweep exports. |
 | `-OutputPath` | string | timestamped CSV beside `-CurrentPath` | Destination for the change report. |
 | `-IncludeUnchanged` | switch | off | Include users whose band did not move. |
 | `-SkipAclHardening` | switch | off | Skip restricting output file permissions. |
