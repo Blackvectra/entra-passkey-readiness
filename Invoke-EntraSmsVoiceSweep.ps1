@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+#Requires -Version 7.4
 <#
 .SYNOPSIS
     Runs the read-only Entra SMS/voice migration impact assessment across many tenants.
@@ -260,8 +260,7 @@ end {
         #
         # Windows: break inheritance, then grant the file owner and local Administrators only.
         # Linux and macOS: 0600 for a file, 0700 for a directory. The API that sets it arrived
-        # in .NET 7, so PowerShell 7.0 to 7.2 cannot call it; there the operator is told what
-        # to run instead of being left believing a control applied when it did not.
+        # in .NET 7; every supported runtime (#Requires 7.4) has it.
         param(
             [Parameter(Mandatory)][string]$Path,
             [switch]$Directory
@@ -285,18 +284,10 @@ end {
                 return
             }
 
-            # Resolved at run time, so this parses on a PowerShell that has never heard of it.
-            $modeType = 'System.IO.UnixFileMode' -as [type]
-            if (-not $modeType) {
-                $octal = if ($Directory) { '700' } else { '600' }
-                Write-Warning "Cannot restrict permissions on $Path. Setting them needs PowerShell 7.3 or later; this is $($PSVersionTable.PSVersion). Run: chmod $octal '$Path'"
-                return
-            }
-
             # 0600 (384) for a file, 0700 (448) for a directory: a directory needs the execute
             # bit or its owner cannot open it, which would break the sweep rather than protect
             # it. File::SetUnixFileMode is the setter for both; there is no Directory:: form.
-            $mode = [Enum]::ToObject($modeType, $(if ($Directory) { 448 } else { 384 }))
+            $mode = [System.IO.UnixFileMode]$(if ($Directory) { 448 } else { 384 })
             [System.IO.File]::SetUnixFileMode($Path, $mode)
         }
         catch {
@@ -320,7 +311,7 @@ end {
         #
         #   - the name carries a random GUID, so it cannot be planted in advance;
         #   - anything already at that path, a link included, is refused;
-        #   - on Linux and macOS it is created 0700 in the same call (PowerShell 7.3+), and on
+        #   - on Linux and macOS it is created 0700 in the same call, and on
         #     Windows it is restricted to the owner and Administrators before it is returned;
         #   - the result is checked, and a folder that is not private is removed and the
         #     sweep stops, before a single parameter is written into it.
@@ -339,16 +330,12 @@ end {
             throw "Refusing to use $path for the sweep handoff: something already exists there."
         }
 
-        # On Linux and macOS the folder is created 0700 in the same call whenever the runtime
-        # can (PowerShell 7.3+), including under -SkipAclHardening: that switch exists for
-        # report folders on filesystems that refuse permission changes, not for a folder in
-        # the shared temp directory that says which tenant each child reads.
-        $modeType = 'System.IO.UnixFileMode' -as [type]
-        if (-not $IsWindows -and $modeType) {
-            [void][System.IO.Directory]::CreateDirectory($path, [Enum]::ToObject($modeType, 448))
-        }
-        elseif (-not $IsWindows -and -not $SkipAclHardening) {
-            throw "A concurrent sweep on this platform needs PowerShell 7.3 or later to create its handoff folder privately (this is $($PSVersionTable.PSVersion)). Upgrade, run with -ThrottleLimit 1, or pass -SkipAclHardening to accept a folder other local accounts may read."
+        # On Linux and macOS the folder is created 0700 in the same call, including under
+        # -SkipAclHardening: that switch exists for report folders on filesystems that refuse
+        # permission changes, not for a folder in the shared temp directory that says which
+        # tenant each child reads.
+        if (-not $IsWindows) {
+            [void][System.IO.Directory]::CreateDirectory($path, [System.IO.UnixFileMode]448)
         }
         else {
             # No -Force: an existing folder is an error, never adopted.
