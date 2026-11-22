@@ -232,3 +232,44 @@ Describe 'Functions do not reach into the script param block' {
         $offenders -join ' | ' | Should -BeNullOrEmpty
     }
 }
+
+Describe 'Security claims and source hygiene' {
+
+    It 'names, for every control in SECURITY.md, the test that proves it' {
+        # SECURITY.md has twice claimed protection the code did not give, and nothing
+        # noticed. Each control row now names its proving test, or says "Not tested" out
+        # loud, so a claim cannot quietly outlive the behaviour it describes.
+        $text = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'SECURITY.md') -Raw
+        $section = ($text -split '## Controls built into the code')[1] -split "`n## " | Select-Object -First 1
+        $rows = @($section -split "`r?`n" | Where-Object { $_ -match '^\|' })
+
+        $rows.Count | Should -BeGreaterThan 2
+        $rows[0] | Should -Match '\|\s*Proven by\s*\|\s*$' -Because 'the table needs a Proven by column'
+
+        foreach ($row in $rows[2..($rows.Count - 1)]) {
+            $cell = ($row.Trim().Trim('|') -split '\|')[-1].Trim()
+            if ($cell -eq 'Not tested') { continue }
+            $named = @([regex]::Matches($cell, '`(tests/[^`]+\.Tests\.ps1)`') | ForEach-Object { $_.Groups[1].Value })
+            $named | Should -Not -BeNullOrEmpty -Because "row '$($row.Substring(0, [Math]::Min(40, $row.Length)))' must name a test file or say Not tested"
+            foreach ($file in $named) {
+                Join-Path $script:RepoRoot $file | Should -Exist
+            }
+        }
+    }
+
+    It 'has no invisible or direction-changing characters in any script' {
+        # Line and paragraph separators, zero-width characters and bidirectional overrides
+        # can make code read differently from how it runs (Trojan Source). One once reached
+        # a security regex here, caught only indirectly by an encoding rule.
+        $pattern = '[\u200B-\u200F\u202A-\u202E\u2028\u2029\u2060-\u2064\u2066-\u2069]'
+        $hits = foreach ($file in Get-ChildItem -Path $script:RepoRoot -Filter '*.ps1' -Recurse -File) {
+            $lineNo = 0
+            foreach ($line in [System.IO.File]::ReadAllLines($file.FullName)) {
+                $lineNo++
+                if ($line -match $pattern) { "$($file.Name):$lineNo" }
+            }
+        }
+        $hits | Should -BeNullOrEmpty
+    }
+}
+
