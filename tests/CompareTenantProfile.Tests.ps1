@@ -69,13 +69,13 @@ Describe 'Compare-EntraSmsVoiceAssessment -TenantProfile' {
     }
 }
 
-Describe 'A single run from a profile files its exports under the profile name' {
+Describe 'A single run from a Tenant Profile files its exports under the Tenant Profile name' {
 
     BeforeAll {
         . (Import-ScriptFunction -Path (Get-AssessmentScriptPath) -Name 'Get-SafeFileLabel', 'Get-DefaultOutputPath')
     }
 
-    It 'uses the profile name, so two tenants of one customer do not overwrite each other' {
+    It 'uses the Tenant Profile name, so two tenants of one customer do not overwrite each other' {
         $path = Get-DefaultOutputPath -CustomerName 'Contoso' -TenantGuid 'c0ffee00-1111-4222-8333-444455556666' `
             -BaseDirectory '/base' -RunDate ([datetime]'2026-11-21') -TenantProfileName 'contoso-prod'
         $path | Should -Be (Join-Path (Join-Path (Join-Path '/base' 'reports') 'contoso-prod') 'contoso-prod_2026-11-21.csv')

@@ -82,25 +82,25 @@ AfterAll {
 
 Describe 'A sweep over Tenant Profiles' {
 
-    It 'assesses every profile' {
+    It 'assesses every Tenant Profile' {
         $script:Summary.Count | Should -Be 2
         @($script:Summary | Where-Object Status -eq 'Success').Count | Should -Be 2
     }
 
-    It 'lets a profile''s own app registration and exclusions win over the sweep-wide ones' {
+    It 'lets a Tenant Profile''s own app registration and exclusions win over the sweep-wide ones' {
         $call = Get-Call 'contoso-prod.example.com'
         $call.ClientId | Should -Be '00000000-1111-4222-8333-444444444444'
         $call.CertificateThumbprint | Should -Be 'A1B2C3D4E5F60718293A4B5C6D7E8F9012345678'
         $call.ExcludeUpnPattern | Should -Be @('^svc-')
     }
 
-    It 'fills what a profile leaves blank from the sweep-wide values' {
+    It 'fills what a Tenant Profile leaves blank from the sweep-wide values' {
         $call = Get-Call 'contoso-dev.example.com'
         $call.ClientId | Should -Be 'ffffffff-1111-4222-8333-444444444444'
         $call.ExcludeUpnPattern | Should -Be @('^shared-')
     }
 
-    It 'keeps two tenants of one customer apart by profile name' {
+    It 'keeps two tenants of one customer apart by Tenant Profile name' {
         (Get-Call 'contoso-prod.example.com').CustomerName | Should -Be 'Contoso'
         Split-Path -Parent (Get-Call 'contoso-prod.example.com').OutputPath |
             Should -Be (Join-Path $script:ReportRoot 'contoso-prod')
@@ -110,20 +110,20 @@ Describe 'A sweep over Tenant Profiles' {
             Should -Be (Join-Path (Join-Path $script:ReportRoot 'contoso-dev') 'TicketHistory.json')
     }
 
-    It 'records the profile name, and nothing else about the profile, in the summary' {
+    It 'records the Tenant Profile name, and nothing else about the Tenant Profile, in the summary' {
         ($script:Summary.TenantProfile | Sort-Object) | Should -Be @('contoso-dev', 'contoso-prod')
         (Get-Content -LiteralPath (Get-ChildItem -LiteralPath $script:ReportRoot -Filter 'SweepSummary_*.csv').FullName -Raw) |
             Should -Not -Match 'A1B2C3D4E5F6|\.profile\.psd1'
     }
 
-    It 'never forwards the profile name to the assessment' {
+    It 'never forwards the Tenant Profile name to the assessment' {
         (Get-Call 'contoso-prod.example.com').PSObject.Properties.Name | Should -Not -Contain 'TenantProfile'
     }
 }
 
 Describe 'Refusals before any tenant is contacted' {
 
-    It 'refuses two profiles that name the same tenant' {
+    It 'refuses two Tenant Profiles that name the same tenant' {
         $folder = New-ProfileFolder -Profiles @{
             'a' = "@{ SchemaVersion = 1; TenantId = 'dup.example.com'; CustomerName = 'A' }"
             'b' = "@{ SchemaVersion = 1; TenantId = 'dup.example.com'; CustomerName = 'B' }"
@@ -134,7 +134,7 @@ Describe 'Refusals before any tenant is contacted' {
         (Join-Path $script:Calls 'dup.example.com.json') | Should -Not -Exist
     }
 
-    It 'refuses a parallel sweep when a profile has no app registration and none is given' {
+    It 'refuses a parallel sweep when a Tenant Profile has no app registration and none is given' {
         $folder = New-ProfileFolder -Profiles @{
             'solo' = "@{ SchemaVersion = 1; TenantId = 'solo.example.com'; CustomerName = 'Solo' }"
         }
@@ -143,7 +143,7 @@ Describe 'Refusals before any tenant is contacted' {
             Should -Throw "*Parallel sweeps*'solo'*"
     }
 
-    It 'resumes by profile name' {
+    It 'resumes by Tenant Profile name' {
         $out = Join-Path $script:Root 'resume'
         & (Get-SweepScriptPath) -AllTenantProfiles -TenantProfileRoot $script:Folder -ReportRoot $out `
             -AssessmentScriptPath $script:FakeAssessment -ClientId 'ffffffff-1111-4222-8333-444444444444' `

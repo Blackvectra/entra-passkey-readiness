@@ -331,15 +331,12 @@ if (-not $tenantProfileHelper -or -not (Test-Path -LiteralPath $tenantProfileHel
 }
 . $tenantProfileHelper
 
-if ($PSCmdlet.ParameterSetName -ne 'Paths') {
+if ($PSCmdlet.ParameterSetName -in 'TenantProfile', 'TenantProfilePath') {
     # Loading the Tenant Profile confirms it exists and is valid, and gives the canonical name
     # the exports were filed under. Nothing else in it is needed: this script reads files only.
-    $loadedProfile = if ($PSCmdlet.ParameterSetName -eq 'TenantProfilePath') {
-        Import-TenantProfile -Path $TenantProfilePath -SkipAclHardening:$SkipAclHardening
-    }
-    else {
-        Import-TenantProfile -Name $TenantProfile -Root $TenantProfileRoot -SkipAclHardening:$SkipAclHardening
-    }
+    $importArgs = if ($PSCmdlet.ParameterSetName -eq 'TenantProfilePath') { @{ Path = $TenantProfilePath } }
+    else { @{ Name = $TenantProfile; Root = $TenantProfileRoot } }
+    $loadedProfile = Import-TenantProfile @importArgs -SkipAclHardening:$SkipAclHardening
     $exports = @(Find-TenantProfileExport -TenantProfileName $loadedProfile.Name -ReportRoot $ReportRoot)
     if ($exports.Count -lt 2) {
         $where = if ($ReportRoot) { $ReportRoot } else { Join-Path $PSScriptRoot 'reports' }

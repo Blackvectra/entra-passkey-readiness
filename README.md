@@ -328,7 +328,7 @@ It is a PowerShell data file, `profiles\<name>.profile.psd1`, one per tenant. St
 
 **Who wins.** On a single run, a parameter you type overrides the Tenant Profile for that run, and `-Verbose` names each override. In a sweep, each Tenant Profile's own values win, and the sweep-wide `-ClientId`, `-CertificateThumbprint` and `-ExcludeUpnPattern` only fill in what a Tenant Profile leaves out. `-ClientId` and `-CertificateThumbprint` are one credential and are filled as a pair: a Tenant Profile that sets either one never borrows the other from the sweep.
 
-**Where output goes.** A run from a Tenant Profile files its output under the **Tenant Profile name** — `reports\<profile>\` for a single run, `<ReportRoot>\<profile>\` in a sweep — because a Customer with two tenants would otherwise have them overwrite each other. See [ADR 0002](docs/adr/0002-profile-sweep-folders-by-profile-name.md). If you move a client from `tenants.csv` to a Tenant Profile, set the Tenant Profile's `TicketHistoryPath` to the client's existing history file, or the first Tenant Profile run will raise its tickets again.
+**Where output goes.** A run from a Tenant Profile files its output under the **Tenant Profile name** — `reports\<Tenant Profile name>\` for a single run, `<ReportRoot>\<Tenant Profile name>\` in a sweep — because a Customer with two tenants would otherwise have them overwrite each other. See [ADR 0002](docs/adr/0002-profile-sweep-folders-by-profile-name.md). If you move a client from `tenants.csv` to a Tenant Profile, set the Tenant Profile's `TicketHistoryPath` to the client's existing history file, or the first Tenant Profile run will raise its tickets again.
 
 ```powershell
 # Sweep every Tenant Profile, or a chosen few

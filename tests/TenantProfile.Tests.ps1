@@ -36,7 +36,7 @@ Describe 'Import-TenantProfile' {
         New-Item -ItemType Directory -Path $script:Folder | Out-Null
     }
 
-    It 'loads a valid profile by name' {
+    It 'loads a valid Tenant Profile by name' {
         New-TestProfile -Folder $script:Folder -Name 'fabrikam' -Body $script:ValidBody | Out-Null
         $p = Import-TenantProfile -Name 'fabrikam' -Root $script:Folder -SkipAclHardening 3>$null
 
@@ -47,7 +47,7 @@ Describe 'Import-TenantProfile' {
         $p.TicketHistoryPath | Should -BeNullOrEmpty
     }
 
-    It 'loads a valid profile by path' {
+    It 'loads a valid Tenant Profile by path' {
         $path = New-TestProfile -Folder $script:Folder -Name 'fabrikam' -Body $script:ValidBody
         (Import-TenantProfile -Path $path).Name | Should -Be 'fabrikam'
     }
@@ -114,7 +114,7 @@ Describe 'Import-TenantProfile' {
             Should -Throw '*ExcludeUpnPattern*'
     }
 
-    It 'refuses a profile that contains code' {
+    It 'refuses a Tenant Profile that contains code' {
         $body = $script:ValidBody -replace "'Fabrikam Clinic Group'", '(Get-Date).ToString()'
         New-TestProfile -Folder $script:Folder -Name 'code' -Body $body | Out-Null
         { Import-TenantProfile -Name 'code' -Root $script:Folder -SkipAclHardening 3>$null } |
@@ -131,7 +131,7 @@ Describe 'Import-TenantProfile' {
             Should -Throw '*not a valid Tenant Profile name*'
     }
 
-    It 'explains a missing profile' {
+    It 'explains a missing Tenant Profile' {
         { Import-TenantProfile -Name 'nobody' -Root $script:Folder -SkipAclHardening 3>$null } |
             Should -Throw "*No Tenant Profile named 'nobody'*"
     }
@@ -151,7 +151,7 @@ Describe 'Get-TenantProfileRoot' {
         Get-TenantProfileRoot | Should -Be '/from/env'
     }
 
-    It 'defaults to profiles beside the scripts' {
+    It 'defaults to Tenant Profiles beside the scripts' {
         Get-TenantProfileRoot | Should -Be (Join-Path $script:RepoRoot 'profiles')
     }
 }
@@ -163,20 +163,20 @@ Describe 'Get-TenantProfile' {
         New-Item -ItemType Directory -Path $script:Folder | Out-Null
     }
 
-    It 'loads every profile in the folder' {
+    It 'loads every Tenant Profile in the folder' {
         New-TestProfile -Folder $script:Folder -Name 'fabrikam' -Body $script:ValidBody | Out-Null
         New-TestProfile -Folder $script:Folder -Name 'contoso' -Body ($script:ValidBody -replace 'fabrikam-example', 'contoso') | Out-Null
         (Get-TenantProfile -Root $script:Folder -SkipAclHardening 3>$null).Name | Should -Be @('contoso', 'fabrikam')
     }
 
-    It 'refuses two profiles that name the same tenant, naming both files' {
+    It 'refuses two Tenant Profiles that name the same tenant, naming both files' {
         New-TestProfile -Folder $script:Folder -Name 'fabrikam' -Body $script:ValidBody | Out-Null
         New-TestProfile -Folder $script:Folder -Name 'fabrikam-old' -Body ($script:ValidBody -replace 'fabrikam-example\.onmicrosoft\.com', 'FABRIKAM-example.onmicrosoft.com') | Out-Null
         { Get-TenantProfile -Root $script:Folder -SkipAclHardening 3>$null } |
             Should -Throw '*fabrikam.profile.psd1*fabrikam-old.profile.psd1*'
     }
 
-    It 'validates every profile before returning any' {
+    It 'validates every Tenant Profile before returning any' {
         New-TestProfile -Folder $script:Folder -Name 'good' -Body $script:ValidBody | Out-Null
         New-TestProfile -Folder $script:Folder -Name 'bad' -Body ($script:ValidBody -replace 'SchemaVersion\s+= 1', 'SchemaVersion = 9') | Out-Null
         { Get-TenantProfile -Root $script:Folder -SkipAclHardening 3>$null } | Should -Throw '*SchemaVersion*'
@@ -189,6 +189,7 @@ Describe 'Assert-UniqueTenantProfile' {
         $script:FabrikamGuid = '11111111-2222-4333-8444-555555555555'
         $script:Lookup = {
             param($TenantId)
+            if ($TenantId -match $script:GuidPattern) { return $TenantId }
             if ($TenantId -eq 'fabrikam-example.onmicrosoft.com') { return $script:FabrikamGuid }
             throw "lookup failed for $TenantId"
         }
@@ -213,6 +214,12 @@ Describe 'Assert-UniqueTenantProfile' {
         )
         $warnings = @(Assert-UniqueTenantProfile -TenantProfile $entries -TenantIdResolver $script:Lookup 3>&1)
         ($warnings -join ' ') | Should -BeLike "*contoso*contoso.example*"
+    }
+
+    It 'treats a lookup that returns no GUID as a failed lookup' {
+        $entries = @(New-Entry 'contoso' 'contoso.example'; New-Entry 'fabrikam' $script:FabrikamGuid)
+        $warnings = @(Assert-UniqueTenantProfile -TenantProfile $entries -TenantIdResolver { 'not-a-guid' } 3>&1)
+        ($warnings -join ' ') | Should -BeLike '*contoso*contoso.example*'
     }
 
     It 'still refuses identical identifiers when the lookup fails' {

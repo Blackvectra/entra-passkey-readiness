@@ -25,7 +25,11 @@ belongs in the migration security group rather than creating the group. `-Export
 writes a remediation script to disk for a human to read and run, rather than running it.
 Legacy per-user MFA state is the one thing this tool reads from a beta endpoint. It is
 read on every run, needs no permission beyond the `Policy.Read.All` every run already
-requests, and `-SkipLegacyPerUserMfa` exists to opt out of the beta surface entirely. If you have a change that needs a write,
+requests, and `-SkipLegacyPerUserMfa` exists to opt out of the beta surface entirely. The one request
+that is not Graph is a Tenant Profile sweep's tenant lookup: an anonymous GET of Entra ID's
+public OpenID configuration on `login.microsoftonline.com`, sending no credentials, to catch
+two Tenant Profiles that name one tenant differently. `-SkipTenantLookup` turns it off.
+If you have a change that needs a write,
 open an issue before writing code.
 
 ## Setup

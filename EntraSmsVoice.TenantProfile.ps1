@@ -408,9 +408,12 @@ function Resolve-TenantGuid {
 
     $uri = 'https://login.microsoftonline.com/{0}/v2.0/.well-known/openid-configuration' -f [uri]::EscapeDataString($TenantId)
     $config = Invoke-RestMethod -Method Get -Uri $uri -TimeoutSec 15 -ErrorAction Stop
-    if ([string]$config.issuer -match '/([0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12})/') {
-        return $Matches[1]
-    }
+    # Read through PSObject rather than dotting in: a response without an issuer must reach the
+    # throw below, not a StrictMode property error. The issuer looks like
+    # https://login.microsoftonline.com/<tenant GUID>/v2.0.
+    $issuer = $config.PSObject.Properties['issuer']
+    $segment = @(if ($issuer) { ([string]$issuer.Value).Split('/') | Where-Object { $_ -match $script:GuidPattern } })
+    if ($segment.Count -eq 1) { return $segment[0] }
     throw "The OpenID configuration for '$TenantId' names no tenant GUID in its issuer."
 }
 
@@ -433,8 +436,12 @@ function Assert-UniqueTenantProfile {
 
     $keyed = foreach ($entry in $TenantProfile) {
         $key = $entry.TenantId.ToLowerInvariant()
-        if ($TenantIdResolver -and $key -notmatch $script:GuidPattern) {
-            try { $key = ([string](& $TenantIdResolver $entry.TenantId)).ToLowerInvariant() }
+        if ($TenantIdResolver) {
+            try {
+                $resolved = [string](& $TenantIdResolver $entry.TenantId)
+                if ($resolved -notmatch $script:GuidPattern) { throw "the lookup returned '$resolved', not a tenant GUID" }
+                $key = $resolved.ToLowerInvariant()
+            }
             catch {
                 Write-Warning "Tenant Profile '$($entry.Name)': could not look up the tenant GUID for '$($entry.TenantId)' ($($_.Exception.Message)). Checking it for duplicates as written."
             }

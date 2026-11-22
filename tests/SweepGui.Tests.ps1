@@ -307,7 +307,7 @@ Describe 'Tenant Profiles in the window' {
             Set-Content -LiteralPath (Join-Path $script:ProfileFolder 'contoso-dev.profile.psd1')
     }
 
-    It 'lists profiles with name, customer and tenant, and never the credentials' {
+    It 'lists Tenant Profiles with name, customer and tenant, and never the credentials' {
         $listing = Get-TenantProfileListing -Root $script:ProfileFolder 3>$null
         $listing.Problem | Should -BeNullOrEmpty
         $listing.Profiles.Name | Should -Be @('contoso-dev', 'contoso-prod')
@@ -316,13 +316,13 @@ Describe 'Tenant Profiles in the window' {
         ($listing.Profiles | ConvertTo-Json) | Should -Not -Match 'A1B2C3D4|00000000-1111'
     }
 
-    It 'shows an empty list, not an error, when there is no profile folder' {
+    It 'shows an empty list, not an error, when there is no Tenant Profile folder' {
         $listing = Get-TenantProfileListing -Root (Join-Path $TestDrive 'none')
         $listing.Profiles.Count | Should -Be 0
         $listing.Problem | Should -BeNullOrEmpty
     }
 
-    It 'reports a profile that would fail the sweep' {
+    It 'reports a Tenant Profile that would fail the sweep' {
         $bad = Join-Path $TestDrive 'bad'
         New-Item -ItemType Directory -Path $bad | Out-Null
         "@{ SchemaVersion = 1; TenantId = 'x.example.com'; CustomerName = 'X'; ClientSecret = 'nope' }" |
@@ -330,12 +330,12 @@ Describe 'Tenant Profiles in the window' {
         (Get-TenantProfileListing -Root $bad 3>$null).Problem | Should -Match 'not allowed: ClientSecret'
     }
 
-    It 'requires at least one ticked profile' {
+    It 'requires at least one ticked Tenant Profile' {
         $rows = @([pscustomobject]@{ Selected = $false; Name = 'a'; HasAppOnly = $true })
         (Test-TenantProfileSelection -Profiles $rows -SweepWideAppOnly $false).IsValid | Should -BeFalse
     }
 
-    It 'refuses a parallel run that would fall back to interactive sign-in, naming the profile' {
+    It 'refuses a parallel run that would fall back to interactive sign-in, naming the Tenant Profile' {
         $rows = @(
             [pscustomobject]@{ Selected = $true; Name = 'contoso-prod'; HasAppOnly = $true }
             [pscustomobject]@{ Selected = $true; Name = 'contoso-dev'; HasAppOnly = $false }
@@ -352,7 +352,7 @@ Describe 'Tenant Profiles in the window' {
             Should -Be @('contoso-dev')
     }
 
-    It 'builds profile arguments the sweep accepts, and an equivalent command line' {
+    It 'builds Tenant Profile arguments the sweep accepts, and an equivalent command line' {
         $arguments = New-SweepArgumentList -TenantProfile 'contoso-prod', 'contoso-dev' -ReportRoot 'D:\out'
         $arguments.Keys | Should -Not -Contain 'TenantListPath'
         $arguments.TenantProfile | Should -Be @('contoso-prod', 'contoso-dev')

@@ -75,6 +75,13 @@
 
     Requires app-only authentication: interactive sign-in cannot be driven concurrently.
 
+.PARAMETER SkipTenantLookup
+    Tenant Profile sweeps only. Do not look up the tenant GUID behind each TenantId written as
+    a domain. The lookup is an anonymous GET to login.microsoftonline.com (no credentials, not
+    Microsoft Graph) that lets two Tenant Profiles naming one tenant, one by domain and one by
+    GUID, be refused before anything connects. Use this offline; that duplicate is then caught
+    only after connecting.
+
 .PARAMETER Resume
     Skip tenants that already succeeded in the most recent SweepSummary_*.csv under
     -ReportRoot. For picking up an estate-wide run that died partway through, without
@@ -199,9 +206,6 @@ param(
     [Parameter()]
     [switch]$SkipAclHardening,
 
-    # Tenant Profile sweeps only. Skip looking up the tenant GUID behind each domain-form TenantId
-    # (an anonymous GET to login.microsoftonline.com). Without the lookup, a tenant written as
-    # a domain in one Tenant Profile and a GUID in another is not caught before connecting.
     [Parameter()]
     [switch]$SkipTenantLookup
 )
@@ -296,12 +300,13 @@ begin {
         # Every Tenant Profile is validated, and duplicate tenants refused, here -- before the
         # first tenant is contacted. A bad Tenant Profile at position 40 must not surface after
         # 39 tenants have been assessed.
-        $loaded = if ($AllTenantProfiles) {
-            @(Get-TenantProfile -Root $TenantProfileRoot -SkipAclHardening:$SkipAclHardening -ResolveTenantId:(-not $SkipTenantLookup))
+        $loadArgs = @{
+            Root             = $TenantProfileRoot
+            SkipAclHardening = $SkipAclHardening
+            ResolveTenantId  = -not $SkipTenantLookup
         }
-        else {
-            @(Get-TenantProfile -Name $TenantProfile -Root $TenantProfileRoot -SkipAclHardening:$SkipAclHardening -ResolveTenantId:(-not $SkipTenantLookup))
-        }
+        if (-not $AllTenantProfiles) { $loadArgs.Name = $TenantProfile }
+        $loaded = @(Get-TenantProfile @loadArgs)
         if ($loaded.Count -eq 0) { throw "No Tenant Profiles found in '$(Get-TenantProfileRoot -Root $TenantProfileRoot)'." }
 
         # Sweep-wide values only fill in what a Tenant Profile leaves blank (Mode Sweep).

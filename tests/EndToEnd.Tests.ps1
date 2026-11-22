@@ -928,12 +928,12 @@ Describe 'A run driven by a Tenant Profile' {
         $script:LeakyRun = Invoke-ProfileRun -Arguments "-TenantProfile leaky -TenantProfileRoot '$script:ProfileRoot'"
     }
 
-    It 'completes, and says which profile it used' {
+    It 'completes, and says which Tenant Profile it used' {
         $script:ProfileRun.ExitCode | Should -Be 0 -Because $script:ProfileRun.Output
         $script:ProfileRun.Output | Should -Match "Using Tenant Profile 'fabrikam'"
     }
 
-    It 'signs in app-only with the profile credentials' {
+    It 'signs in app-only with the Tenant Profile credentials' {
         $script:ProfileRun.Output | Should -Match 'as app 00000000-1111-4222-8333-444444444444'
     }
 
@@ -942,17 +942,17 @@ Describe 'A run driven by a Tenant Profile' {
         $script:ProfileRun.Output | Should -Match "Using Tenant Profile 'fabrikam' \(Fabrikam Override\)"
     }
 
-    It 'applies the profile exclusions' {
+    It 'applies the Tenant Profile exclusions' {
         $rows = Import-Csv -LiteralPath (Join-Path $script:ProfileOut 'a.csv')
         @($rows | Where-Object { $_.UserPrincipalName -match '^svc' -and $_.Risk -ne 'Excluded' }) |
             Should -BeNullOrEmpty
     }
 
-    It 'keeps ticket history where the profile says' {
+    It 'keeps ticket history where the Tenant Profile says' {
         $script:ProfileHistory | Should -Exist
     }
 
-    It 'refuses a profile with a disallowed key before contacting any tenant' {
+    It 'refuses a Tenant Profile with a disallowed key before contacting any tenant' {
         $script:LeakyRun.ExitCode | Should -Not -Be 0
         $script:LeakyRun.Output | Should -Match 'not allowed: ClientSecret'
         $script:LeakyRun.Output | Should -Not -Match 'Connected tenant'
