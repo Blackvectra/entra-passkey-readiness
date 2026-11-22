@@ -125,3 +125,65 @@ Describe 'The script normalizes before it connects' {
         $resolve | Should -BeLessThan $connect
     }
 }
+
+Describe 'Connect-AssessmentGraph reuses a session only for the requested tenant' {
+
+    # A guest (B2B) session is an account named for one customer signed in to another
+    # customer's tenant. Matching on the account's domain accepted it, read the other tenant,
+    # and filed the result under the requested customer's name.
+
+    BeforeAll {
+        . (Import-ScriptFunction -Path (Get-AssessmentScriptPath) -Name @('Get-PropertyValue', 'Connect-AssessmentGraph'))
+        $script:IsAppOnly = $false
+        $script:AllScopes = @('Policy.Read.All', 'AuditLog.Read.All', 'User.Read.All', 'GroupMember.Read.All',
+            'RoleManagement.Read.Directory', 'PrivilegedEligibilitySchedule.Read.AzureADGroup')
+
+        # Simple functions: any arguments the script passes land in $args and are ignored.
+        function Disconnect-MgGraph { }
+        function Connect-MgGraph { $script:ConnectCalls++ }
+        function Get-MgContext { $script:Context }
+
+        # Connect-AssessmentGraph reads these from the script's param block; here they are
+        # set in the calling scope, where it finds them.
+        function Set-AmbientParameter {
+            param([string]$Tenant)
+            Set-Variable -Name TenantId -Value $Tenant -Scope 1
+            Set-Variable -Name ClientId -Value $null -Scope 1
+            Set-Variable -Name CertificateThumbprint -Value $null -Scope 1
+        }
+    }
+
+    BeforeEach { $script:ConnectCalls = 0 }
+
+    It 'signs in fresh when -TenantId is a domain, even if the session account is in that domain' {
+        $script:Context = [PSCustomObject]@{
+            TenantId = 'badd0000-9999-4999-8999-999999999999'
+            Account  = 'alice@fabrikam-example.com'
+            Scopes   = $script:AllScopes
+        }
+        Set-AmbientParameter -Tenant 'fabrikam-example.com'
+        Connect-AssessmentGraph 6>$null | Out-Null
+        $script:ConnectCalls | Should -Be 1
+    }
+
+    It 'still reuses a session already in the tenant a GUID names' {
+        $script:Context = [PSCustomObject]@{
+            TenantId = 'c0ffee00-1111-4222-8333-444455556666'
+            Account  = 'alice@fabrikam-example.com'
+            Scopes   = $script:AllScopes
+        }
+        Set-AmbientParameter -Tenant 'c0ffee00-1111-4222-8333-444455556666'
+        Connect-AssessmentGraph 6>$null | Out-Null
+        $script:ConnectCalls | Should -Be 0
+    }
+
+    It 'refuses a session in another tenant when a GUID is given' {
+        $script:Context = [PSCustomObject]@{
+            TenantId = 'badd0000-9999-4999-8999-999999999999'
+            Account  = 'alice@fabrikam-example.com'
+            Scopes   = $script:AllScopes
+        }
+        Set-AmbientParameter -Tenant 'c0ffee00-1111-4222-8333-444455556666'
+        { Connect-AssessmentGraph 6>$null } | Should -Throw '*does not match requested tenant*'
+    }
+}

