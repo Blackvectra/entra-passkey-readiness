@@ -1,7 +1,7 @@
 # entra-passkey-readiness
 
 [![CI](https://github.com/Blackvectra/entra-passkey-readiness/actions/workflows/ci.yml/badge.svg)](https://github.com/Blackvectra/entra-passkey-readiness/actions/workflows/ci.yml)
-[![PowerShell 7+](https://img.shields.io/badge/PowerShell-7.0%2B-5391FE)](https://learn.microsoft.com/powershell/scripting/install/installing-powershell)
+[![PowerShell 7+](https://img.shields.io/badge/PowerShell-7.4%2B-5391FE)](https://learn.microsoft.com/powershell/scripting/install/installing-powershell)
 [![Read-only](https://img.shields.io/badge/Graph%20calls-GET%20only-0F9D6E)](#security)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -141,7 +141,7 @@ Treat `Jan 28, 2027` as an artefact of Microsoft's analyzer rather than a publis
 
 | Requirement | Detail |
 |---|---|
-| PowerShell | 7.0 or later (enforced by `#Requires`) |
+| PowerShell | 7.4 or later (enforced by `#Requires`) |
 | Module | `Microsoft.Graph.Authentication` (this is the only dependency) |
 | Entra role | Global Reader or Security Reader |
 | Network | Access to `graph.microsoft.com` |
@@ -189,7 +189,7 @@ You cannot run this script on the current system.
 
 nothing is wrong with the script or your account. You downloaded the repository as a **zip**, so Windows tagged every extracted file with the Mark of the Web, and your PowerShell execution policy refuses to run downloaded scripts that are not signed. Fix it step by step:
 
-1. **Open PowerShell 7** (`pwsh`), not Windows PowerShell 5.1 — the scripts require 7.0+ and will refuse 5.1 anyway. If `pwsh` is not installed: `winget install Microsoft.PowerShell`, then open a new terminal.
+1. **Open PowerShell 7** (`pwsh`), not Windows PowerShell 5.1 — the scripts require 7.4+ and will refuse 5.1 anyway. If `pwsh` is not installed: `winget install Microsoft.PowerShell`, then open a new terminal.
 
 2. **Go to the folder you extracted.** Note that extracting the zip usually creates a doubled folder — the scripts are in the *inner* one:
 

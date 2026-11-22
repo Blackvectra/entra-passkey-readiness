@@ -36,7 +36,7 @@ Install-Module PSScriptAnalyzer -Scope CurrentUser
 Install-Module Microsoft.Graph.Authentication -Scope CurrentUser   # only needed for live runs
 ```
 
-PowerShell 7.0 or later. The scripts enforce it with `#Requires`.
+PowerShell 7.4 or later. The scripts enforce it with `#Requires`.
 
 ## Before you open a PR
 
