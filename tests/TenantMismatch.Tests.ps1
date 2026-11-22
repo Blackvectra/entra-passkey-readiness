@@ -15,7 +15,7 @@ BeforeAll {
     . (Import-ScriptFunction -Path (Get-AssessmentScriptPath) -Name @('Get-PropertyValue', 'Connect-AssessmentGraph'))
 
     # Stand-ins for the SDK so Mock has commands to replace; it is not a test dependency.
-    function Connect-MgGraph { param($TenantId, $ClientId, $CertificateThumbprint, $Scopes, [switch]$NoWelcome) }
+    function Connect-MgGraph { param($TenantId, $ClientId, $CertificateThumbprint, $Scopes, [switch]$NoWelcome) $null = $PSBoundParameters }
     function Disconnect-MgGraph { }
     function Get-MgContext { }
 
@@ -28,9 +28,9 @@ Describe 'Connect-AssessmentGraph tenant guard' {
 
     BeforeEach {
         # Read from the caller's scope by the lifted function, as the script's param block would be.
-        $TenantId = $script:Requested
-        $ClientId = '00000000-0000-0000-0000-000000000000'
-        $CertificateThumbprint = '0' * 40
+        $script:TenantId = $script:Requested
+        $script:ClientId = '00000000-0000-0000-0000-000000000000'
+        $script:CertificateThumbprint = '0' * 40
         Mock Connect-MgGraph { }
         Mock Disconnect-MgGraph { }
         Mock Write-Host { }

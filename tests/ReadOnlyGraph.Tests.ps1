@@ -88,7 +88,7 @@ Describe 'Graph access is read-only' {
         $script:PerUserMfaUnreadable = '(unreadable)'
 
         # The Graph SDK is not a test dependency; Mock needs a command to replace.
-        function Invoke-MgGraphRequest { param($Method, $Uri, $Body, $ContentType, $OutputType) }
+        function Invoke-MgGraphRequest { param($Method, $Uri, $Body, $ContentType, $OutputType) $null = $PSBoundParameters }
 
         $script:Sent = [System.Collections.Generic.List[object]]::new()
         Mock Invoke-MgGraphRequest {
