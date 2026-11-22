@@ -343,6 +343,7 @@ One row per tenant in `SweepSummary_<timestamp>.csv`. This is the file the [esta
 | `BlockedAtRetirement` | **Users stopped at sign-in on 2027-02-01.** The column the estate is ranked on. |
 | `BlockedAdminsAtRetirement` | How many of those hold a privileged role |
 | `PasswordlessCapableInScope` | In-scope users who already hold a surviving method |
+| `UsersWithPasskey` / `UsersWithoutPasskey` | Passkey adoption in that tenant, counted over every enabled user rather than over migration candidates, so the figures compare tenant to tenant. See [Who has a passkey](#who-has-a-passkey). |
 | `OldestReportRowUtc` | Age of the oldest registration-report row behind the figures |
 | `AssessmentTimeUtc` | When this tenant was actually assessed. Differs from the file's timestamp for rows `-Resume` carried forward. |
 | `ReportPath` | Where that tenant's per-user export was written |
@@ -606,6 +607,7 @@ Accepts and passes through `-IncludeUnaffected`, `-SkipLegacyPerUserMfa`, `-Excl
 | `MigrationCandidates` | Users in policy scope **or** with a phone method registered |
 | `Critical` / `High` / `Moderate` / `Low` | Risk-band counts across migration candidates |
 | `PasswordlessCapableInScope` | In-scope users who already have a surviving method |
+| `UsersWithPasskey` / `UsersWithoutPasskey` | Passkey adoption across every enabled user, not just migration candidates. With `UsersMissingFromReport` they sum to `EnabledUsersAssessed`. See [Who has a passkey](#who-has-a-passkey). |
 | `BlockedAtRetirement` | **Users stopped at sign-in on 2027-02-01.** A phone is their only method that satisfies MFA. The number to drive to zero. |
 | `BlockedAdminsAtRetirement` | How many of those hold a privileged role |
 | `UnrecognizedMethods` | Any registered method name this tool does not classify. Treated as not surviving, so affected users read as more exposed. |
@@ -631,13 +633,44 @@ Accepts and passes through `-IncludeUnaffected`, `-SkipLegacyPerUserMfa`, `-Excl
 | `PerUserMfaState` | string | `disabled`, `enabled`, or `enforced` from legacy per-user MFA; `(not checked)` if `-SkipLegacyPerUserMfa` was set; `(unreadable)` if Graph would not answer. Always written, so the column never appears and disappears between runs. |
 | `PhoneMethodsRegistered` | string | Semicolon-delimited subset of the retiring methods: `mobilePhone`, `alternateMobilePhone`, `officePhone`, `smsSignIn`, plus the older enum spellings `sms`, `mobileSMS`, `mobileCall`, and `alternateMobileCall`. Both generations are matched, because which one a tenant's report returns is not something to discover on the day. |
 | `AllMethodsRegistered` | string | Every method reported for the user, or `(no row in registration report)` when the report had no data for them. |
+| `PasskeyMethods` | string | Semicolon-delimited subset of `AllMethodsRegistered` that are passkeys, or **blank when the user holds none**. Sort or filter on this column to split the tenant into has-a-passkey and needs-one. Narrower than `IsPasswordlessCapable` on purpose — see [Who has a passkey](#who-has-a-passkey). |
 | `PreferredMethod` | string | What the sign-in prompt defaults to today — a different question from what is merely registered. `(no row in registration report)` mirrors `AllMethodsRegistered`; `None set` means nothing in the classic second-factor list applies (a passkey-only user, typically). See [below](#preferred-method-vs-registered-methods). |
 | `IsPasswordlessCapable` | bool | Reports a passwordless method. This is the mitigating control. |
 | `UserId` | guid | Object ID. Kept last because it is a join key, not something you read. |
 
-Seventeen columns, sorted highest risk first, then admins ahead of standard users, then display name.
+Eighteen columns, sorted highest risk first, then admins ahead of standard users, then display name.
 
 The registration report also returns `isMfaCapable`, `isMfaRegistered`, and a per-row timestamp. None of them changed what anybody did with the file, so they are not written. Evidence age is still reported once, as `OldestReportRowUtc` in the summary, and a user with no report row is called out in `AllMethodsRegistered` and `PreferredMethod` rather than needing a column of its own.
+
+### Who has a passkey
+
+`BlockedAtRetirement` answers "can this user still sign in after the retirement." Driving it to zero does not need passkeys at all — Microsoft Authenticator satisfies it. Passkey adoption is the separate, longer piece of work, and `PasskeyMethods` is the column for it: **blank means no passkey**, so sorting on it splits the tenant in two.
+
+Run it with `-IncludeUnaffected` to get the whole tenant. Without that switch the export only carries migration candidates, so users who are already off phone methods entirely are absent — fine for a lockout queue, wrong for a rollout roster:
+
+```powershell
+.\Get-EntraSmsVoiceMigrationImpact.ps1 -IncludeUnaffected -OutputPath C:\Reports\Contoso-Passkeys.csv
+```
+
+**`PasskeyMethods` is deliberately narrower than `IsPasswordlessCapable`.** Microsoft defines `isPasswordlessCapable` as covering FIDO2, Windows Hello for Business **and** Microsoft Authenticator passwordless phone sign-in together. Two of those three are not passkeys, so reading that flag as a passkey roster marks a rollout finished when it is not — an Entra-joined estate on Windows Hello reads as fully adopted while nobody has registered a passkey. The column counts only what Microsoft documents as a passkey:
+
+| Counted as a passkey | What it is |
+|---|---|
+| `passKeyDeviceBound` | A device-bound passkey |
+| `passKeyDeviceBoundAuthenticator` | A passkey in Microsoft Authenticator |
+| `passKeyDeviceBoundWindowsHello` | A passkey registered through Windows Hello |
+| `passKeySynced` | A synced passkey (iCloud Keychain, Google Password Manager) |
+| `fido2SecurityKey`, `fido` | A FIDO2 security key, which Microsoft documents as a device-bound passkey stored on a physical authenticator |
+
+| Not counted | Why |
+|---|---|
+| `windowsHelloForBusiness` | Passwordless and phishing-resistant, but Graph carries a separate `passKeyDeviceBoundWindowsHello` value for Hello registered *as* a passkey. Folding plain Hello in would report a passkey the user never registered. |
+| `microsoftAuthenticatorPasswordless` | Passwordless phone sign-in. Predates passkeys and is not FIDO2. |
+| `macOsSecureEnclaveKey` | The macOS Platform Credential. Hardware-backed, but Microsoft does not document it as a passkey type. |
+
+Those users show blank in `PasskeyMethods` while still naming their method in `AllMethodsRegistered`, so "no passkey" never reads as "no protection".
+
+A user with no row in the registration report is counted in neither figure. Their passkey state is unknown, not absent, and counting them as needing one would overstate the work by exactly the number of people nobody can assess. `UsersMissingFromReport` reports them, and the identity `UsersWithPasskey + UsersWithoutPasskey + UsersMissingFromReport = EnabledUsersAssessed` holds on every run.
 
 ### Preferred method vs. registered methods
 

@@ -39,6 +39,23 @@ Describe 'Example-MigrationImpact.csv' {
         }
     }
 
+    It 'shows a passwordless user who holds no passkey' {
+        # The row the PasskeyMethods column exists for, carried in the published sample so
+        # the distinction is visible before anybody runs the tool. Windows Hello sets
+        # Microsoft's isPasswordlessCapable flag and is not a passkey, so a roster built
+        # from that flag would count this user as done.
+        $emeka = $script:Assessment | Where-Object UserPrincipalName -eq 'emeka.osondu@fabrikam-example.com'
+        $emeka | Should -Not -BeNullOrEmpty
+        $emeka.AllMethodsRegistered | Should -Match 'windowsHelloForBusiness'
+        $emeka.IsPasswordlessCapable | Should -Be 'True'
+        $emeka.PasskeyMethods | Should -BeExactly ''
+    }
+
+    It 'names the passkey a holder actually has' {
+        $nadia = $script:Assessment | Where-Object UserPrincipalName -eq 'nadia.ferreira@fabrikam-example.com'
+        $nadia.PasskeyMethods | Should -BeExactly 'passKeyDeviceBound'
+    }
+
     It 'leads with the four columns a reader needs before any detail' {
         $columns = $script:Assessment[0].PSObject.Properties.Name
         $columns[0..3] | Should -Be @('Risk', 'Reason', 'NextStep', 'BlockedAtRetirement')
@@ -46,11 +63,13 @@ Describe 'Example-MigrationImpact.csv' {
 
     It 'stays narrow enough to read in a spreadsheet' {
         # The registration report offers more fields than this. Most were dropped because
-        # none of them changed what anybody did with the file; PreferredMethod is the one
+        # none of them changed what anybody did with the file; PreferredMethod is one
         # exception, since a real tenant showed it answers a question BlockedAtRetirement
-        # does not -- what a safe user's sign-in prompt still defaults to.
+        # does not -- what a safe user's sign-in prompt still defaults to. PasskeyMethods
+        # is the other: who holds a passkey is the rollout's own question, and neither the
+        # risk bands nor IsPasswordlessCapable answers it without over-counting.
         $columns = $script:Assessment[0].PSObject.Properties.Name
-        $columns.Count | Should -BeLessOrEqual 17
+        $columns.Count | Should -BeLessOrEqual 18
         $columns | Should -Not -Contain 'IsMfaCapable'
         $columns | Should -Not -Contain 'RegistrationReportLastUpdatedUtc'
     }

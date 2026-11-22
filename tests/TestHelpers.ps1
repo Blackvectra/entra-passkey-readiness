@@ -65,9 +65,9 @@ function Get-MethodListsFromScript {
     .SYNOPSIS
         Returns the assessment script's own method-classification arrays.
     .DESCRIPTION
-        $phoneMethods, $survivingMfaMethods and $nonMfaMethods sit at script scope rather
-        than inside a function, so Import-ScriptFunction cannot reach them and a test that
-        wants them would otherwise retype them. A retyped copy is worse than no test: it
+        $phoneMethods, $survivingMfaMethods, $nonMfaMethods and $passkeyMethods sit at
+        script scope rather than inside a function, so Import-ScriptFunction cannot reach
+        them and a test that wants them would otherwise retype them. A retyped copy is worse than no test: it
         passes while the real list says something else, which is how a method that survives
         the retirement stayed classified as a lockout.
 
@@ -79,7 +79,7 @@ function Get-MethodListsFromScript {
     $ast = [System.Management.Automation.Language.Parser]::ParseFile(
         (Resolve-Path -LiteralPath $Path).Path, [ref]$null, [ref]$null)
 
-    $wanted = 'phoneMethods', 'survivingMfaMethods', 'nonMfaMethods'
+    $wanted = 'phoneMethods', 'survivingMfaMethods', 'nonMfaMethods', 'passkeyMethods'
     $result = @{}
 
     foreach ($name in $wanted) {
@@ -100,5 +100,6 @@ function Get-MethodListsFromScript {
         PhoneMethods        = $result['phoneMethods']
         SurvivingMfaMethods = $result['survivingMfaMethods']
         NonMfaMethods       = $result['nonMfaMethods']
+        PasskeyMethods      = $result['passkeyMethods']
     }
 }
