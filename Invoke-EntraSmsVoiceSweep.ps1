@@ -201,6 +201,16 @@ begin {
         throw 'Parallel sweeps require app-only authentication (-ClientId and -CertificateThumbprint). Interactive sign-in cannot be driven concurrently; run with -ThrottleLimit 1.'
     }
 
+    # A parallel sweep passes each child its parameters through a directory in the shared
+    # temp location, which on Linux and macOS must be owner-only. Before .NET 7 (PowerShell
+    # 7.3) the runtime can neither create one atomically nor set POSIX permissions at all,
+    # so the directory would sit at the umask mode -- readable by every local account --
+    # for the whole sweep. Refuse rather than run exposed. Windows %TEMP% is per-user.
+    if ($ThrottleLimit -gt 1 -and -not $IsWindows -and
+        -not [System.IO.Directory].GetMethod('CreateTempSubdirectory', [type[]]@([string]))) {
+        throw "Parallel sweeps on Linux and macOS need PowerShell 7.3 or later to keep the handoff directory private; this is $($PSVersionTable.PSVersion). Upgrade, or run with -ThrottleLimit 1."
+    }
+
     if (-not (Test-Path -LiteralPath $ReportRoot)) {
         New-Item -ItemType Directory -Path $ReportRoot -Force | Out-Null
     }

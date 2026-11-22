@@ -252,6 +252,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **A local user can no longer hijack a parallel sweep through its handoff directory.** With `-ThrottleLimit` above 1, each child pwsh reads its parameters from a directory in the shared temp location, then signs in with the operator's app certificate. That directory was named `EntraSweep_<yyyyMMdd_HHmmss>` and an existing one was reused, so on a multi-user Linux or macOS host a local account that pre-created the upcoming names received every tenant's parameter file and could swap it to point the certificate at any consented tenant, write the evidence somewhere readable, or forge a clean result. Permission hardening then failed on the foreign directory with only a warning. The directory now has a random name and is always created new; on PowerShell 7.3+ it is created owner-only (`0700`) atomically, including under `-SkipAclHardening`. `SECURITY.md` previously said the directory was restricted to its owner before anything was written into it, which was not true when hardening failed; that row is corrected.
 
+- **A parallel sweep on Linux or macOS now refuses to start on PowerShell 7.0-7.2** instead of running with its handoff directory at the umask mode. Those runtimes cannot set POSIX permissions, so the directory holding every child's tenant, app registration and output path was readable by every local account for the whole sweep, and `SECURITY.md` described it as hardened. The error names the two ways forward: PowerShell 7.3 or later, or `-ThrottleLimit 1`. Sequential sweeps and Windows are unaffected.
+
 ### Planned
 
 - Optional HTML summary output for client-facing delivery.
