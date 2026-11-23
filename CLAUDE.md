@@ -192,6 +192,7 @@ This matters more than it sounds: the project once printed `2027-01-28` as a cus
 
 ## Conventions
 
+- PRs are squash-merged, so a branch's commits reach `main` as one commit. Restart the branch from `main` after its PR merges.
 - **Comments explain why, not what.** The existing comments carry the reasoning behind non-obvious decisions — why exclusions are applied in a second pass, why client secrets are unsupported, why the ticket cap exists. That reasoning is the part a future reader cannot reconstruct from the code. Match that density; it is deliberate.
 - Every control row in `SECURITY.md` names the test that proves it in its **Proven by** column, or says `Not tested`; `tests/RepoHygiene.Tests.ps1` enforces the column and that each named file exists. Update the row when the behaviour changes.
 - Two analyzer rules are excluded, with reasoning written out in `PSScriptAnalyzerSettings.psd1`. Argue for a third there rather than adding an inline suppression.
