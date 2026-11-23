@@ -31,6 +31,20 @@
     Thumbprint of a certificate in the current user or local machine store, registered
     on the app registration. Client secrets are deliberately not supported.
 
+.PARAMETER TenantProfile
+    Name of a Tenant Profile: <name>.profile.psd1 in the Tenant Profile folder. Supplies TenantId,
+    CustomerName, ClientId, CertificateThumbprint, ExcludeUpnPattern and TicketHistoryPath,
+    so switching tenants is one choice. Any of those passed explicitly overrides the
+    Tenant Profile for this run, and -Verbose names each override. A Tenant Profile holds no secrets.
+    See examples/Example.profile.psd1.
+
+.PARAMETER TenantProfilePath
+    Full path to a Tenant Profile file, instead of a name. Cannot be combined with -TenantProfile.
+
+.PARAMETER TenantProfileRoot
+    Folder that holds Tenant Profiles. Defaults to $env:ENTRA_SMSVOICE_PROFILE_ROOT, then
+    a folder named profiles beside this script.
+
 .PARAMETER OutputPath
     CSV output path. Defaults to a timestamped file beside this script, or in the
     current directory when the script is run without a file path (dot-sourced or pasted).
@@ -85,6 +99,10 @@
         -ExcludeUpnPattern '^svc-', '^shared-', '^noreply@'
 
 .EXAMPLE
+    # Assess the tenant saved in profiles\fabrikam.profile.psd1.
+    .\Get-EntraSmsVoiceMigrationImpact.ps1 -TenantProfile fabrikam -HtmlReport
+
+.EXAMPLE
     # Unattended app-only run for a multi-tenant sweep
     .\Get-EntraSmsVoiceMigrationImpact.ps1 -TenantId 00000000-0000-0000-0000-000000000000 `
         -ClientId 11111111-1111-1111-1111-111111111111 `
@@ -119,18 +137,54 @@
 
 [CmdletBinding(DefaultParameterSetName = 'Delegated')]
 param(
+    # Tenant Profile selection. A Tenant Profile supplies the tenant, the customer and how to sign
+    # in; the explicit parameters below override it for one run. The two Tenant Profile sets make
+    # -TenantId, -ClientId and -CertificateThumbprint optional, since the Tenant Profile has them.
+    [Parameter(Mandatory, ParameterSetName = 'TenantProfile')]
+    [ArgumentCompleter({
+            # Positional rather than a param block: the completer contract passes five
+            # arguments and this needs three, and unused named ones fail PSScriptAnalyzer.
+            $wordToComplete = $args[2]; $commandAst = $args[3]; $fakeBoundParameters = $args[4]
+            # Same folder precedence as Get-TenantProfileRoot, inlined because the helper is
+            # not loaded while the shell is completing a command line.
+            $root = if ($fakeBoundParameters.ContainsKey('TenantProfileRoot')) { $fakeBoundParameters.TenantProfileRoot }
+            elseif ($env:ENTRA_SMSVOICE_PROFILE_ROOT) { $env:ENTRA_SMSVOICE_PROFILE_ROOT }
+            else { Join-Path (Split-Path -Parent $commandAst.CommandElements[0].Extent.Text) 'profiles' }
+            if (Test-Path -LiteralPath $root -PathType Container) {
+                Get-ChildItem -LiteralPath $root -File -Filter '*.profile.psd1' |
+                    ForEach-Object { $_.Name -replace '\.profile\.psd1$', '' } |
+                    Where-Object { $_ -like "$wordToComplete*" } |
+                    Sort-Object
+            }
+        })]
+    # The name is validated by Import-TenantProfile (Test-TenantProfileName), the one place
+    # that rule lives; a param attribute cannot call the helper, which loads after binding.
+    [string]$TenantProfile,
+
+    [Parameter(Mandatory, ParameterSetName = 'TenantProfilePath')]
+    [string]$TenantProfilePath,
+
+    [Parameter(ParameterSetName = 'TenantProfile')]
+    [string]$TenantProfileRoot,
+
     [Parameter(ParameterSetName = 'Delegated')]
     [Parameter(Mandatory, ParameterSetName = 'AppOnly')]
+    [Parameter(ParameterSetName = 'TenantProfile')]
+    [Parameter(ParameterSetName = 'TenantProfilePath')]
     [string]$TenantId,
 
     # App-only authentication. Certificate-based only; client secrets are deliberately
     # not supported, because a secret that can read tenant identity posture across 90+
     # customers is a credential that should not exist in a script parameter.
     [Parameter(Mandatory, ParameterSetName = 'AppOnly')]
+    [Parameter(ParameterSetName = 'TenantProfile')]
+    [Parameter(ParameterSetName = 'TenantProfilePath')]
     [ValidatePattern('^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$')]
     [string]$ClientId,
 
     [Parameter(Mandatory, ParameterSetName = 'AppOnly')]
+    [Parameter(ParameterSetName = 'TenantProfile')]
+    [Parameter(ParameterSetName = 'TenantProfilePath')]
     [ValidatePattern('^[0-9a-fA-F]{40}$')]
     [string]$CertificateThumbprint,
 
@@ -278,9 +332,51 @@ $script:PreferredMethodValues = @(
 # referenced by both the SMS and voice method configurations.
 $script:GroupNameCache = @{}
 
+# Tenant Profile loading and tenant-identifier validation live in one shared file that a
+# client can audit once (docs/adr/0001-shared-tenant-profile-helper.md). It only defines functions.
+$tenantProfileHelper = if ($PSScriptRoot) { Join-Path $PSScriptRoot 'EntraSmsVoice.TenantProfile.ps1' } else { $null }
+if (-not $tenantProfileHelper -or -not (Test-Path -LiteralPath $tenantProfileHelper -PathType Leaf)) {
+    throw 'EntraSmsVoice.TenantProfile.ps1 was not found beside this script. Copy it alongside Get-EntraSmsVoiceMigrationImpact.ps1 and run the script from its file, not pasted into a console.'
+}
+. $tenantProfileHelper
+
+# A Tenant Profile fills in whatever was not passed explicitly. An explicit parameter wins, and
+# Merge-TenantProfileSetting says so under -Verbose. Everything downstream keeps reading
+# the same variables it always has, so the rest of the script does not know or care
+# whether a value came from a Tenant Profile.
+$script:TenantProfileName = $null
+if ($PSCmdlet.ParameterSetName -in @('TenantProfile', 'TenantProfilePath')) {
+    $loadedProfile = if ($PSCmdlet.ParameterSetName -eq 'TenantProfile') {
+        Import-TenantProfile -Name $TenantProfile -Root $TenantProfileRoot -SkipAclHardening:$SkipAclHardening
+    }
+    else {
+        Import-TenantProfile -Path $TenantProfilePath -SkipAclHardening:$SkipAclHardening
+    }
+
+    $explicit = @{}
+    foreach ($key in $script:TenantProfileSettingKeys) {
+        if ($PSBoundParameters.ContainsKey($key)) { $explicit[$key] = $PSBoundParameters[$key] }
+    }
+    $settings = Merge-TenantProfileSetting -TenantProfile $loadedProfile -Parameter $explicit -Mode Single
+
+    # Assigned only when set: these variables keep their [ValidatePattern] attributes from
+    # the param block, and an empty string would fail them.
+    $TenantId = $settings.TenantId
+    $CustomerName = $settings.CustomerName
+    if ($settings.ClientId) { $ClientId = $settings.ClientId }
+    if ($settings.CertificateThumbprint) { $CertificateThumbprint = $settings.CertificateThumbprint }
+    if (@($settings.ExcludeUpnPattern).Count -gt 0) { $ExcludeUpnPattern = @($settings.ExcludeUpnPattern) }
+    if ($settings.TicketHistoryPath) { $TicketHistoryPath = $settings.TicketHistoryPath }
+    $script:TenantProfileName = $settings.TenantProfile
+
+    # Merge-TenantProfileSetting has already refused a ClientId without a thumbprint, or the reverse.
+    Write-Host "Using Tenant Profile '$($script:TenantProfileName)' ($CustomerName)." -ForegroundColor Cyan
+}
+
 # Parameter-set detection is done once here rather than via $PSCmdlet, which is not
-# addressable from inside the plain functions below.
-$script:IsAppOnly = $PSBoundParameters.ContainsKey('CertificateThumbprint')
+# addressable from inside the plain functions below. A Tenant Profile can supply the thumbprint,
+# so this asks whether one is set rather than whether one was typed.
+$script:IsAppOnly = -not [string]::IsNullOrEmpty($CertificateThumbprint)
 
 function Get-PropertyValue {
     # StrictMode Latest throws on missing properties. Graph omits properties rather than
@@ -362,58 +458,7 @@ function Get-SignInAge {
     return [int][math]::Max(0, ($Now - $when.ToUniversalTime()).TotalDays)
 }
 
-function Resolve-TenantIdentifier {
-    <#
-    .SYNOPSIS
-        Normalizes whatever somebody actually typed into -TenantId, or explains why it
-        cannot be one.
-    .DESCRIPTION
-        -TenantId wants a tenant GUID or a verified domain. The thing people reach for is
-        the account they sign in with, because that is the credential in their head:
-
-            -TenantId Administrator@contoso.org
-
-        Graph answers that with "Invalid tenant id provided" and a link to a documentation
-        page about finding your tenant ID -- which is a long way round for a fix that is
-        deleting nine characters. The domain half of a UPN is the tenant's domain in every
-        ordinary case, so take it and say so rather than failing.
-
-        Anything that is neither a GUID nor domain-shaped fails here, at parameter time,
-        instead of after a sign-in prompt has already been answered.
-    #>
-    param([AllowNull()][AllowEmptyString()][string]$Value)
-
-    if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
-    $trimmed = $Value.Trim()
-
-    if ($trimmed -match '^[^@\s]+@(?<domain>[^@\s]+)$') {
-        $domain = $Matches.domain
-        Write-Warning "-TenantId was given the sign-in name '$trimmed'. Using the domain '$domain' as the tenant, and you can sign in as that account at the prompt. Pass '$domain' directly, or omit -TenantId altogether, to skip this message."
-        $trimmed = $domain
-    }
-
-    $isGuid = $trimmed -match '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$'
-    # A verified domain always has a dot. onmicrosoft.com tenants included.
-    $isDomain = $trimmed -match '^[A-Za-z0-9][A-Za-z0-9-]*(\.[A-Za-z0-9][A-Za-z0-9-]*)+$'
-    # Entra's own multi-tenant aliases. Allowed because Connect-MgGraph accepts them and
-    # the run reports the tenant it actually reached, so neither can mislabel a report.
-    $isAlias = $trimmed -in @('common', 'organizations')
-
-    if (-not ($isGuid -or $isDomain -or $isAlias)) {
-        throw @"
--TenantId '$Value' is not a tenant identifier.
-
-It wants one of:
-  a tenant GUID       e.g. c0ffee00-1111-4222-8333-444455556666
-  a verified domain   e.g. contoso.org  or  contoso.onmicrosoft.com
-
-Or omit -TenantId entirely and sign in interactively -- the run then reports whichever
-tenant you signed in to, which is the simplest thing to do for a single customer.
-"@
-    }
-
-    return $trimmed
-}
+# Resolve-TenantIdentifier lives in EntraSmsVoice.TenantProfile.ps1, loaded above.
 
 function Get-SafeFileLabel {
     # Anything operator-supplied or tenant-derived is untrusted before it reaches a path:
@@ -444,10 +489,15 @@ function Get-DefaultOutputPath {
         [string]$TenantId,
         [Parameter(Mandatory)][string]$TenantGuid,
         [Parameter(Mandatory)][string]$BaseDirectory,
-        [Parameter(Mandatory)][datetime]$RunDate
+        [Parameter(Mandatory)][datetime]$RunDate,
+        # A Tenant Profile name. When set it names the folder and files instead of the
+        # customer: several tenants of one customer share a CustomerName, and would
+        # otherwise overwrite each other's same-day files (docs/adr/0002-profile-sweep-folders-by-profile-name.md).
+        [string]$TenantProfileName
     )
 
-    $label = Get-SafeFileLabel $CustomerName
+    $label = Get-SafeFileLabel $TenantProfileName
+    if (-not $label) { $label = Get-SafeFileLabel $CustomerName }
     if (-not $label -and $Account -match '@') {
         $label = Get-SafeFileLabel (($Account -split '@')[-1])
     }
@@ -3326,7 +3376,7 @@ if (-not $OutputPath) {
     $OutputPath = Get-DefaultOutputPath -CustomerName $CustomerName `
         -Account ([string](Get-PropertyValue $graphContext 'Account')) `
         -TenantId $TenantId -TenantGuid ([string]$graphContext.TenantId) `
-        -BaseDirectory $baseDirectory -RunDate $assessmentStartUtc
+        -BaseDirectory $baseDirectory -RunDate $assessmentStartUtc -TenantProfileName $script:TenantProfileName
     Write-Host "Writing to: $OutputPath" -ForegroundColor Cyan
 }
 

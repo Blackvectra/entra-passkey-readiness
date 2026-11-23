@@ -22,6 +22,24 @@
 .PARAMETER CurrentPath
     The later assessment CSV.
 
+.PARAMETER TenantProfile
+    Compare the two newest exports for this Tenant Profile instead of naming the files.
+    They are found in <ReportRoot>/<Tenant Profile name>/. Cannot be combined with -BaselinePath
+    or -CurrentPath.
+
+.PARAMETER TenantProfilePath
+    Full path to a Tenant Profile file, instead of a name. Cannot be combined with
+    -TenantProfile, -BaselinePath or -CurrentPath.
+
+.PARAMETER TenantProfileRoot
+    Folder that holds Tenant Profiles. Defaults to $env:ENTRA_SMSVOICE_PROFILE_ROOT, then
+    a folder named profiles beside this script.
+
+.PARAMETER ReportRoot
+    With -TenantProfile or -TenantProfilePath: where the exports were written. Defaults to the reports folder
+    beside the scripts, where a single assessment run writes. For exports from a sweep,
+    pass the sweep's -ReportRoot.
+
 .PARAMETER OutputPath
     Destination CSV for the change report. Defaults to a timestamped file beside the
     current assessment.
@@ -51,15 +69,30 @@
     the difference between a genuinely new account and a renamed one.
 #>
 
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Paths')]
 param(
-    [Parameter(Mandatory)]
+    [Parameter(Mandatory, ParameterSetName = 'Paths')]
     [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })]
     [string]$BaselinePath,
 
-    [Parameter(Mandatory)]
+    [Parameter(Mandatory, ParameterSetName = 'Paths')]
     [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })]
     [string]$CurrentPath,
+
+    [Parameter(Mandatory, ParameterSetName = 'TenantProfile')]
+    # The name is validated by Import-TenantProfile (Test-TenantProfileName), the one place
+    # that rule lives; a param attribute cannot call the helper, which loads after binding.
+    [string]$TenantProfile,
+
+    [Parameter(Mandatory, ParameterSetName = 'TenantProfilePath')]
+    [string]$TenantProfilePath,
+
+    [Parameter(ParameterSetName = 'TenantProfile')]
+    [string]$TenantProfileRoot,
+
+    [Parameter(ParameterSetName = 'TenantProfile')]
+    [Parameter(ParameterSetName = 'TenantProfilePath')]
+    [string]$ReportRoot,
 
     [Parameter()]
     [ValidateNotNullOrEmpty()]
@@ -305,6 +338,29 @@ function Protect-OutputFile {
 # ---------------------------------------------------------------------------
 # Execution
 # ---------------------------------------------------------------------------
+
+# Tenant Profile loading lives in one shared file (docs/adr/0001-shared-tenant-profile-helper.md).
+$tenantProfileHelper = if ($PSScriptRoot) { Join-Path $PSScriptRoot 'EntraSmsVoice.TenantProfile.ps1' } else { $null }
+if (-not $tenantProfileHelper -or -not (Test-Path -LiteralPath $tenantProfileHelper -PathType Leaf)) {
+    throw 'EntraSmsVoice.TenantProfile.ps1 was not found beside this script. Copy it alongside Compare-EntraSmsVoiceAssessment.ps1.'
+}
+. $tenantProfileHelper
+
+if ($PSCmdlet.ParameterSetName -in 'TenantProfile', 'TenantProfilePath') {
+    # Loading the Tenant Profile confirms it exists and is valid, and gives the canonical name
+    # the exports were filed under. Nothing else in it is needed: this script reads files only.
+    $importArgs = if ($PSCmdlet.ParameterSetName -eq 'TenantProfilePath') { @{ Path = $TenantProfilePath } }
+    else { @{ Name = $TenantProfile; Root = $TenantProfileRoot } }
+    $loadedProfile = Import-TenantProfile @importArgs -SkipAclHardening:$SkipAclHardening
+    $exports = @(Find-TenantProfileExport -TenantProfileName $loadedProfile.Name -ReportRoot $ReportRoot)
+    if ($exports.Count -lt 2) {
+        $where = if ($ReportRoot) { $ReportRoot } else { Join-Path $PSScriptRoot 'reports' }
+        throw "Tenant Profile '$($loadedProfile.Name)' has $($exports.Count) assessment export(s) in '$(Join-Path $where $loadedProfile.Name)'; comparing needs two. Run the assessment again, or pass -ReportRoot if the exports came from a sweep."
+    }
+    $CurrentPath = $exports[0]
+    $BaselinePath = $exports[1]
+    Write-Host "Tenant Profile '$($loadedProfile.Name)': comparing $(Split-Path -Leaf $BaselinePath) -> $(Split-Path -Leaf $CurrentPath)" -ForegroundColor Cyan
+}
 
 $baselineRows = @(Import-Csv -LiteralPath $BaselinePath)
 $currentRows = @(Import-Csv -LiteralPath $CurrentPath)

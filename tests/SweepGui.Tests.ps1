@@ -24,7 +24,10 @@ BeforeAll {
             'New-SweepArgumentList'
             'Get-EquivalentCommandLine'
             'Test-CanRunSweepGui'
+            'Get-TenantProfileListing'
+            'Test-TenantProfileSelection'
         ))
+    . (Join-Path (Split-Path -Parent $PSScriptRoot) 'EntraSmsVoice.TenantProfile.ps1')
 
     function New-Entry {
         param([string]$TenantId = '', [string]$CustomerName = '')
@@ -291,5 +294,80 @@ Describe 'Test-CanRunSweepGui' {
 
     It 'allows the window on Windows' {
         (Test-CanRunSweepGui -IsWindowsPlatform $true).CanRun | Should -BeTrue
+    }
+}
+
+Describe 'Tenant Profiles in the window' {
+
+    BeforeAll {
+        $script:ProfileFolder = Join-Path $TestDrive 'profiles'
+        New-Item -ItemType Directory -Path $script:ProfileFolder | Out-Null
+        @"
+@{
+    SchemaVersion         = 1
+    TenantId              = 'contoso-prod.example.com'
+    CustomerName          = 'Contoso'
+    ClientId              = '00000000-1111-4222-8333-444444444444'
+    CertificateThumbprint = 'A1B2C3D4E5F60718293A4B5C6D7E8F9012345678'
+}
+"@ | Set-Content -LiteralPath (Join-Path $script:ProfileFolder 'contoso-prod.profile.psd1')
+        "@{ SchemaVersion = 1; TenantId = 'contoso-dev.example.com'; CustomerName = 'Contoso' }" |
+            Set-Content -LiteralPath (Join-Path $script:ProfileFolder 'contoso-dev.profile.psd1')
+    }
+
+    It 'lists Tenant Profiles with name, customer and tenant, and never the credentials' {
+        $listing = Get-TenantProfileListing -Root $script:ProfileFolder 3>$null
+        $listing.Problem | Should -BeNullOrEmpty
+        $listing.Profiles.Name | Should -Be @('contoso-dev', 'contoso-prod')
+        $listing.Profiles[0].PSObject.Properties.Name |
+            Should -Be @('Selected', 'Name', 'CustomerName', 'TenantId', 'HasAppOnly')
+        ($listing.Profiles | ConvertTo-Json) | Should -Not -Match 'A1B2C3D4|00000000-1111'
+    }
+
+    It 'shows an empty list, not an error, when there is no Tenant Profile folder' {
+        $listing = Get-TenantProfileListing -Root (Join-Path $TestDrive 'none')
+        $listing.Profiles.Count | Should -Be 0
+        $listing.Problem | Should -BeNullOrEmpty
+    }
+
+    It 'reports a Tenant Profile that would fail the sweep' {
+        $bad = Join-Path $TestDrive 'bad'
+        New-Item -ItemType Directory -Path $bad | Out-Null
+        "@{ SchemaVersion = 1; TenantId = 'x.example.com'; CustomerName = 'X'; ClientSecret = 'nope' }" |
+            Set-Content -LiteralPath (Join-Path $bad 'x.profile.psd1')
+        (Get-TenantProfileListing -Root $bad 3>$null).Problem | Should -Match 'not allowed: ClientSecret'
+    }
+
+    It 'requires at least one ticked Tenant Profile' {
+        $rows = @([pscustomobject]@{ Selected = $false; Name = 'a'; HasAppOnly = $true })
+        (Test-TenantProfileSelection -Profiles $rows -SweepWideAppOnly $false).IsValid | Should -BeFalse
+    }
+
+    It 'refuses a parallel run that would fall back to interactive sign-in, naming the Tenant Profile' {
+        $rows = @(
+            [pscustomobject]@{ Selected = $true; Name = 'contoso-prod'; HasAppOnly = $true }
+            [pscustomobject]@{ Selected = $true; Name = 'contoso-dev'; HasAppOnly = $false }
+        )
+        $result = Test-TenantProfileSelection -Profiles $rows -SweepWideAppOnly $false -ThrottleLimit 4
+        $result.IsValid | Should -BeFalse
+        ($result.Problems -join ' ') | Should -Match 'contoso-dev'
+        ($result.Problems -join ' ') | Should -Not -Match 'contoso-prod'
+    }
+
+    It 'allows that parallel run when sweep-wide app-only sign-in fills the gap' {
+        $rows = @([pscustomobject]@{ Selected = $true; Name = 'contoso-dev'; HasAppOnly = $false })
+        (Test-TenantProfileSelection -Profiles $rows -SweepWideAppOnly $true -ThrottleLimit 4).Names |
+            Should -Be @('contoso-dev')
+    }
+
+    It 'builds Tenant Profile arguments the sweep accepts, and an equivalent command line' {
+        $arguments = New-SweepArgumentList -TenantProfile 'contoso-prod', 'contoso-dev' -ReportRoot 'D:\out'
+        $arguments.Keys | Should -Not -Contain 'TenantListPath'
+        $arguments.TenantProfile | Should -Be @('contoso-prod', 'contoso-dev')
+        Get-EquivalentCommandLine -Arguments $arguments |
+            Should -Be '.\Invoke-EntraSmsVoiceSweep.ps1 -TenantProfile contoso-prod,contoso-dev -ReportRoot D:\out'
+
+        $sweep = (Get-Command (Get-SweepScriptPath)).Parameters
+        foreach ($key in $arguments.Keys) { $sweep.Keys | Should -Contain $key }
     }
 }

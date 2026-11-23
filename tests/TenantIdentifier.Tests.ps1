@@ -15,7 +15,7 @@
 
 BeforeAll {
     . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
-    . (Import-ScriptFunction -Path (Get-AssessmentScriptPath) -Name 'Resolve-TenantIdentifier')
+    . (Join-Path (Split-Path -Parent $PSScriptRoot) 'EntraSmsVoice.TenantProfile.ps1')
 }
 
 Describe 'Resolve-TenantIdentifier' {
