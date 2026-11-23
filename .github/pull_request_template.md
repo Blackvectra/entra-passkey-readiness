@@ -15,10 +15,12 @@ it from the fictional samples in examples/.
 ## How it was verified
 
 <!-- What you actually ran. "Ran the tests" is enough if you ran them; say so if you
-     could not test against a live tenant, and say what that leaves unverified. -->
+     could not test against a live tenant, and say what that leaves unverified.
+     Pushed more commits after opening the PR? Update this section and "What this
+     changes" to match before asking for review. -->
 
-- [ ] `Invoke-Pester ./tests` passes
-- [ ] `Invoke-ScriptAnalyzer -Path . -Recurse -Settings ./PSScriptAnalyzerSettings.psd1` is clean
+- [ ] `./tools/Invoke-Checks.ps1` exits 0 (module check, analyzer clean, full suite passing)
+- [ ] Every new security test was run against the code before the fix and failed. A test that cannot fail proves nothing; say how you saw it fail.
 - [ ] Tested against a real tenant <!-- if not, say so above and note what is unverified -->
 
 ## Checklist

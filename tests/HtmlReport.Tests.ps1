@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+#Requires -Version 7.4
 #Requires -Modules Pester
 
 # Covers the client-facing HTML report.
@@ -17,6 +17,7 @@ BeforeAll {
             'Get-RemediationStep'
             'Get-ExecutiveSummary'
             'New-HtmlReport'
+            'New-ProtectedDirectory', 'Write-ProtectedFile'
         ))
 
     # New-HtmlReport reads this when deciding whether to harden the output file. It is
@@ -165,7 +166,26 @@ Describe 'New-HtmlReport' {
         }
 
         It 'declares a content security policy that blocks execution and exfiltration' {
-            $script:Html | Should -Match "default-src 'none'"
+            # Read the policy from the meta tag in <head>, not from anywhere in the file: the
+            # same text in a display name in the body would enforce nothing.
+            $head = [regex]::Match($script:Html, '(?is)<head>(.*?)</head>').Groups[1].Value
+            $meta = [regex]::Matches($head, '(?i)<meta\s+http-equiv="Content-Security-Policy"\s+content="([^"]*)"')
+            $meta.Count | Should -Be 1 -Because 'exactly one policy, so no second tag can widen it'
+
+            $policy = @{}
+            foreach ($d in $meta[0].Groups[1].Value -split ';') {
+                $parts = $d.Trim() -split '\s+'
+                if ($parts[0]) { $policy[$parts[0].ToLowerInvariant()] = @($parts | Select-Object -Skip 1) }
+            }
+            $policy['default-src'] | Should -Be @("'none'") -Because 'scripts, fetches, frames and fonts all fall back to it'
+            $policy['form-action'] | Should -Be @("'none'") -Because 'form-action does not fall back to default-src'
+            $policy['base-uri'] | Should -Be @("'none'") -Because 'base-uri does not fall back to default-src'
+            foreach ($widening in 'script-src', 'script-src-elem', 'script-src-attr', 'connect-src', 'frame-src', 'object-src') {
+                $policy.ContainsKey($widening) | Should -BeFalse -Because "$widening would override default-src 'none'"
+            }
+            $meta[0].Groups[1].Value | Should -Not -Match "(?i)'unsafe-eval'|https?:|\*"
+
+            $head | Should -Match '(?i)<meta\s+name="referrer"\s+content="no-referrer"'
         }
 
         It 'encodes a display name containing markup instead of emitting it' {
