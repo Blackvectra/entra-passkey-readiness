@@ -355,10 +355,14 @@ Describe 'The samples are reproducible' {
 
         $process.ExitCode | Should -Be 0 -Because 'the sample generator must run cleanly'
 
-        foreach ($sample in $samples) {
-            (Get-FileHash -LiteralPath $sample -Algorithm SHA256).Hash |
-                Should -Be $before[$sample] -Because "$(Split-Path -Leaf $sample) changed with no change to its inputs"
-        }
+        # Collected rather than asserted one by one: a Should ends the It at the first
+        # mismatch, and on a CI-only platform that turns one failing run into several.
+        $changed = @(foreach ($sample in $samples) {
+                if ((Get-FileHash -LiteralPath $sample -Algorithm SHA256).Hash -ne $before[$sample]) {
+                    Split-Path -Leaf $sample
+                }
+            })
+        $changed | Should -BeNullOrEmpty -Because "these changed with no change to their inputs: $($changed -join ', ')"
     }
 }
 

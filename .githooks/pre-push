@@ -1,0 +1,5 @@
+#!/bin/sh
+# Runs the same checks CI runs before anything leaves the machine.
+# Enable once per clone: git config core.hooksPath .githooks
+# Bypass in an emergency with: git push --no-verify
+exec pwsh -NoProfile -File "$(git rev-parse --show-toplevel)/tools/Invoke-Checks.ps1"

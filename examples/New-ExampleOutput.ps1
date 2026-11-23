@@ -409,8 +409,24 @@ New-EstateReportHtml -Rollup (Get-EstateRollup -Rows $estateRows -GeneratedAt ([
     -GeneratedAt ([datetime]'2026-08-18T09:00:00') -SourceName 'SweepSummary_20260818_090000.csv' |
     Out-File -LiteralPath $estatePath -Encoding utf8 -Force
 
+$generated = @($assessmentPath, $actionListPath, $noPasskeyPath, $campaignPath, $ticketPath, $reportPath, $estatePath)
+
+# Export-Csv ends records with [Environment]::NewLine, so the same inputs give CRLF on
+# Windows and LF elsewhere. A real export may keep its platform's endings; the published
+# samples are compared byte for byte, so they are pinned to LF wherever they are generated.
+foreach ($path in $generated) {
+    $bytes = [System.IO.File]::ReadAllBytes($path)
+    $text = [System.Text.Encoding]::UTF8.GetString($bytes)
+    if ($text.Contains("`r`n")) {
+        $preamble = [System.Text.Encoding]::UTF8.GetPreamble()
+        $hasBom = $bytes.Length -ge 3 -and $bytes[0] -eq $preamble[0] -and $bytes[1] -eq $preamble[1] -and $bytes[2] -eq $preamble[2]
+        $body = [System.Text.Encoding]::UTF8.GetString($bytes, $(if ($hasBom) { 3 } else { 0 }), $bytes.Length - $(if ($hasBom) { 3 } else { 0 }))
+        [System.IO.File]::WriteAllText($path, $body.Replace("`r`n", "`n"), [System.Text.UTF8Encoding]::new($hasBom))
+    }
+}
+
 Write-Host 'Regenerated:' -ForegroundColor Green
-foreach ($path in @($assessmentPath, $actionListPath, $noPasskeyPath, $campaignPath, $ticketPath, $reportPath, $estatePath)) {
+foreach ($path in $generated) {
     Write-Host "  $path"
 }
 $rows | Format-Table Risk, DisplayName, PerUserMfaState, BlockedAtRetirement -AutoSize

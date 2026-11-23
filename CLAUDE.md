@@ -34,8 +34,8 @@ Install-Module Pester -MinimumVersion 5.5.0 -Scope CurrentUser -SkipPublisherChe
 Install-Module PSScriptAnalyzer -Scope CurrentUser
 Install-Module Microsoft.Graph.Authentication -Scope CurrentUser   # live runs only
 
-# Full suite (what CI runs)
-Invoke-Pester ./tests
+# Everything CI runs: module check, analyzer, full suite. Exit 0 is the only green.
+./tools/Invoke-Checks.ps1
 
 # One file, with per-test output
 Invoke-Pester -Path ./tests/RiskAssessment.Tests.ps1 -Output Detailed
@@ -44,19 +44,12 @@ Invoke-Pester -Path ./tests/RiskAssessment.Tests.ps1 -Output Detailed
 # so pattern-match against the Describe name as written in the file)
 Invoke-Pester -Path ./tests -FullNameFilter '*Test-OnlyPhoneBasedMfa*'
 
-# Analyzer (CI fails on any finding at Error or Warning)
-Invoke-ScriptAnalyzer -Path . -Recurse -Settings ./PSScriptAnalyzerSettings.psd1
-
 # Regenerate the published samples — required if you change the risk model,
 # the remediation wording, or any CSV schema
 ./examples/New-ExampleOutput.ps1
 ```
 
-**Confirm both modules are present before trusting either result.** `Invoke-ScriptAnalyzer` with the module absent throws `CommandNotFoundException`, and depending on how it is invoked that can look indistinguishable from a clean run. Run the analyzer standalone and check its findings directly — never pipe it through a grep filter that could swallow output.
-
-```powershell
-Get-Module -ListAvailable Pester, PSScriptAnalyzer | Select-Object Name, Version
-```
+`tools/Invoke-Checks.ps1` is what CI and the `.githooks/pre-push` hook run (enable with `git config core.hooksPath .githooks`). It throws when either module is missing, because an absent analyzer can otherwise look like a clean run. Use it, not hand-run `Invoke-ScriptAnalyzer`, as the verdict before committing.
 
 PowerShell 7.4+, enforced by `#Requires`. `Microsoft.Graph.Authentication` is the only runtime dependency.
 
@@ -199,6 +192,7 @@ This matters more than it sounds: the project once printed `2027-01-28` as a cus
 
 ## Conventions
 
+- PRs are squash-merged, so a branch's commits reach `main` as one commit. Restart the branch from `main` after its PR merges.
 - **Comments explain why, not what.** The existing comments carry the reasoning behind non-obvious decisions — why exclusions are applied in a second pass, why client secrets are unsupported, why the ticket cap exists. That reasoning is the part a future reader cannot reconstruct from the code. Match that density; it is deliberate.
 - Every control row in `SECURITY.md` names the test that proves it in its **Proven by** column, or says `Not tested`; `tests/RepoHygiene.Tests.ps1` enforces the column and that each named file exists. Update the row when the behaviour changes.
 - Two analyzer rules are excluded, with reasoning written out in `PSScriptAnalyzerSettings.psd1`. Argue for a third there rather than adding an inline suppression.

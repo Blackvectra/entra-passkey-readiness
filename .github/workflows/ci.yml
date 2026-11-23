@@ -22,78 +22,49 @@ permissions:
   contents: read
 
 jobs:
-  analyze:
-    name: PSScriptAnalyzer
-    runs-on: ubuntu-latest
+  checks:
+    # Both legs run tools/Invoke-Checks.ps1, the same command contributors and the
+    # pre-push hook run, so CI cannot drift from the local definition of green.
+    # Windows is a leg in its own right, not a courtesy: the operator runs this tool
+    # there, and Protect-OutputFile's NTFS ACL path is only exercised on Windows.
+    name: Checks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        shell: pwsh
     steps:
       - uses: actions/checkout@v7
 
       - name: Cache PowerShell modules
         uses: actions/cache@v6
         with:
-          path: ~/.local/share/powershell/Modules
-          key: psmodules-analyzer-${{ runner.os }}-v1
+          # CurrentUser module path differs per OS.
+          path: ${{ runner.os == 'Windows' && '~/Documents/PowerShell/Modules' || '~/.local/share/powershell/Modules' }}
+          key: psmodules-checks-${{ runner.os }}-v1
 
-      - name: Install PSScriptAnalyzer
-        shell: pwsh
+      - name: Install modules
         run: |
-          if (-not (Get-Module -ListAvailable PSScriptAnalyzer)) {
-              Install-Module PSScriptAnalyzer -Scope CurrentUser -Force -ErrorAction Stop
-          }
-
-      - name: Analyze
-        shell: pwsh
-        run: |
-          $findings = Invoke-ScriptAnalyzer -Path . -Recurse `
-              -Settings ./PSScriptAnalyzerSettings.psd1
-          if ($findings) {
-              $findings | Format-Table Severity, RuleName, ScriptName, Line, Message -AutoSize -Wrap | Out-String -Width 200 | Write-Host
-              # Annotate the diff so findings land on the changed lines in the PR.
-              foreach ($f in $findings) {
-                  $level = if ($f.Severity -eq 'Error') { 'error' } else { 'warning' }
-                  "::$level file=$($f.ScriptPath -replace [regex]::Escape($PWD.Path + '/')),line=$($f.Line)::$($f.RuleName): $($f.Message)"
-              }
-              throw "PSScriptAnalyzer reported $($findings.Count) finding(s)."
-          }
-          Write-Host 'No findings.'
-
-  test:
-    name: Pester
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Cache PowerShell modules
-        uses: actions/cache@v6
-        with:
-          path: ~/.local/share/powershell/Modules
-          key: psmodules-pester-${{ runner.os }}-v1
-
-      - name: Install Pester
-        shell: pwsh
-        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
           if (-not (Get-Module -ListAvailable Pester | Where-Object Version -ge '5.5.0')) {
-              Install-Module Pester -MinimumVersion 5.5.0 -Scope CurrentUser -Force -SkipPublisherCheck -ErrorAction Stop
+            Install-Module Pester -MinimumVersion 5.5.0 -Scope CurrentUser -Force -SkipPublisherCheck
+          }
+          if (-not (Get-Module -ListAvailable PSScriptAnalyzer)) {
+            Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
           }
 
-      - name: Run tests
-        shell: pwsh
-        run: |
-          $config = New-PesterConfiguration
-          $config.Run.Path = './tests'
-          $config.Run.Throw = $true
-          $config.Output.Verbosity = 'Detailed'
-          $config.TestResult.Enabled = $true
-          $config.TestResult.OutputPath = './testResults.xml'
-          Invoke-Pester -Configuration $config
+      - name: Run checks
+        run: ./tools/Invoke-Checks.ps1 -TestResultPath ./testResults.xml
 
-      - name: Publish test results
+      - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: pester-results
-          path: ./testResults.xml
-          if-no-files-found: warn
+          name: pester-results-${{ matrix.os }}
+          path: testResults.xml
 
   redaction:
     # "The one rule" in CONTRIBUTING.md: never commit live tenant evidence. The
