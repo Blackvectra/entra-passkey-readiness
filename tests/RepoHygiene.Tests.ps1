@@ -323,3 +323,46 @@ Describe 'Security claims and source hygiene' {
     }
 }
 
+Describe 'Line endings and file modes survive a commit' {
+    # Both guard properties that only another platform would otherwise reveal: CRLF only
+    # bites on a Windows checkout, and a missing executable bit only on Linux and macOS.
+
+    BeforeAll {
+        $script:TrackedFiles = @(git -C $script:RepoRoot ls-files -s)
+    }
+
+    It 'pins LF for every text file in .gitattributes' {
+        $attributes = Join-Path $script:RepoRoot '.gitattributes'
+        $attributes | Should -Exist
+        (Get-Content -LiteralPath $attributes) -match '^\*\s+.*\beol=lf\b' |
+            Should -Not -BeNullOrEmpty -Because 'here-strings take the line endings of the checkout'
+    }
+
+    It 'has no CRLF in scripts or published samples' {
+        $paths = @(git -C $script:RepoRoot ls-files -- '*.ps1' '*.psm1' '*.psd1' 'examples/*')
+        $paths | Should -Not -BeNullOrEmpty
+        $crlf = @(foreach ($path in $paths) {
+                $bytes = [System.IO.File]::ReadAllBytes((Join-Path $script:RepoRoot $path))
+                for ($i = 0; $i -lt $bytes.Length - 1; $i++) {
+                    if ($bytes[$i] -eq 13 -and $bytes[$i + 1] -eq 10) { $path; break }
+                }
+            })
+        $crlf | Should -BeNullOrEmpty -Because "these contain CRLF:`n$($crlf -join "`n")"
+    }
+
+    It 'commits the documented ./ entry points as executable' {
+        # CLAUDE.md, the README and the pre-push hook all run these as ./path.
+        $expected = @('tools/Invoke-Checks.ps1', '.githooks/pre-push')
+        $notExecutable = @(foreach ($path in $expected) {
+                $entry = $script:TrackedFiles | Where-Object { ($_ -split "`t", 2)[1] -eq $path }
+                if (-not $entry -or -not $entry.StartsWith('100755')) { $path }
+            })
+        $notExecutable | Should -BeNullOrEmpty -Because "git must store these as 100755: $($notExecutable -join ', ')"
+    }
+
+    It 'gives the executable PowerShell entry point a shebang' {
+        # Without one, bash runs the file as a shell script and fails on the comment block.
+        $first = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'tools/Invoke-Checks.ps1') -TotalCount 1
+        $first | Should -Be '#!/usr/bin/env pwsh'
+    }
+}

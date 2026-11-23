@@ -1029,11 +1029,11 @@ These are properties of the data sources, not defects. Read them before presenti
 Install-Module Pester -MinimumVersion 5.5.0 -Scope CurrentUser -SkipPublisherCheck
 Install-Module PSScriptAnalyzer -Scope CurrentUser
 
-Invoke-Pester ./tests
-Invoke-ScriptAnalyzer -Path . -Recurse -Settings ./PSScriptAnalyzerSettings.psd1
+./tools/Invoke-Checks.ps1   # module check, analyzer, full suite
+git config core.hooksPath .githooks   # optional: run it before every push
 ```
 
-CI runs both on every push and pull request and fails on any finding.
+CI runs the same script on Linux and Windows on every push and pull request, and fails on any finding.
 
 The suite covers the risk model, AMP include/exclude resolution against a mocked Graph, both output-sanitization controls, the executive summary arithmetic, and the generated report's security properties. It also covers the repository's own structure: broken relative documentation links, `.gitignore` negations that no longer match where a file lives, and anything export-shaped committed outside `examples/` all fail the build. That last group is the defect class that shipped in 1.0.0 and was invisible to human review.
 
