@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+#Requires -Version 7.4
 #Requires -Modules Pester
 
 # Covers the generated remediation script.
@@ -21,6 +21,7 @@ BeforeAll {
     . (Import-ScriptFunction -Path (Get-AssessmentScriptPath) -Name @(
             'Get-PropertyValue'
             'New-RemediationScript'
+            'New-ProtectedDirectory', 'Write-ProtectedFile'
         ))
 
     $script:SignInAgeNever = '(none recorded)'

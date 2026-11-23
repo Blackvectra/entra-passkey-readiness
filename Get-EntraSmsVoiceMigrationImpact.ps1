@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+#Requires -Version 7.4
 <#
 .SYNOPSIS
     Read-only assessment of users affected by Microsoft's Entra SMS/voice retirement and passkey migration.
@@ -54,6 +54,12 @@
     migration candidates: users in SMS/voice policy scope or users with a
     phone-based authentication method registered.
 
+    Set this when the question is passkey adoption rather than lockout risk. A user
+    already off phone methods entirely is not a migration candidate and so is absent
+    from the default export, which is correct for a work queue and wrong for counting
+    who still needs a passkey. The PasskeyMethods column is blank for a user holding
+    none, so one sort on it splits the tenant.
+
 .PARAMETER HtmlReport
     Also writes a self-contained HTML client report beside the CSVs. Off by default: a run
     produces spreadsheets, which is what gets attached to a ticket and worked from.
@@ -108,7 +114,10 @@
       Policy.Read.All, AuditLog.Read.All, User.Read.All, GroupMember.Read.All
 
     Recommended least-privileged Entra role for the signed-in operator:
-      Global Reader or Security Reader
+      Global Reader. Security Reader works unless a group holds a directory role: Microsoft
+      requires Global Reader or Privileged Role Administrator to read PIM for Groups
+      eligibility on a role-assignable group, and a refused read withholds the
+      actionable no-passkey exports.
 
     Data source limitations:
       - userRegistrationDetails does not return disabled users. This script reads
@@ -513,12 +522,31 @@ function Connect-AssessmentGraph {
     #
     # Least-privilege read permissions only. Nothing here grants write access to any object.
     # Delegated: these are requested as scopes.
-    # App-only: the same four must be granted as APPLICATION permissions on the app registration.
+    # App-only: the same six must be granted as APPLICATION permissions on the app registration.
     $requiredScopes = @(
         'Policy.Read.All'
         'AuditLog.Read.All'
         'User.Read.All'
         'GroupMember.Read.All'
+
+        # Reads who holds a Microsoft Entra directory role, so privileged accounts can be
+        # held out of the bulk registration exports and worked separately.
+        #
+        # One scope rather than two: Microsoft documents RoleManagement.Read.Directory as
+        # the least-privileged permission for /roleManagement/directory/roleAssignments,
+        # and it also satisfies the role eligibility instances, where the narrower
+        # RoleEligibilitySchedule.Read.Directory would otherwise be a second consent item
+        # for the same question. Read-only, and it grants nothing over any other object.
+        'RoleManagement.Read.Directory'
+
+        # PIM for Groups: who is ELIGIBLE to become a member or owner of a group that holds
+        # a directory role. Microsoft documents this as the least-privileged permission for
+        # /identityGovernance/privilegedAccess/group/eligibilityScheduleInstances, and no
+        # scope already requested satisfies that endpoint. Read-only. For role-assignable
+        # groups the signed-in user must also be Global Reader or Privileged Role
+        # Administrator -- Security Reader alone is refused, and a refusal withholds the
+        # actionable exports rather than guessing.
+        'PrivilegedEligibilitySchedule.Read.AzureADGroup'
     )
 
     if ($script:IsAppOnly) {
@@ -535,7 +563,13 @@ function Connect-AssessmentGraph {
 
         # A stale session from a previous tenant is the most common cross-tenant reporting error,
         # so an explicit -TenantId must match the live context or a fresh sign-in is forced.
-        $correctTenant = (-not $TenantId) -or ($context -and (($context.TenantId -eq $TenantId) -or ($context.Account -like "*@$TenantId")))
+        #
+        # Matched on the tenant ID only. A domain passed as -TenantId cannot be compared with
+        # the context's tenant GUID, so it always signs in fresh. It used to be accepted when
+        # the signed-in account's name ended in that domain -- but a guest (B2B) session is
+        # exactly that: alice@contoso.com signed in to a DIFFERENT customer's tenant. Reusing
+        # it read that other tenant and filed the result under this customer's name.
+        $correctTenant = (-not $TenantId) -or ($context -and ($context.TenantId -eq $TenantId))
 
         if (-not ($hasScopes -and $correctTenant)) {
             $connect = @{ Scopes = $requiredScopes; NoWelcome = $true }
@@ -615,6 +649,20 @@ function Get-GraphCollection {
     $next = $Uri
     $page = 0
 
+    # Where every following page must come from: the same HTTPS host and port as the first
+    # request, which this script builds from $script:GraphBase. A next-page link is a value
+    # the server supplies and is followed verbatim, so it is checked rather than trusted.
+    #
+    # Not a credential question. Microsoft.Graph.Authentication 2.41.2 was observed to
+    # attach the token only to the Graph hosts it knows, to refuse plain HTTP to them, and
+    # to drop the token when a Graph response redirects elsewhere. It does still SEND the
+    # request to any other host, though, and whatever comes back would be read here as this
+    # tenant's data -- an empty role list from the wrong server would make everyone look
+    # unprivileged. Matching the first request's origin rather than a hard-coded host keeps
+    # this correct for whichever Graph endpoint the base URI names.
+    $origin = $null
+    [void][System.Uri]::TryCreate($Uri, [System.UriKind]::Absolute, [ref]$origin)
+
     while ($next) {
         if (-not $seen.Add([string]$next)) {
             throw "Graph pagination looped: $next was returned as the next page of itself. Aborting rather than reporting a partial result as complete."
@@ -629,6 +677,19 @@ function Get-GraphCollection {
         if ($response.PSObject.Properties.Name -contains 'value') {
             foreach ($item in @($response.value)) { $items.Add($item) }
             $next = Get-PropertyValue $response '@odata.nextLink'
+
+            if ($next) {
+                $candidate = $null
+                $sameOrigin = $origin -and $origin.Scheme -eq 'https' -and
+                    [System.Uri]::TryCreate([string]$next, [System.UriKind]::Absolute, [ref]$candidate) -and
+                    $candidate.Scheme -eq 'https' -and
+                    [string]::IsNullOrEmpty($candidate.UserInfo) -and
+                    [string]::Equals($candidate.Host, $origin.Host, [System.StringComparison]::OrdinalIgnoreCase) -and
+                    $candidate.Port -eq $origin.Port
+                if (-not $sameOrigin) {
+                    throw "Graph returned a next page at an unexpected destination ($next) for $Uri. Only HTTPS on the same host as the first request is followed; aborting rather than reading another server's reply as this tenant's data."
+                }
+            }
         }
         else {
             $items.Add($response)
@@ -1010,6 +1071,315 @@ function Get-MethodPolicyScope {
     return [PSCustomObject]$result
 }
 
+function Get-PrivilegeReadHint {
+    # Turns a failed privilege read into something an operator can act on. A bare
+    # "Forbidden" in a warning tells nobody which consent is missing, and this warning is
+    # the thing standing between a run and a published campaign list, so it has to say what
+    # to fix.
+    param(
+        [Parameter(Mandatory)]$ErrorRecord,
+        # The consent the failed read needs, so the message names the right one.
+        [string]$Scope = 'RoleManagement.Read.Directory',
+        [string]$RoleNote = 'Global Reader or Security Reader can'
+    )
+
+    $status = $null
+    $responseProperty = $ErrorRecord.Exception.PSObject.Properties['Response']
+    if ($responseProperty -and $responseProperty.Value) { $status = [int]$responseProperty.Value.StatusCode }
+
+    $message = [string]$ErrorRecord.Exception.Message
+
+    switch ($status) {
+        401 { return "$message -- the sign-in is not authorized for this read. Reconnect and consent to $Scope." }
+        403 { return "$message -- $Scope was not consented, or the signed-in role cannot make this read. $RoleNote; a Global Administrator may need to grant admin consent for the scope first." }
+        404 { return "$message -- the endpoint was not found, which usually means this cloud or tenant does not expose it." }
+        default {
+            if ($status) { return "$message (HTTP $status)" }
+            return $message
+        }
+    }
+}
+
+function Get-PrivilegedUserSet {
+    # Which enabled users hold a Microsoft Entra directory role, and -- just as important --
+    # whether that question was answered completely.
+    #
+    # Privileged accounts are deliberately held out of the actionable no-passkey exports:
+    # they are a separate, hand-worked remediation track, not campaign fodder. That makes
+    # this function a gate on who gets targeted, and a false negative here is the worst
+    # outcome available: a Global Administrator quietly swept into a bulk registration
+    # campaign because one Graph read came back empty for the wrong reason. So the
+    # discovery status is part of the return value, and an incomplete read is never
+    # flattened into "nobody else is privileged".
+    #
+    # Detection is by role assignment only. Never by naming pattern, job title, or an
+    # "admin" substring in a UPN -- a break-glass account called svc-monitor is privileged
+    # and a mailbox called admin-reception is not, and a tool that guesses from strings gets
+    # both wrong in the direction that matters.
+    #
+    # COVERAGE, which the console, the README and the HTML report all restate because the
+    # gaps change what the exports mean:
+    #
+    #   Covered  Active roles assigned directly to a user.
+    #            /roleManagement/directory/roleAssignments
+    #   Covered  Active roles assigned to a role-assignable group, expanded transitively to
+    #            its enabled user members.
+    #   Covered  PIM-eligible directory roles held directly by a user.
+    #            /roleManagement/directory/roleEligibilityScheduleInstances
+    #   Covered  PIM for Groups: a user eligible to become a member OR owner of any group
+    #            found holding a role above. Needs its own read-only scope,
+    #            PrivilegedEligibilitySchedule.Read.AzureADGroup, and for role-assignable
+    #            groups a Global Reader or Privileged Role Administrator sign-in.
+    #            /identityGovernance/privilegedAccess/group/eligibilityScheduleInstances
+    #
+    #   Held     Standing owners of a group that is itself the principal of an active or
+    #   back     PIM-eligible role. NOT a role assignment and never labeled as one: a
+    #            conservative campaign exclusion, recorded as RoleHoldingGroupOwner.
+    #            /groups/{id}/owners, under the GroupMember.Read.All already requested.
+    #
+    # Any of these reads failing withholds the actionable exports. Nothing is assumed
+    # nonprivileged because a read was refused.
+    param(
+        # Bounds the result to users this run actually assessed: a role assigned to a
+        # service principal, a disabled account, or a deleted object is not a row in any
+        # export and must not be counted as an omitted user.
+        [Parameter(Mandatory)][hashtable]$EnabledUserIndex,
+
+        # Injected so the expired/future-dated assignment arithmetic is testable and a
+        # sample regeneration is reproducible. UTC, matching the timestamps Graph returns.
+        [datetime]$Now = [datetime]::UtcNow
+    )
+
+    $privileged = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $sources = @{}
+    $gaps = [System.Collections.Generic.List[string]]::new()
+    $roleGroups = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    # The narrower set: groups that are themselves the principal of an active or PIM-eligible
+    # directory role assignment. Only these have their standing owners held back. A group
+    # merely eligible to JOIN one of them is followed for eligibility, but its owners are
+    # not read -- that would start widening into owners of owners of anything nearby.
+    $roleHoldingGroups = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $groupQueue = [System.Collections.Generic.Queue[string]]::new()
+
+    # Records how each user was found, so the assessment row can say why a name was held
+    # back rather than leaving the operator to guess. A user found twice keeps both labels
+    # and is still one user in the set -- the HashSet is what makes the count idempotent.
+    $noteSource = {
+        param([string]$UserId, [string]$Source)
+        if (-not $UserId) { return }
+        [void]$privileged.Add($UserId)
+        if ($sources.ContainsKey($UserId)) {
+            if ($sources[$UserId] -notmatch [regex]::Escape($Source)) {
+                $sources[$UserId] = (@($sources[$UserId], $Source) | Sort-Object -Unique) -join ' + '
+            }
+        }
+        else { $sources[$UserId] = $Source }
+    }
+
+    # A principal that is not one of this run's enabled users may still be a group carrying
+    # the role. Expanded transitively, because a role-assignable group can nest.
+    #
+    # A 404 is an answer, not a gap: the principal was a service principal, or a user who
+    # is disabled or deleted, and none of those is a row in any export. Anything else --
+    # 403, 500, a throttle that outlived its retries -- is a gap, because the members of
+    # that group are exactly the people who would otherwise be targeted.
+    $expandGroup = {
+        param([string]$PrincipalId, [string]$Source)
+
+        try {
+            $members = Get-GraphCollection -Uri "$script:GraphBase/groups/$([uri]::EscapeDataString($PrincipalId))/transitiveMembers/microsoft.graph.user?`$select=id&`$top=999"
+        }
+        catch {
+            $status = $null
+            $responseProperty = $_.Exception.PSObject.Properties['Response']
+            if ($responseProperty -and $responseProperty.Value) { $status = [int]$responseProperty.Value.StatusCode }
+            if ($status -eq 404) { return }
+
+            $gaps.Add("Members of role-holding group $PrincipalId could not be read: $(Get-PrivilegeReadHint -ErrorRecord $_)")
+            return
+        }
+
+        # Reached only when the principal really was a group. Remembered so its PIM for
+        # Groups eligibility can be read below: somebody eligible to JOIN this group is one
+        # activation away from the role it carries.
+        if (-not $roleGroups.Contains($PrincipalId)) { [void]$roleGroups.Add($PrincipalId); $groupQueue.Enqueue($PrincipalId) }
+        if ($Source -in @('Active role via group', 'PIM-eligible role via group')) { [void]$roleHoldingGroups.Add($PrincipalId) }
+
+        foreach ($member in $members) {
+            $memberId = [string](Get-PropertyValue $member 'id')
+            if ($EnabledUserIndex.ContainsKey($memberId)) { & $noteSource $memberId $Source }
+        }
+    }
+
+    # --- Active assignments. Unaffected by PIM licensing: permanent active assignments
+    #     exist in every tenant, so a failure here is never "this tenant has no PIM".
+    try {
+        $assignments = Get-GraphCollection -Uri "$script:GraphBase/roleManagement/directory/roleAssignments?`$select=principalId,roleDefinitionId&`$top=999"
+        foreach ($assignment in $assignments) {
+            $principalId = [string](Get-PropertyValue $assignment 'principalId')
+            # A record with no principal is malformed rather than empty. Counting it as
+            # nothing would quietly drop a real assignment, so it is a gap.
+            if ([string]::IsNullOrWhiteSpace($principalId)) {
+                $gaps.Add('A directory role assignment was returned with no principalId and could not be attributed')
+                continue
+            }
+            if ($EnabledUserIndex.ContainsKey($principalId)) { & $noteSource $principalId 'Active role' }
+            else { & $expandGroup $principalId 'Active role via group' }
+        }
+    }
+    catch {
+        $gaps.Add("Active directory role assignments could not be read: $(Get-PrivilegeReadHint -ErrorRecord $_)")
+    }
+
+    # --- PIM eligibility. An empty collection is a real answer: a tenant with no Entra ID
+    #     P2 or Governance licence holds no eligible assignments at all, because Microsoft
+    #     removes them when the licence lapses. An ERROR is not an answer, and is a gap --
+    #     including the case where a tenant without PIM rejects the endpoint outright rather
+    #     than returning an empty list, which is the one response shape here that has not
+    #     been confirmed against a live tenant.
+    try {
+        $eligible = Get-GraphCollection -Uri "$script:GraphBase/roleManagement/directory/roleEligibilityScheduleInstances?`$select=principalId,roleDefinitionId,startDateTime,endDateTime&`$top=999"
+        foreach ($instance in $eligible) {
+            $principalId = [string](Get-PropertyValue $instance 'principalId')
+            if ([string]::IsNullOrWhiteSpace($principalId)) {
+                $gaps.Add('A PIM role eligibility was returned with no principalId and could not be attributed')
+                continue
+            }
+
+            # ScheduleInstances are Graph's view of what is in force now, but the window is
+            # re-checked here rather than trusted: a stale instance would make somebody
+            # privileged forever, and a not-yet-started one would hold back a user who is
+            # not privileged today. A missing bound means permanent, which is in force.
+            if (-not (Test-AssignmentWindowActive -Record $instance -Now $Now)) { continue }
+
+            if ($EnabledUserIndex.ContainsKey($principalId)) { & $noteSource $principalId 'PIM-eligible role' }
+            else { & $expandGroup $principalId 'PIM-eligible role via group' }
+        }
+    }
+    catch {
+        $gaps.Add("PIM role eligibility could not be read: $(Get-PrivilegeReadHint -ErrorRecord $_)")
+    }
+
+    # --- PIM for Groups. For every group found holding a role above, active or eligible:
+    #     who is eligible to become its member or owner. Read per group because the endpoint
+    #     requires a groupId or principalId filter, and only for role-holding groups, so a
+    #     tenant with no role-assigned groups makes no call here and cannot fail here.
+    #
+    #     Eligible OWNERS are held back too. Whether an owner of a role-assignable group can
+    #     always add themselves as a member is not something to settle by assumption on the
+    #     path that decides who is safe to bulk-target, so the conservative reading is taken:
+    #     reliably identifiable, one activation from control of a role-holding group, out.
+    #
+    #     A worklist rather than a loop, because an eligible principal can itself be a group,
+    #     whose own members and eligibilities then matter in turn. $roleGroups stops a cycle.
+    while ($groupQueue.Count -gt 0) {
+        $groupId = $groupQueue.Dequeue()
+
+        # Standing owners of a group that holds a directory role. Ownership is NOT a role
+        # assignment and is never described as one; it is a conservative campaign exclusion.
+        # An owner can manage that group's membership, which for a role-holding group is a
+        # short path to the role, and this first campaign would rather leave such accounts to
+        # the hand-worked track than bulk-target one by accident. Owners of unrelated groups
+        # are never read. GroupMember.Read.All, already requested, is the least-privileged
+        # permission Microsoft documents for this read. No $select: on this endpoint any
+        # query parameter but $expand needs advanced-query headers.
+        if ($roleHoldingGroups.Contains($groupId)) {
+            try {
+                $owners = Get-GraphCollection -Uri "$script:GraphBase/groups/$([uri]::EscapeDataString($groupId))/owners"
+                foreach ($owner in $owners) {
+                    $ownerId = [string](Get-PropertyValue $owner 'id')
+                    if ([string]::IsNullOrWhiteSpace($ownerId)) {
+                        $gaps.Add("An owner of role-holding group $groupId was returned with no id and could not be attributed")
+                        continue
+                    }
+                    # A service principal, a disabled user or a deleted object owns nothing
+                    # any export could name, so only this run's enabled users are recorded.
+                    if ($EnabledUserIndex.ContainsKey($ownerId)) { & $noteSource $ownerId 'RoleHoldingGroupOwner' }
+                }
+            }
+            catch {
+                # Including a 404: the group answered a moment ago, so its owners going
+                # missing is a failed read, not an empty one.
+                $hint = Get-PrivilegeReadHint -ErrorRecord $_ -Scope 'GroupMember.Read.All' `
+                    -RoleNote 'Global Reader can read group owners'
+                $gaps.Add("Owners of role-holding group $groupId could not be read: $hint")
+            }
+        }
+
+        try {
+            $instances = Get-GraphCollection -Uri "$script:GraphBase/identityGovernance/privilegedAccess/group/eligibilityScheduleInstances?`$filter=groupId eq '$([uri]::EscapeDataString($groupId))'"
+            foreach ($instance in $instances) {
+                $principalId = [string](Get-PropertyValue $instance 'principalId')
+                if ([string]::IsNullOrWhiteSpace($principalId)) {
+                    $gaps.Add("A PIM for Groups eligibility on group $groupId was returned with no principalId and could not be attributed")
+                    continue
+                }
+                if (-not (Test-AssignmentWindowActive -Record $instance -Now $Now)) { continue }
+
+                $access = [string](Get-PropertyValue $instance 'accessId')
+                $label = if ($access -eq 'owner') { 'PIM for Groups eligible owner of role-holding group' } else { 'PIM for Groups eligible member of role-holding group' }
+
+                if ($EnabledUserIndex.ContainsKey($principalId)) { & $noteSource $principalId $label }
+                else { & $expandGroup $principalId $label }
+            }
+        }
+        catch {
+            $hint = Get-PrivilegeReadHint -ErrorRecord $_ -Scope 'PrivilegedEligibilitySchedule.Read.AzureADGroup' `
+                -RoleNote 'For role-assignable groups Microsoft requires Global Reader or Privileged Role Administrator; Security Reader alone is refused'
+            $gaps.Add("PIM for Groups eligibility for role-holding group $groupId could not be read: $hint")
+        }
+    }
+
+    return [PSCustomObject]@{
+        UserIds  = $privileged
+        Sources  = $sources
+        Count    = $privileged.Count
+        # The gate. False means the actionable exports are withheld rather than published
+        # with a population nobody can vouch for.
+        Complete = ($gaps.Count -eq 0)
+        Gaps     = @($gaps)
+        # Stated on every run, complete or not, because it changes what "nonprivileged"
+        # means in a filename.
+        CoverageNote = 'Held back: directory roles held directly or through a group, active or PIM-eligible; PIM for Groups eligibility (member or owner) on any group holding a role; and, as a conservative campaign exclusion rather than a role assignment, standing owners of a group that holds an active or PIM-eligible role. Not covered: privilege outside Microsoft Entra directory roles, such as Azure RBAC and app roles.'
+    }
+}
+
+function Test-AssignmentWindowActive {
+    # Whether a role assignment or eligibility record is in force at $Now.
+    #
+    # Separate and parameterised because the three shapes Graph returns here all mean
+    # different things and two of them are easy to get backwards: an absent endDateTime is
+    # a permanent assignment, not an expired one, and an absent startDateTime is in force
+    # now, not pending. Getting either wrong silently changes who counts as privileged.
+    param(
+        [Parameter(Mandatory)][AllowNull()]$Record,
+        [Parameter(Mandatory)][datetime]$Now
+    )
+
+    $parse = {
+        param($Value)
+        if ($null -eq $Value -or ($Value -is [string] -and [string]::IsNullOrWhiteSpace($Value))) { return $null }
+        if ($Value -is [datetime]) { return ([datetime]$Value).ToUniversalTime() }
+        $parsed = [datetime]::MinValue
+        # Round-trip and universal styles, so an offset in the string is honoured rather
+        # than reinterpreted as local time -- the trap [datetime]'...Z' falls into.
+        if ([datetime]::TryParse([string]$Value, [cultureinfo]::InvariantCulture,
+                [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal,
+                [ref]$parsed)) {
+            return $parsed
+        }
+        return $null
+    }
+
+    $start = & $parse (Get-PropertyValue $Record 'startDateTime')
+    $end = & $parse (Get-PropertyValue $Record 'endDateTime')
+    $nowUtc = $Now.ToUniversalTime()
+
+    if ($null -ne $start -and $start -gt $nowUtc) { return $false }
+    if ($null -ne $end -and $end -le $nowUtc) { return $false }
+    return $true
+}
+
 function Get-RiskAssessment {
     # Ordering is deliberate: the most specific and most damaging combination is evaluated first.
     # "Passwordless capable" is the mitigating control, since it is the only method class that
@@ -1112,6 +1482,32 @@ function Test-OnlyPhoneBasedMfa {
 
     $surviving = @($MethodsRegistered | Where-Object { $_ -in $SurvivingMfaMethods })
     return ($surviving.Count -eq 0)
+}
+
+function Get-PasskeyMethodList {
+    # Which of a user's registered methods are passkeys, as a sorted, semicolon-joined
+    # string, or empty when none are. Empty rather than 'None' so a reader can filter the
+    # column on blank in Excel and so the cell stays quiet in a file that is mostly quiet
+    # -- the same convention PhoneMethodsRegistered already uses.
+    #
+    # A separate function rather than an inline Where-Object because the set it filters on
+    # is a documented classification of Microsoft's enum, not an implementation detail, and
+    # a test that pins the classification has to be able to call it.
+    param(
+        # Null as well as empty, for the same reason as Test-OnlyPhoneBasedMfa: a user with
+        # no registration-report row has no methods, which is data rather than a bug.
+        [Parameter(Mandatory)][AllowNull()][AllowEmptyCollection()][string[]]$MethodsRegistered,
+        [Parameter(Mandatory)][string[]]$PasskeyMethods
+    )
+
+    if ($null -eq $MethodsRegistered) { return '' }
+
+    # Sorted so two runs over the same user produce the same cell regardless of the order
+    # Graph happened to return the methods in, which keeps
+    # Compare-EntraSmsVoiceAssessment from reporting a change where nothing changed.
+    $found = @($MethodsRegistered | Where-Object { $_ -in $PasskeyMethods } | Sort-Object -Unique)
+    if ($found.Count -eq 0) { return '' }
+    return ($found -join '; ')
 }
 
 function Get-PreferredAuthenticationMethod {
@@ -1355,6 +1751,11 @@ function New-HtmlReport {
         # flags it as dead in the caller, which is how it reached CI twice.
         [switch]$SkipAclHardening
     )
+
+    # An absent field on a summary from an older export must render as "not available",
+    # never as 0: a zero here would read as a measured result rather than a missing one,
+    # and this function is documented to render a summary that predates a column.
+    $notAvailableIfNull = { param($Value) if ($null -eq $Value -or $Value -eq '') { 'not available' } else { $Value } }
 
     # The assessment time, not the moment this HTML was written. In a real run they are
     # seconds apart, so nothing changes there -- but the report is a statement about when
@@ -1743,7 +2144,23 @@ $(if ($blockedAtRetirement -gt 0) {
 <div class="card low"><div class="n">$low</div><div class="l">Low</div></div>
 <div class="card"><div class="n">$candidates</div><div class="l">Migration candidates</div></div>
 <div class="card"><div class="n">$(ConvertTo-SafeHtml $Summary.PasswordlessCapableInScope)</div><div class="l">Already passwordless</div></div>
+<div class="card"><div class="n">$(ConvertTo-SafeHtml (Get-PropertyValue $Summary 'UsersWithPasskey'))</div><div class="l">Hold a passkey</div></div>
+<div class="card"><div class="n">$(ConvertTo-SafeHtml (& $notAvailableIfNull (Get-PropertyValue $Summary 'UsersWithoutPasskey')))</div><div class="l">No passkey</div></div>
+<div class="card"><div class="n">$(ConvertTo-SafeHtml (& $notAvailableIfNull (Get-PropertyValue $Summary 'UsersMissingFromReport')))</div><div class="l">Unknown status</div></div>
+<div class="card"><div class="n">$(ConvertTo-SafeHtml (& $notAvailableIfNull (Get-PropertyValue $Summary 'CampaignCandidates')))</div><div class="l">SMS/voice, no passkey</div></div>
 </div>
+<p class="note">These are registration figures, not usage or policy-eligibility figures. A registered passkey is not evidence that it has been used or that the user is inside the passkey policy's scope, and &quot;no passkey&quot; is not the same as being locked out on 2027-02-01 &mdash; see the per-user rows for what else each user holds. &quot;SMS/voice, no passkey&quot; is a subset of &quot;No passkey&quot;, not the whole of it.$(
+    $discoveryComplete = Get-PropertyValue $Summary 'PrivilegeDiscoveryComplete'
+    $omitted = Get-PropertyValue $Summary 'NoPasskeyPrivilegedOmitted'
+    if ($null -eq $discoveryComplete) {
+        ' This report predates privileged-account exclusion, so the figures above include privileged users and no targeting list was produced for it.'
+    }
+    elseif (-not $discoveryComplete) {
+        ' <strong>Privileged-account discovery did not complete on this run, so no targeting list was produced.</strong> ' + (ConvertTo-SafeHtml ([string](Get-PropertyValue $Summary 'PrivilegeDiscoveryGaps')))
+    }
+    else {
+        " The tenant-wide figures above include privileged accounts. The targeting exports exclude them: $(ConvertTo-SafeHtml ([string]$omitted)) held back from the no-passkey list and $(ConvertTo-SafeHtml ([string](Get-PropertyValue $Summary 'CampaignPrivilegedOmitted')))" + ' from the SMS/voice campaign list, to be worked by hand rather than in a bulk campaign. Omitted does not mean lower risk.'
+    })</p>
 
 <h2>Tenant configuration</h2>
 <dl>
@@ -1812,8 +2229,10 @@ Timeline dates are per Microsoft Learn: passkeys by default and retirement of Mi
 </html>
 "@
 
-    $html | Out-File -LiteralPath $Path -Encoding utf8 -Force
-    if (-not $SkipAclHardening) { Protect-OutputFile -Path $Path }
+    Write-ProtectedFile -TargetPath $Path -SkipAclHardening:$SkipAclHardening -Writer {
+        param([string]$Destination)
+        $html | Out-File -LiteralPath $Destination -Encoding utf8 -Force
+    }
     return $Path
 }
 
@@ -2032,6 +2451,163 @@ function New-ActionList {
         Select-Object Priority, User, SignIn, LastSignIn, Has, Problem, DoThis)
 }
 
+function Get-NoPasskeyCandidate {
+    # Enabled users who have NOT registered a passkey, with every one of them tagged with
+    # why it would be held back from an actionable export. Two files are built from this
+    # one function so their counts cannot diverge:
+    #
+    #   -RequirePhoneMethod off  known, enabled, in-scope users without a registered passkey
+    #                            (privileged ones tagged for the caller to hold back). Not
+    #                            "everyone without a passkey": unknown registration status and
+    #                            pattern-excluded users are outside it. The honest size of the
+    #                            passkey rollout.
+    #   -RequirePhoneMethod on   the subset who also hold a retiring phone method. The
+    #                            registration-campaign targeting list, and a strict subset
+    #                            of the file above -- never the whole no-passkey population.
+    #
+    # What NEITHER file claims, stated here because both filenames invite the readings:
+    # it is registration, not usage. A phone method being registered does not mean anybody
+    # signed in with SMS recently -- the registration report carries no usage data and
+    # nothing in this tool reads sign-in method. And "no passkey" is not "will be locked
+    # out": OtherSurvivingMfaMethods exists so a reviewer can tell the two apart, and a
+    # user on Microsoft Authenticator is safe on the date and still needs a passkey.
+    #
+    # Privileged users are returned rather than dropped, carrying their PrivilegeSource.
+    # The caller splits kept from omitted, which makes kept + omitted = qualifying by
+    # construction, and means the omitted count can only ever contain users who would
+    # otherwise have been on that file. A user held back for any other reason -- a passkey
+    # registered, no phone method, no registration row, excluded by pattern -- never enters
+    # this set at all and so cannot inflate it.
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Rows,
+
+        # The classifications, passed in rather than read from script scope: these
+        # file-building helpers are lifted into tests and into examples/New-ExampleOutput.ps1,
+        # where an ambient read is a variable nobody can see being consulted.
+        [Parameter(Mandatory)][string[]]$PhoneMethods,
+        [Parameter(Mandatory)][string[]]$PasskeyMethods,
+        [Parameter(Mandatory)][string[]]$SurvivingMfaMethods,
+
+        # On for the SMS/voice campaign file, off for the whole no-passkey population.
+        [switch]$RequirePhoneMethod,
+
+        # Who holds a directory role. Membership only -- this function does not decide what
+        # privileged means, and never infers it from a name.
+        [Parameter(Mandatory)][AllowNull()]$PrivilegedUserIds,
+        [Parameter(Mandatory)][AllowNull()]$PrivilegeSources,
+
+        [string]$TenantId = ''
+    )
+
+    # No set is not an empty set. Treating $null as "nobody is privileged" would publish every
+    # administrator; a caller that genuinely found nobody passes an empty set.
+    if ($null -eq $PrivilegedUserIds) {
+        throw 'Get-NoPasskeyCandidate needs the privileged-user set. Pass an empty set when discovery found nobody; $null is not a result.'
+    }
+
+    $candidates = foreach ($row in $Rows) {
+        # Excluded is an explicit operator decision, made with -ExcludeUpnPattern, and it
+        # keeps the same meaning here as everywhere else: the row stays in the assessment
+        # CSV as a record of what the pattern removed, and is in no count and no campaign.
+        if ([string](Get-PropertyValue $row 'Risk') -eq 'Excluded') { continue }
+
+        # Through Get-PropertyValue, not a dot: these helpers are handed rows from an older
+        # export in examples/ and in the HTML path, and under StrictMode a direct read of a
+        # column that export predates throws rather than skipping the row.
+        $allMethods = [string](Get-PropertyValue $row 'AllMethodsRegistered')
+
+        # No registration-report row is an UNKNOWN passkey state, not an absent one.
+        # Targeting on data nobody has is worse than a gap, and UsersMissingFromReport
+        # already reports that gap.
+        if ([string]::IsNullOrWhiteSpace($allMethods) -or $allMethods -eq $script:NoReportRowMarker) { continue }
+
+        $methods = @($allMethods -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+
+        # -in is case-insensitive, deliberately rather than incidentally: a live tenant has
+        # already returned a spelling whose capitalization did not match the enum.
+        #
+        # Applied from $passkeyMethods, the same list Get-PasskeyMethodList uses, so these
+        # files and the PasskeyMethods column cannot disagree. NOT $survivingMfaMethods,
+        # which is a different category and would drop every user on Authenticator -- the
+        # bulk of a real rollout; and NOT isPasswordlessCapable, which Microsoft defines as
+        # covering Windows Hello for Business and Authenticator passwordless phone sign-in
+        # alongside FIDO2, so reading it as a passkey answer empties these files for an
+        # Entra-joined estate that holds no passkeys at all.
+        if (@($methods | Where-Object { $_ -in $PasskeyMethods }).Count -gt 0) { continue }
+
+        $phone = @($methods | Where-Object { $_ -in $PhoneMethods } | Sort-Object -Unique)
+        if ($RequirePhoneMethod -and $phone.Count -eq 0) { continue }
+
+        # What they already hold that survives and satisfies MFA alone, phone methods and
+        # passkeys taken out. Blank here beside a phone method is the shape that is also
+        # BlockedAtRetirement; anything listed means rollout work, not a lockout.
+        $otherSurviving = @($methods |
+            Where-Object { $_ -in $SurvivingMfaMethods -and $_ -notin $PhoneMethods -and $_ -notin $PasskeyMethods } |
+            Sort-Object -Unique)
+
+        $userId = [string](Get-PropertyValue $row 'UserId')
+        # Inline rather than through a closure: PSScriptAnalyzer cannot see a parameter
+        # used only inside a scriptblock and reports it unused, which has reached CI here
+        # twice before.
+        $hasRole = (-not [string]::IsNullOrEmpty($userId)) -and $PrivilegedUserIds.Contains($userId)
+        # The registration report's own isAdmin flag, as a second opinion. A user it marks as
+        # holding an admin role whom role discovery did not find is held back rather than
+        # targeted: the disagreement means one of the two reads is wrong, and the safe reading
+        # is the one that keeps an administrator out of a bulk campaign. Read as text as well
+        # as a bool, because rows from an exported CSV carry 'True'.
+        $adminFlag = Get-PropertyValue $row 'IsAdmin'
+        $flaggedAdmin = ($adminFlag -eq $true) -or ([string]$adminFlag -eq 'True')
+        $privilegeSource = if ([string]::IsNullOrEmpty($userId)) {
+            # A row that cannot be matched against the set cannot be shown to be unprivileged.
+            '(not determined)'
+        }
+        elseif ($hasRole) {
+            if ($null -ne $PrivilegeSources -and $PrivilegeSources.ContainsKey($userId)) {
+                [string]$PrivilegeSources[$userId]
+            }
+            else { 'Directory role' }
+        }
+        elseif ($flaggedAdmin) { 'Admin per registration report' }
+        else { '' }
+
+        [PSCustomObject][ordered]@{
+            TenantId                 = $TenantId
+            Risk                     = [string](Get-PropertyValue $row 'Risk')
+            DisplayName              = [string](Get-PropertyValue $row 'DisplayName')
+            UserPrincipalName        = [string](Get-PropertyValue $row 'UserPrincipalName')
+            UserType                 = [string](Get-PropertyValue $row 'UserType')
+            PhoneMethodsRegistered   = ($phone -join '; ')
+            OtherSurvivingMfaMethods = ($otherSurviving -join '; ')
+            AllMethodsRegistered     = $allMethods
+            # Last, like the assessment CSV: a join key, not something anybody reads, and
+            # the tie-breaker that makes the sort below total.
+            UserId                   = $userId
+            # Not a published column. The caller splits on it and then drops it, so the
+            # files stay the width a reviewer can read.
+            PrivilegeSource          = $privilegeSource
+        }
+    }
+
+    # Worst band first so a reviewer working top-down meets the most exposed names first,
+    # then UPN, then UserId. UserId is the explicit final tie-breaker: unique per user, so
+    # two runs over one tenant cannot order the file differently and
+    # Compare-EntraSmsVoiceAssessment cannot read a reshuffle as movement.
+    $order = @{ Critical = 0; High = 1; Moderate = 2; Low = 3; Informational = 4 }
+    return @($candidates | Sort-Object `
+        @{ Expression = { if ($order.Contains([string]$_.Risk)) { $order[[string]$_.Risk] } else { 99 } }; Ascending = $true }, `
+        @{ Expression = 'UserPrincipalName'; Ascending = $true }, `
+        @{ Expression = 'UserId'; Ascending = $true })
+}
+
+# The published column order for both no-passkey files, named once. Export-AssessmentCsv
+# needs it to write a header for a tenant with no candidates, where there is no row to take
+# property names from. PrivilegeSource is deliberately absent: it is always blank on a kept
+# row, so publishing it would add a column that says nothing.
+$script:NoPasskeyCandidateColumns = @(
+    'TenantId', 'Risk', 'DisplayName', 'UserPrincipalName', 'UserType',
+    'PhoneMethodsRegistered', 'OtherSurvivingMfaMethods', 'AllMethodsRegistered', 'UserId'
+)
+
 function Get-TicketNextStep {
     # The row already carries NextStep. Recomputing is the fallback for rows handed in
     # from an export that predates the column, so the ticket queue never silently loses
@@ -2093,19 +2669,20 @@ function Save-TicketHistory {
     )
 
     $directory = Split-Path -Parent $Path
-    if ($directory -and -not (Test-Path -LiteralPath $directory)) {
-        New-Item -ItemType Directory -Path $directory -Force | Out-Null
-    }
+    if ($directory) { New-ProtectedDirectory -Path $directory -SkipAclHardening:$SkipAclHardening }
 
     # Object ids and risk bands only. No names, no UPNs: this file sits wherever the
     # operator points it and does not need to carry identifying data to do its job.
-    [PSCustomObject]@{
+    $json = [PSCustomObject]@{
         Schema      = 1
         UpdatedUtc  = (Get-Date).ToUniversalTime().ToString('o')
         Ticketed    = $History
-    } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Path -Encoding utf8
+    } | ConvertTo-Json -Depth 4
 
-    if (-not $SkipAclHardening) { Protect-OutputFile -Path $Path }
+    Write-ProtectedFile -TargetPath $Path -SkipAclHardening:$SkipAclHardening -Writer {
+        param([string]$Destination)
+        Set-Content -LiteralPath $Destination -Value $json -Encoding utf8
+    }
 }
 
 function Test-NeedsTicket {
@@ -2460,7 +3037,7 @@ function New-RemediationScript {
     [void]$lines.Add('      Policy.ReadWrite.AuthenticationMethod    per-user MFA state')
     [void]$lines.Add('#>')
     [void]$lines.Add('')
-    [void]$lines.Add('#Requires -Version 7.0')
+    [void]$lines.Add('#Requires -Version 7.4')
     [void]$lines.Add('#Requires -Modules Microsoft.Graph.Authentication')
     [void]$lines.Add('')
     [void]$lines.Add('Set-StrictMode -Version Latest')
@@ -2521,12 +3098,135 @@ function New-RemediationScript {
 
     $content = ($lines -join [Environment]::NewLine)
     $directory = Split-Path -Parent $Path
-    if ($directory -and -not (Test-Path -LiteralPath $directory)) {
-        New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    if ($directory) { New-ProtectedDirectory -Path $directory -SkipAclHardening:$SkipAclHardening }
+    Write-ProtectedFile -TargetPath $Path -SkipAclHardening:$SkipAclHardening -Writer {
+        param([string]$Destination)
+        Set-Content -LiteralPath $Destination -Value $content -Encoding utf8
     }
-    Set-Content -LiteralPath $Path -Value $content -Encoding utf8
-    if (-not $SkipAclHardening) { Protect-OutputFile -Path $Path }
     return (Resolve-Path -LiteralPath $Path).Path
+}
+
+function New-ProtectedDirectory {
+    # Creates a report folder, and each missing parent, owner-only. The files inside are
+    # already private, but a folder New-Item creates takes the umask (0755 on most Linux
+    # hosts) or the parent's inherited ACL, so any local account could list it -- and the
+    # file names carry the customer label and say which file is the targeting list.
+    #
+    # Only levels this call creates are restricted. A folder that already exists was chosen
+    # by the operator (C:\Reports, a home directory) and changing its permissions would be
+    # a surprise this tool has no business springing. -SkipAclHardening, as everywhere,
+    # leaves permissions as the location gives them.
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [switch]$SkipAclHardening
+    )
+
+    $full = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+    $missing = [System.Collections.Generic.List[string]]::new()
+    $cursor = $full
+    while ($cursor -and -not (Test-Path -LiteralPath $cursor)) {
+        $missing.Insert(0, $cursor)
+        $cursor = Split-Path -Parent $cursor
+    }
+
+    foreach ($level in $missing) {
+        if (-not $IsWindows -and -not $SkipAclHardening) {
+            # 0700 at creation, so there is no moment the folder is listable. The umask can
+            # only narrow it further.
+            [void][System.IO.Directory]::CreateDirectory($level, [System.IO.UnixFileMode]448)
+        }
+        else {
+            New-Item -ItemType Directory -Path $level -Force | Out-Null
+        }
+        if (-not $SkipAclHardening) { Protect-OutputFile -Path $level -Directory }
+    }
+}
+
+function Write-ProtectedFile {
+    # Every report file is written through here, so none is ever readable by another local
+    # account, and none is ever visible under its real name half-written.
+    #
+    # Two failures this closes. A file created by Export-Csv or Set-Content takes the umask
+    # (0644 on most Linux hosts, inherited ACLs on a Windows share), and used to be narrowed
+    # only after every row was already in it -- anyone who opened it in that window kept the
+    # handle and could read the lot. And a run stopped mid-write left a truncated CSV under
+    # the final name, which looks exactly like a complete one.
+    #
+    # So: create an empty temporary file beside the target, private from the moment it
+    # exists (0600 at creation where .NET can do that, then Protect-OutputFile), write into
+    # it, and rename it over the target only once the write has finished. A rename within
+    # one folder replaces the old file in one step and keeps the new file's permissions.
+    param(
+        [Parameter(Mandatory)][string]$TargetPath,
+        # Receives the temporary path and writes the content to it. Must not refer to
+        # $TargetPath: the caller's own variables are visible to it, this one is not its own.
+        [Parameter(Mandatory)][scriptblock]$Writer,
+        [switch]$SkipAclHardening
+    )
+
+    # Resolved to a full path first: the .NET calls below resolve a relative path against the
+    # process directory, which is not PowerShell's current location.
+    $target = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($TargetPath)
+    if (Test-Path -LiteralPath $target -PathType Container) {
+        throw "Cannot write $target`: a folder already has that name."
+    }
+    $directory = Split-Path -Parent $target
+    New-ProtectedDirectory -Path $directory -SkipAclHardening:$SkipAclHardening
+    $temp = Join-Path $directory ('.{0}.{1}.partial' -f [System.IO.Path]::GetFileName($target), [guid]::NewGuid().ToString('n'))
+
+    # Created 0600 rather than narrowed afterwards where the runtime allows it (.NET 7, so
+    # PowerShell 7.3+). Resolved by name so this still parses on an older PowerShell.
+    $optionsType = 'System.IO.FileStreamOptions' -as [type]
+    $modeType = 'System.IO.UnixFileMode' -as [type]
+    if (-not $IsWindows -and -not $SkipAclHardening -and $optionsType -and $modeType -and $optionsType.GetProperty('UnixCreateMode')) {
+        $options = $optionsType::new()
+        $options.Mode = [System.IO.FileMode]::CreateNew
+        $options.Access = [System.IO.FileAccess]::Write
+        $options.UnixCreateMode = [Enum]::ToObject($modeType, 384)
+        [System.IO.FileStream]::new($temp, $options).Dispose()
+    }
+    else {
+        [System.IO.File]::Open($temp, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write).Dispose()
+    }
+
+    try {
+        # Narrowed while still empty, and checked: nothing is written until the file is
+        # verifiably private. Protect-OutputFile only warns when a filesystem refuses a
+        # permission change, which is right for a finished file but not here, where it would
+        # mean writing the report into a file anyone can read. Writing into an existing file
+        # keeps its permissions, and so does the rename below.
+        if (-not $SkipAclHardening) {
+            Protect-OutputFile -Path $temp
+            $private = $false
+            try {
+                if ($IsWindows) {
+                    $acl = Get-Acl -LiteralPath $temp
+                    $allowed = @(
+                        [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+                        'S-1-5-32-544'
+                    )
+                    $rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
+                    $private = $acl.AreAccessRulesProtected -and $rules.Count -gt 0 -and
+                        @($rules | Where-Object { $_.IdentityReference.Value -notin $allowed }).Count -eq 0
+                }
+                elseif ($modeType) {
+                    $private = [int]([System.IO.FileInfo]::new($temp).UnixFileMode) -eq 384
+                }
+            }
+            catch { $private = $false }
+            if (-not $private) {
+                throw "Could not restrict $TargetPath to this account, so nothing was written to it. Write to a filesystem that supports permissions, run on PowerShell 7.3 or later on Linux and macOS, or pass -SkipAclHardening to accept the default permissions knowingly."
+            }
+        }
+        & $Writer $temp
+        # File.Move rather than Move-Item: Move-Item puts the file INSIDE a folder of that
+        # name instead of failing, and overwrite:$true is a single rename on the same volume.
+        [System.IO.File]::Move($temp, $target, $true)
+    }
+    catch {
+        Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
+        throw
+    }
 }
 
 function Protect-CsvInjection {
@@ -2536,17 +3236,33 @@ function Protect-CsvInjection {
     # in tenants that allow self-service profile edits or B2B invites, and this report is
     # specifically a file that a manager will open in Excel. Prefixing the value with a
     # single quote makes Excel treat it as literal text.
+    #
+    # The trigger is looked for past any leading whitespace or control characters, and in
+    # its full-width forms (U+FF1D, U+FF0B, U+FF0D, U+FF20) as well. That part is
+    # precautionary: LibreOffice 24.2 was observed to evaluate only an unpadded "=", and
+    # Excel's handling of padded or full-width triggers has not been verified. A value is
+    # only ever prefixed, never altered, so nothing a reader needs is lost.
+    #
     # Applied at export time only, so in-memory objects stay pristine for the HTML path,
-    # which has its own encoding.
+    # which has its own encoding. Identical copies live in the sweep and the comparison
+    # script; tests/Sanitization.Tests.ps1 keeps them identical.
     param([Parameter(ValueFromPipeline)][object]$InputObject)
 
     process {
+        $triggers = @('=', '+', '-', '@', [char]0xFF1D, [char]0xFF0B, [char]0xFF0D, [char]0xFF20)
         $clone = [ordered]@{}
         foreach ($property in $InputObject.PSObject.Properties) {
             $value = $property.Value
-            if ($value -is [string] -and $value.Length -gt 0 -and
-                $value[0] -in @('=', '+', '-', '@', [char]9, [char]13)) {
-                $value = "'" + $value
+            if ($value -is [string] -and $value.Length -gt 0) {
+                $lead = $null
+                foreach ($character in $value.ToCharArray()) {
+                    if (-not ([char]::IsWhiteSpace($character) -or [char]::IsControl($character))) { $lead = $character; break }
+                }
+                $startsHidden = [char]::IsWhiteSpace($value[0]) -or [char]::IsControl($value[0])
+                if ($value[0] -in $triggers -or $value[0] -in @([char]9, [char]10, [char]13) -or
+                    ($startsHidden -and $null -ne $lead -and $lead -in $triggers)) {
+                    $value = "'" + $value
+                }
             }
             $clone[$property.Name] = $value
         }
@@ -2563,8 +3279,7 @@ function Protect-OutputFile {
     #
     # Windows: break inheritance, then grant the file owner and local Administrators only.
     # Linux and macOS: 0600 for a file, 0700 for a directory. The API that sets it arrived
-    # in .NET 7, so PowerShell 7.0 to 7.2 cannot call it; there the operator is told what
-    # to run instead of being left believing a control applied when it did not.
+    # in .NET 7; every supported runtime (#Requires 7.4) has it.
     param(
         [Parameter(Mandatory)][string]$Path,
         [switch]$Directory
@@ -2588,18 +3303,10 @@ function Protect-OutputFile {
             return
         }
 
-        # Resolved at run time, so this parses on a PowerShell that has never heard of it.
-        $modeType = 'System.IO.UnixFileMode' -as [type]
-        if (-not $modeType) {
-            $octal = if ($Directory) { '700' } else { '600' }
-            Write-Warning "Cannot restrict permissions on $Path. Setting them needs PowerShell 7.3 or later; this is $($PSVersionTable.PSVersion). Run: chmod $octal '$Path'"
-            return
-        }
-
         # 0600 (384) for a file, 0700 (448) for a directory: a directory needs the execute
         # bit or its owner cannot open it, which would break the sweep rather than protect
         # it. File::SetUnixFileMode is the setter for both; there is no Directory:: form.
-        $mode = [Enum]::ToObject($modeType, $(if ($Directory) { 448 } else { 384 }))
+        $mode = [System.IO.UnixFileMode]$(if ($Directory) { 448 } else { 384 })
         [System.IO.File]::SetUnixFileMode($Path, $mode)
     }
     catch {
@@ -2621,11 +3328,31 @@ function Export-AssessmentCsv {
         # helpers are lifted into tests and into examples/New-ExampleOutput.ps1, where an
         # ambient read is a variable nobody can see being consulted -- and static analysis
         # flags it as dead in the caller, which is how it reached CI twice.
-        [switch]$SkipAclHardening
+        [switch]$SkipAclHardening,
+
+        # The column names to write when $Data is empty. Export-Csv takes its header from
+        # the first object, so an empty collection produces a file containing nothing but a
+        # byte-order mark -- which Import-Csv reads as zero rows with zero columns, and a
+        # spreadsheet opens as blank. For the campaign list that is the wrong answer to the
+        # best possible outcome: a tenant where nobody needs targeting should hand back an
+        # empty list with the expected headers, not a file that looks like a failed run.
+        #
+        # Optional, so every existing caller keeps its current behaviour exactly.
+        [string[]]$HeaderWhenEmpty = @()
     )
 
-    $Data | Protect-CsvInjection | Export-Csv -LiteralPath $Path -NoTypeInformation -Encoding utf8BOM
-    if (-not $SkipAclHardening) { Protect-OutputFile -Path $Path }
+    # Prepared here rather than inside the writer, so the parameters are visibly used.
+    if ($Data.Count -eq 0 -and $HeaderWhenEmpty.Count -gt 0) {
+        # Quoted every field, matching what Export-Csv itself writes, so the header a
+        # zero-row file carries is byte-identical to the header a one-row file carries.
+        $header = (($HeaderWhenEmpty | ForEach-Object { '"' + ($_ -replace '"', '""') + '"' }) -join ',')
+        $writeCsv = { param([string]$Destination) Set-Content -LiteralPath $Destination -Value $header -Encoding utf8BOM }
+    }
+    else {
+        $guardedRows = @($Data | Protect-CsvInjection)
+        $writeCsv = { param([string]$Destination) $guardedRows | Export-Csv -LiteralPath $Destination -NoTypeInformation -Encoding utf8BOM }
+    }
+    Write-ProtectedFile -TargetPath $Path -Writer $writeCsv -SkipAclHardening:$SkipAclHardening
 }
 
 # ---------------------------------------------------------------------------
@@ -2707,6 +3434,16 @@ $voiceScope = Get-MethodPolicyScope -Method voice -EnabledUserIndex $enabledUser
 # Read here rather than inferred from registrations, because a user with nothing
 # registered looks identical whether the method is available to them or not.
 Write-Host 'Resolving passkey and Authenticator policy scope (can these users actually move?)...' -ForegroundColor Cyan
+# Who holds a directory role. Read before the rows are built so each row can say whether
+# it is being held back from the actionable exports, and so a failure here is known before
+# anything is written rather than discovered at export time.
+Write-Host 'Reading directory role assignments and PIM eligibility (who is privileged?)...' -ForegroundColor Cyan
+$privilegeSet = Get-PrivilegedUserSet -EnabledUserIndex $enabledUserIndex -Now $assessmentStartUtc
+if (-not $privilegeSet.Complete) {
+    Write-Warning 'Privileged-account discovery did not complete. The actionable no-passkey exports will be withheld rather than published with a population that cannot be vouched for:'
+    foreach ($gap in $privilegeSet.Gaps) { Write-Warning "  $gap" }
+}
+
 $passkeyScope = Get-MethodPolicyScope -Method fido2 -EnabledUserIndex $enabledUserIndex
 $authenticatorScope = Get-MethodPolicyScope -Method microsoftAuthenticator -EnabledUserIndex $enabledUserIndex
 
@@ -2820,6 +3557,45 @@ $survivingMfaMethods = @(
     'appCode'
 )
 
+# The passkey subset of the list above, which is a narrower question than "can this user
+# still sign in" and the one an operator running the rollout actually asks: who holds a
+# passkey, and who still needs one.
+#
+# Microsoft's own taxonomy decides the membership here, not a guess about what sounds
+# passkey-shaped. "FIDO2 security keys are device-bound passkeys stored on a physical
+# authenticator", so fido2SecurityKey and its older spelling fido are in. Device-bound
+# passkeys (Authenticator, Windows Hello) and synced passkeys (iCloud Keychain, Google
+# Password Manager) each have their own enum value, and all four are in.
+#
+# Deliberately NOT here, though all three are passwordless and all three survive the
+# retirement:
+#
+#   windowsHelloForBusiness            Graph carries a separate passKeyDeviceBoundWindowsHello
+#                                      value for Hello registered AS a passkey. Folding plain
+#                                      Hello in would make that distinction unreportable, and
+#                                      report a passkey the user has not registered.
+#   microsoftAuthenticatorPasswordless Passwordless phone sign-in, which predates passkeys and
+#                                      is not FIDO2. Microsoft lists it beside FIDO2 and Hello
+#                                      under isPasswordlessCapable, not under passkeys.
+#   macOsSecureEnclaveKey              The macOS Platform Credential. Hardware-backed and
+#                                      phishing-resistant, but Microsoft does not document it
+#                                      as a passkey type.
+#
+# Those users show blank in PasskeyMethods while still naming their method in
+# AllMethodsRegistered, so "no passkey" never silently reads as "no protection". This is
+# also why the column is not sourced from isPasswordlessCapable, which Microsoft defines as
+# covering FIDO2, Windows Hello for Business AND Authenticator passwordless together: as a
+# passkey answer it over-counts, and over-counting here marks a rollout finished when it is
+# not.
+$passkeyMethods = @(
+    'passKeyDeviceBound'
+    'passKeyDeviceBoundAuthenticator'
+    'passKeyDeviceBoundWindowsHello'
+    'passKeySynced'
+    'fido2SecurityKey'
+    'fido'
+)
+
 # Anything Microsoft adds later, or that this list has not caught up with, is treated as
 # NOT surviving, so an unrecognized method makes a user look more exposed rather than less.
 # Over-warning costs a review; under-warning costs somebody their Monday morning. The
@@ -2829,6 +3605,9 @@ $script:UnrecognizedMethods = [System.Collections.Generic.HashSet[string]]::new(
 # Stands in for the dropped InRegistrationReport column. Defined once because the summary
 # counts these rows and the CSV displays them, and the two must not drift apart.
 $script:NoReportRowMarker = '(no row in registration report)'
+# Stands in for privilege on a run whose role reads did not all succeed. A blank would read
+# as "not privileged", which is the one thing such a run cannot say.
+$script:PrivilegeNotDetermined = '(not determined)'
 # qrCode is deliberately here and not in $survivingMfaMethods. It survives the retirement,
 # but Microsoft documents it as "a single-factor method in which the PIN (something you
 # know) is a credential" -- so it does not keep a phone-only frontline worker signed in,
@@ -2901,6 +3680,18 @@ $rows = foreach ($user in $enabledUsers) {
     $onlyPhoneBasedMfa = Test-OnlyPhoneBasedMfa -MethodsRegistered ([string[]]$methods) `
         -PhoneMethods $phoneMethods -SurvivingMfaMethods $survivingMfaMethods
 
+    $passkeyMethodList = Get-PasskeyMethodList -MethodsRegistered ([string[]]$methods) `
+        -PasskeyMethods $passkeyMethods
+
+    $privilegeSource = if (-not $privilegeSet.Complete) { $script:PrivilegeNotDetermined }
+    elseif ($privilegeSet.UserIds.Contains($id)) {
+        if ($privilegeSet.Sources.ContainsKey($id)) { [string]$privilegeSet.Sources[$id] } else { 'Directory role' }
+    }
+    # Matches Get-NoPasskeyCandidate, which holds such a user back from both exports, so the
+    # assessment row says why they are missing from them.
+    elseif ($isAdmin) { 'Admin per registration report' }
+    else { '' }
+
     # A different population from BlockedAtRetirement: not locked out -- a stronger method
     # is registered -- but still shown a text message by default today, with nothing
     # scheduled to change that before it stops working. The summary aggregates this from
@@ -2947,7 +3738,7 @@ $rows = foreach ($user in $enabledUsers) {
     # is stated in the column somebody actually reads.
     $allMethods = if ($registration) { ($methods -join '; ') } else { $script:NoReportRowMarker }
 
-    # Seventeen columns, chosen so the file is readable in Excel. The registration report
+    # Nineteen columns, chosen so the file is readable in Excel. The registration report
     # also returns isMfaCapable, isMfaRegistered, and a per-row timestamp; none of them
     # changed what anybody did with the file, and the evidence age is still reported once,
     # as OldestReportRowUtc in the summary. PreferredMethod is the one addition to that
@@ -2973,6 +3764,22 @@ $rows = foreach ($user in $enabledUsers) {
         DaysSinceLastSignIn   = $signInAge
         PhoneMethodsRegistered = $phoneMethodList
         AllMethodsRegistered  = $allMethods
+        # Beside the full list rather than next to the risk bands, because the question it
+        # answers is "what does this person hold", not "how exposed are they". Blank means
+        # no passkey; a blank on a row whose AllMethodsRegistered says
+        # '(no row in registration report)' means unknown, not none, which is why the
+        # marker is left to that column to state rather than repeated here.
+        PasskeyMethods        = $passkeyMethodList
+        # Why this user is, or is not, held out of the actionable exports. Blank means no
+        # directory role was found; text names where the role came from. On a run whose
+        # privilege discovery failed every row reads '(not determined)' instead of blank,
+        # because a blank would assert something this run could not establish -- and that
+        # assertion is exactly what would sweep an administrator into a bulk campaign.
+        #
+        # One column rather than a boolean plus a reason: the same convention
+        # PhoneMethodsRegistered and PasskeyMethods already use, and it keeps the file a
+        # width somebody can still read in Excel.
+        PrivilegeSource       = $privilegeSource
         PreferredMethod       = $preferredMethod
         IsPasswordlessCapable = $isPasswordlessCapable
         UserId                = $id
@@ -3014,8 +3821,26 @@ $exportRows = @($exportRows | Sort-Object `
     @{ Expression = 'DisplayName'; Ascending = $true })
 
 $outputDirectory = Split-Path -Parent $OutputPath
-if ($outputDirectory -and -not (Test-Path -LiteralPath $outputDirectory)) {
-    New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
+if ($outputDirectory) { New-ProtectedDirectory -Path $outputDirectory -SkipAclHardening:$SkipAclHardening }
+
+# The two targeting exports, named here so a copy left by an earlier run is removed BEFORE
+# this run writes anything. Removing them only at the end, and only when this run withheld
+# them, left two gaps: a run that stopped part-way kept yesterday's lists beside today's
+# assessment, and a file that could not be deleted (open in Excel) was reported as removed
+# while it stayed exactly where today's list would go. Now either the old lists are gone
+# before the first write, or the run stops here having written nothing.
+$campaignListPath = [System.IO.Path]::ChangeExtension($OutputPath, $null).TrimEnd('.') + '_SmsVoiceUsers_NoPasskey.csv'
+$noPasskeyListPath = [System.IO.Path]::ChangeExtension($OutputPath, $null).TrimEnd('.') + '_NoPasskey_Nonprivileged.csv'
+$removedStaleExports = [System.Collections.Generic.List[string]]::new()
+foreach ($stale in @($noPasskeyListPath, $campaignListPath)) {
+    if (-not (Test-Path -LiteralPath $stale)) { continue }
+    $removeError = ''
+    try { Remove-Item -LiteralPath $stale -Force -ErrorAction Stop }
+    catch { $removeError = $_.Exception.Message }
+    if (Test-Path -LiteralPath $stale) {
+        throw "Could not remove $stale, a targeting list from an earlier run, so this run has stopped before writing anything. Close the file if it is open (Excel locks it) and run again. $removeError"
+    }
+    $removedStaleExports.Add([System.IO.Path]::GetFileName($stale))
 }
 
 if ($exportRows.Count -eq 0) {
@@ -3116,6 +3941,23 @@ $summary = [PSCustomObject][ordered]@{
     Moderate                   = @($candidateRows | Where-Object Risk -eq 'Moderate').Count
     Low                        = @($candidateRows | Where-Object Risk -eq 'Low').Count
     PasswordlessCapableInScope = @($candidateRows | Where-Object { ($_.InSmsPolicyScope -or $_.InVoicePolicyScope) -and $_.IsPasswordlessCapable }).Count
+    # Passkey adoption, counted over $rows -- every enabled user -- and not over
+    # $candidateRows like the risk bands above it. The rollout question is "who in this
+    # tenant still needs a passkey", and a user already off SMS entirely is still part of
+    # that denominator. Naming the population in the field name rather than leaving it to
+    # be inferred, because a numerator and a denominator drawn from different populations
+    # is how this script previously reported a tenant as further behind than it was.
+    #
+    # The two do not sum to EnabledUsersAssessed on their own. A user with no row in the
+    # registration report has an unknown passkey state, not an absent one, and counting
+    # them as missing a passkey would inflate the gap with users nobody can assess. They
+    # are the third term, already reported as UsersMissingFromReport, and the identity
+    # UsersWithPasskey + UsersWithoutPasskey + UsersMissingFromReport = EnabledUsersAssessed
+    # holds on every run.
+    UsersWithPasskey           = @($rows | Where-Object { $_.PasskeyMethods }).Count
+    UsersWithoutPasskey        = @($rows | Where-Object {
+        -not $_.PasskeyMethods -and $_.AllMethodsRegistered -ne $script:NoReportRowMarker
+    }).Count
     # The headline operational number: users who hit the blocking registration prompt on
     # 2027-02-01 because a phone is the only thing they have that satisfies MFA. Narrower
     # than the risk bands, and the one to drive to zero before the date.
@@ -3185,6 +4027,108 @@ $actionListRows = @(New-ActionList -Rows $rows)
 Export-AssessmentCsv -Data $actionListRows -Path $actionListPath -SkipAclHardening:$SkipAclHardening
 $summary | Add-Member -NotePropertyName ActionListPath -NotePropertyValue (Resolve-Path -LiteralPath $actionListPath).Path
 Write-Host "Action list ($($actionListRows.Count) users, attach this to a ticket): $actionListPath" -ForegroundColor Green
+
+# The two actionable no-passkey exports, written on every run for the same reason the action
+# list is: both are derived from rows already in memory and cost no Graph call.
+#
+#   <stem>_NoPasskey_Nonprivileged.csv       known, enabled, in-scope nonprivileged users
+#                                            without a registered passkey. NOT everyone
+#                                            without one: users with unknown registration
+#                                            status, privileged users and pattern-excluded
+#                                            users are outside it, each counted elsewhere.
+#   <stem>_SmsVoiceUsers_NoPasskey.csv       the subset who also hold a retiring phone
+#                                            method -- the campaign targeting list.
+#
+# The second is a strict subset of the first and must never be read as the whole no-passkey
+# population: a user with a passkey-less laptop-only profile and no phone number is in the
+# first file and not the second, and still needs a passkey.
+#
+# Both are built from $rows rather than $affectedRows or $candidateRows. A user already off
+# phone methods entirely is not a migration candidate and is correctly absent from the
+# default assessment export, but the rollout question is asked of the whole tenant. Every
+# row in $rows is an enabled user: the user read filters on accountEnabled, so enablement is
+# settled upstream and these files inherit it rather than re-testing a column that does not
+# exist. Guests are included and named by UserType, matching the assessment CSV -- a guest
+# with a phone number is targeted by the retirement exactly like a member.
+#
+# Privileged accounts are held back from both, by design, and counted separately. They are
+# a hand-worked remediation track: a Global Administrator does not belong in a bulk
+# registration campaign. "Omitted from this campaign" is NOT "does not need a passkey" and
+# NOT "low risk" -- it is the opposite, and the console says so.
+#
+# Emitting the lists is read-only. Creating the security group, adding members, enabling
+# methods and configuring the registration campaign all stay manual, because all four are
+# writes.
+# Both paths were set, and any earlier copy removed, before the assessment CSV was written.
+
+# One classifier, two populations, so the files and every number quoted about them come
+# from the same logic. @() for the same reason as the action list above: an empty result
+# unrolls to $null on assignment and fails Export-AssessmentCsv's parameter binding, and
+# here the empty case is the outcome the whole project works toward.
+$noPasskeyArgs = @{
+    Rows                = $rows
+    PhoneMethods        = $phoneMethods
+    PasskeyMethods      = $passkeyMethods
+    SurvivingMfaMethods = $survivingMfaMethods
+    PrivilegedUserIds   = $privilegeSet.UserIds
+    PrivilegeSources    = $privilegeSet.Sources
+    TenantId            = [string]$summary.TenantId
+}
+$allNoPasskey = @(Get-NoPasskeyCandidate @noPasskeyArgs)
+$allCampaign = @(Get-NoPasskeyCandidate @noPasskeyArgs -RequirePhoneMethod)
+
+# Kept and omitted are split from one evaluated collection, so they sum to the qualifying
+# population by construction. The omitted count therefore contains only users who would
+# otherwise have been on that specific file, and the two files' omitted counts can differ.
+$noPasskeyRows = @($allNoPasskey | Where-Object { -not $_.PrivilegeSource })
+$noPasskeyOmitted = @($allNoPasskey | Where-Object { $_.PrivilegeSource })
+$campaignRows = @($allCampaign | Where-Object { -not $_.PrivilegeSource })
+$campaignOmitted = @($allCampaign | Where-Object { $_.PrivilegeSource })
+
+if ($privilegeSet.Complete) {
+    Export-AssessmentCsv -Data @($noPasskeyRows | Select-Object $script:NoPasskeyCandidateColumns) `
+        -Path $noPasskeyListPath -HeaderWhenEmpty $script:NoPasskeyCandidateColumns -SkipAclHardening:$SkipAclHardening
+    Export-AssessmentCsv -Data @($campaignRows | Select-Object $script:NoPasskeyCandidateColumns) `
+        -Path $campaignListPath -HeaderWhenEmpty $script:NoPasskeyCandidateColumns -SkipAclHardening:$SkipAclHardening
+
+    # Counts come off the collections that were just written, not from a second filter over
+    # $rows. Two expressions meant to agree and evaluated separately is how this script
+    # previously printed a number the file did not contain.
+    $summary | Add-Member -NotePropertyName CampaignCandidates -NotePropertyValue $campaignRows.Count
+    $summary | Add-Member -NotePropertyName CampaignCandidateListPath -NotePropertyValue (Resolve-Path -LiteralPath $campaignListPath).Path
+    $summary | Add-Member -NotePropertyName NoPasskeyNonprivileged -NotePropertyValue $noPasskeyRows.Count
+    $summary | Add-Member -NotePropertyName NoPasskeyListPath -NotePropertyValue (Resolve-Path -LiteralPath $noPasskeyListPath).Path
+    $summary | Add-Member -NotePropertyName CampaignPrivilegedOmitted -NotePropertyValue $campaignOmitted.Count
+    $summary | Add-Member -NotePropertyName NoPasskeyPrivilegedOmitted -NotePropertyValue $noPasskeyOmitted.Count
+}
+else {
+    # The documented failure policy, applied in one place: privilege discovery did not
+    # complete, so neither targeting export is published. The assessment CSV, action list,
+    # tickets and HTML report are all still written -- they describe the tenant and do not
+    # claim a safe targeting population -- and the limitation travels with them.
+    #
+    # Any file of either name from an EARLIER run was removed before the first write, and the
+    # run would have stopped had that failed. A stale list sitting beside today's fresh
+    # assessment is the failure this branch exists to prevent: it has today's folder, today's
+    # neighbours and yesterday's population, and nothing on it says so.
+    foreach ($removed in $removedStaleExports) {
+        Write-Warning "Removed a previous run's $removed so it cannot be read as this run's result."
+    }
+
+    # $null, not 0. A zero here would read as "nobody needs targeting", which is the
+    # opposite of what an unreadable privilege set means.
+    $summary | Add-Member -NotePropertyName CampaignCandidates -NotePropertyValue $null
+    $summary | Add-Member -NotePropertyName CampaignCandidateListPath -NotePropertyValue $null
+    $summary | Add-Member -NotePropertyName NoPasskeyNonprivileged -NotePropertyValue $null
+    $summary | Add-Member -NotePropertyName NoPasskeyListPath -NotePropertyValue $null
+    $summary | Add-Member -NotePropertyName CampaignPrivilegedOmitted -NotePropertyValue $null
+    $summary | Add-Member -NotePropertyName NoPasskeyPrivilegedOmitted -NotePropertyValue $null
+}
+
+$summary | Add-Member -NotePropertyName PrivilegeDiscoveryComplete -NotePropertyValue $privilegeSet.Complete
+$summary | Add-Member -NotePropertyName PrivilegedUsersFound -NotePropertyValue $(if ($privilegeSet.Complete) { $privilegeSet.Count } else { $null })
+$summary | Add-Member -NotePropertyName PrivilegeDiscoveryGaps -NotePropertyValue (@($privilegeSet.Gaps) -join ' | ')
+$summary | Add-Member -NotePropertyName PrivilegeCoverageNote -NotePropertyValue $privilegeSet.CoverageNote
 
 if ($ExportFixScript) {
     $fixPath = [System.IO.Path]::ChangeExtension($OutputPath, $null).TrimEnd('.') + '_Remediation.ps1'
@@ -3261,6 +4205,69 @@ elseif ($summary.BlockedWithNoDestination -gt 0) {
 }
 elseif ($summary.BlockedAtRetirement -gt 0) {
     Write-Host "Every blocked user is in scope for passkeys or Microsoft Authenticator, so the campaign can reach all of them." -ForegroundColor Green
+}
+
+# Passkey adoption, which is the rollout's own progress bar rather than a retirement risk.
+# Printed after the lockout numbers because it is the slower, larger piece of work: driving
+# BlockedAtRetirement to zero only needs any surviving method, and Authenticator counts.
+Write-Host ''
+# The passkey picture, as the five numbers an operator asks for and in the order they ask.
+# Every one names its own population, because the denominators here genuinely differ and
+# quoting a percentage against the wrong one is how a rollout gets reported as finished.
+#
+# Deliberately NOT a "ready" or "compliant" figure. Nothing in this run verifies that a
+# registered passkey has ever been used, that the user is inside the passkey policy's
+# scope, or that any sign-in succeeded under the tenant's Conditional Access. A label
+# implying any of that would be a claim this tool has not earned.
+$pk = {
+    param($Name)
+    $value = Get-PropertyValue $summary $Name
+    if ($null -eq $value) { 'not available' } else { [string]$value }
+}
+
+Write-Host ''
+Write-Host 'Passkey registration' -ForegroundColor Magenta
+Write-Host "  Enabled users assessed             $($summary.EnabledUsersAssessed)" -ForegroundColor Cyan
+Write-Host "  Users with a registered passkey    $($summary.UsersWithPasskey)" -ForegroundColor Cyan
+Write-Host "  Users without a registered passkey $($summary.UsersWithoutPasskey)" -ForegroundColor Cyan
+Write-Host "  Users with unknown status          $($summary.UsersMissingFromReport)   (no row in the registration report)" -ForegroundColor $(if ($summary.UsersMissingFromReport -gt 0) { 'Yellow' } else { 'Cyan' })
+Write-Host "  SMS/voice users without a passkey  $(& $pk 'CampaignCandidates')   (a subset of the line above it, not the whole of it)" -ForegroundColor Cyan
+
+# The identity that makes the three known populations auditable. Printed rather than
+# assumed, because it is the arithmetic a reader checks first.
+Write-Host "  With + without + unknown = $($summary.UsersWithPasskey) + $($summary.UsersWithoutPasskey) + $($summary.UsersMissingFromReport) = $($summary.EnabledUsersAssessed) enabled users assessed." -ForegroundColor DarkGray
+if ($summary.EnabledUsersAssessed -gt 0) {
+    # Report coverage stated separately from adoption, so a low adoption figure built on
+    # thin evidence cannot be mistaken for a well-measured one.
+    $known = $summary.UsersWithPasskey + $summary.UsersWithoutPasskey
+    $coverage = [math]::Round((100.0 * $known / $summary.EnabledUsersAssessed), 1)
+    $adoption = if ($known -gt 0) { [math]::Round((100.0 * $summary.UsersWithPasskey / $known), 1) } else { 0 }
+    Write-Host "  Adoption $adoption% of the $known user(s) whose registration could be read; report coverage $coverage% of enabled users." -ForegroundColor DarkGray
+}
+
+# Privileged accounts, and whether the question was answered at all.
+if (-not $privilegeSet.Complete) {
+    Write-Host ''
+    Write-Host 'Privileged-account discovery did not complete, so the actionable exports were NOT written.' -ForegroundColor Red
+    foreach ($gap in $privilegeSet.Gaps) { Write-Host "  $gap" -ForegroundColor Red }
+    Write-Host '  The assessment CSV, action list and report above are still accurate for the tenant. What is withheld is the targeting list, because a run that cannot see who is privileged cannot promise an administrator is not on it.' -ForegroundColor Yellow
+    Write-Host "  Every row reads PrivilegeSource '$($script:PrivilegeNotDetermined)' rather than blank, so no row asserts a user is unprivileged." -ForegroundColor Yellow
+}
+else {
+    Write-Host ''
+    # Not "hold a directory role": the set includes standing owners of role-holding groups,
+    # who are held back as a conservative exclusion without holding a role themselves.
+    $ownerOnly = @($privilegeSet.Sources.Values | Where-Object { $_ -eq 'RoleHoldingGroupOwner' }).Count
+    Write-Host "Held back as privileged: $($privilegeSet.Count) enabled user(s), of whom $ownerOnly are held back only for standing ownership of a role-holding group (a conservative exclusion, not a role)." -ForegroundColor Cyan
+    Write-Host "  Omitted from the no-passkey export: $($noPasskeyOmitted.Count). Omitted from the SMS/voice campaign list: $($campaignOmitted.Count)." -ForegroundColor Cyan
+    Write-Host '  Omitted means handled separately, NOT lower risk and NOT "does not need a passkey" -- a privileged account without one is the most exposed row in the tenant. Work those by hand from the assessment CSV, where PrivilegeSource names why each was held back.' -ForegroundColor Yellow
+    Write-Host "  Coverage: $($privilegeSet.CoverageNote)" -ForegroundColor DarkGray
+
+    Write-Host ''
+    Write-Host "Users without a passkey, nonprivileged ($($noPasskeyRows.Count)): $noPasskeyListPath" -ForegroundColor Green
+    Write-Host "Of those, SMS/voice registered ($($campaignRows.Count)): $campaignListPath" -ForegroundColor Green
+    Write-Host '  Registration, not usage: a row means a phone method is registered, not that the user signed in with it. Not a lockout list either -- check OtherSurvivingMfaMethods.' -ForegroundColor Cyan
+    Write-Host '  Next: review the CSV, then create the security group, add the members and configure the registration campaign BY HAND. This tool makes no change to the tenant.' -ForegroundColor Cyan
 }
 
 # A softer number than BlockedAtRetirement, but the one that explains support calls on the

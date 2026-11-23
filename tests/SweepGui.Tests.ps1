@@ -1,4 +1,4 @@
-﻿#Requires -Version 7.0
+﻿#Requires -Version 7.4
 #Requires -Modules Pester
 
 # Covers the logic behind the sweep window.
@@ -79,6 +79,14 @@ Describe 'Test-CustomerNameInput' {
         foreach ($value in @('=cmd|''/c calc''!A1', '+Contoso', '@Fabrikam', '-Northwind')) {
             Test-CustomerNameInput -Value $value | Should -BeFalse -Because "'$value' opens as a formula"
         }
+    }
+
+    It 'rejects a formula hidden behind padding, a control character or a full-width trigger' {
+        foreach ($value in @(' =Contoso', "`t+Contoso", ([string][char]0x00A0 + '@Fabrikam'),
+                ([string][char]0x01 + 'Contoso'), ([string][char]0xFF1D + 'Contoso'), ([string][char]0xFF0D + 'Northwind'))) {
+            Test-CustomerNameInput -Value $value | Should -BeFalse -Because 'padding must not hide a formula trigger'
+        }
+        Test-CustomerNameInput -Value 'Mary-Jane Consulting' | Should -BeTrue
     }
 
     It 'rejects characters a folder name cannot hold' {

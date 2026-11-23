@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+#Requires -Version 7.4
 #Requires -Modules Pester
 
 # Structural checks on the repository itself.
@@ -20,6 +20,8 @@ BeforeAll {
         '_ActionList\.csv$'
         '_RemediationGroup\.csv$'
         '_Tickets\.csv$'
+        '_SmsVoiceUsers_NoPasskey\.csv$'
+        '_NoPasskey_Nonprivileged\.csv$'
         '_TicketHistory\.json$'
         '^TicketHistory\.json$'
     )
@@ -175,7 +177,7 @@ Describe 'Evidence hygiene' {
         $literals = [System.Collections.Generic.HashSet[string]]::new()
         foreach ($file in Get-ChildItem -Path $script:RepoRoot -Filter '*.ps1' -File) {
             $content = Get-Content -LiteralPath $file.FullName -Raw
-            foreach ($match in [regex]::Matches($content, "'(?<s>_[A-Za-z]+\.(?:csv|json))'")) {
+            foreach ($match in [regex]::Matches($content, "'(?<s>_[A-Za-z][A-Za-z_]*\.(?:csv|json))'")) {
                 [void]$literals.Add($match.Groups['s'].Value)
             }
         }
@@ -240,5 +242,137 @@ Describe 'Functions do not reach into the script param block' {
         }
 
         $offenders -join ' | ' | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'App-only setup lists every permission the assessment requests' {
+
+    # An app-only sweep set up from instructions that list fewer permissions than the script
+    # requests is refused the privilege reads in every tenant, and every tenant's targeting
+    # exports are withheld. The instructions said four after two more were added.
+
+    BeforeAll {
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile((Get-AssessmentScriptPath), [ref]$null, [ref]$null)
+        $assignment = @($ast.FindAll({
+                    $args[0] -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                    $args[0].Left.Extent.Text -eq '$requiredScopes'
+                }, $true))
+        $assignment.Count | Should -Be 1
+        $script:Scopes = @([scriptblock]::Create($assignment[0].Right.Extent.Text).Invoke())
+        $script:Scopes.Count | Should -BeGreaterThan 4
+
+        $root = Split-Path -Parent (Get-AssessmentScriptPath)
+        $playbook = Get-Content -LiteralPath (Join-Path $root 'docs/Operations-Playbook.md') -Raw
+        $start = $playbook.IndexOf('### 1. App registration and consent')
+        $script:PlaybookSection = $playbook.Substring($start, $playbook.IndexOf('###', $start + 5) - $start)
+
+        # The sweep's comment-based help, read as text: the .NOTES block is where an
+        # operator setting up app-only access looks for the permission list.
+        $sweep = Get-Content -LiteralPath (Get-SweepScriptPath) -Raw
+        $notes = $sweep.IndexOf('.NOTES')
+        $notes | Should -BeGreaterThan 0
+        $script:SweepNotes = $sweep.Substring($notes, $sweep.IndexOf('#>', $notes) - $notes)
+    }
+
+    It 'names <_> in the playbook''s app registration step' -ForEach @(
+        'Policy.Read.All', 'AuditLog.Read.All', 'User.Read.All', 'GroupMember.Read.All',
+        'RoleManagement.Read.Directory', 'PrivilegedEligibilitySchedule.Read.AzureADGroup'
+    ) {
+        $_ | Should -BeIn $script:Scopes -Because 'the list here must match the script'
+        $script:PlaybookSection | Should -Match ([regex]::Escape($_))
+        $script:SweepNotes | Should -Match ([regex]::Escape($_))
+    }
+
+    It 'states the same count everywhere it states one' {
+        $count = @('zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight')[$script:Scopes.Count]
+        $root = Split-Path -Parent (Get-AssessmentScriptPath)
+        (Get-Content -LiteralPath (Join-Path $root 'README.md') -Raw) | Should -Match "App-only runs need the same $count Graph permissions"
+        $script:PlaybookSection | Should -Match "The $count permissions are required"
+        $script:SweepNotes | Should -Match "require the $count Graph permissions"
+        (Get-Content -LiteralPath (Get-AssessmentScriptPath) -Raw) | Should -Match "App-only: the same $count must be granted"
+    }
+}
+
+Describe 'Security claims and source hygiene' {
+
+    It 'names, for every control in SECURITY.md, the test that proves it' {
+        # SECURITY.md has twice claimed protection the code did not give, and nothing
+        # noticed. Each control row now names its proving test, or says "Not tested" out
+        # loud, so a claim cannot quietly outlive the behaviour it describes.
+        $text = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'SECURITY.md') -Raw
+        $section = ($text -split '## Controls built into the code')[1] -split "`n## " | Select-Object -First 1
+        $rows = @($section -split "`r?`n" | Where-Object { $_ -match '^\|' })
+
+        $rows.Count | Should -BeGreaterThan 2
+        $rows[0] | Should -Match '\|\s*Proven by\s*\|\s*$' -Because 'the table needs a Proven by column'
+
+        foreach ($row in $rows[2..($rows.Count - 1)]) {
+            $cell = ($row.Trim().Trim('|') -split '\|')[-1].Trim()
+            if ($cell -eq 'Not tested') { continue }
+            $named = @([regex]::Matches($cell, '`(tests/[^`]+\.Tests\.ps1)`') | ForEach-Object { $_.Groups[1].Value })
+            $named | Should -Not -BeNullOrEmpty -Because "row '$($row.Substring(0, [Math]::Min(40, $row.Length)))' must name a test file or say Not tested"
+            foreach ($file in $named) {
+                Join-Path $script:RepoRoot $file | Should -Exist
+            }
+        }
+    }
+
+    It 'has no invisible or direction-changing characters in any script' {
+        # Line and paragraph separators, zero-width characters and bidirectional overrides
+        # can make code read differently from how it runs (Trojan Source). One once reached
+        # a security regex here, caught only indirectly by an encoding rule.
+        $pattern = '[\u200B-\u200F\u202A-\u202E\u2028\u2029\u2060-\u2064\u2066-\u2069]'
+        $hits = foreach ($file in Get-ChildItem -Path $script:RepoRoot -Filter '*.ps1' -Recurse -File) {
+            $lineNo = 0
+            foreach ($line in [System.IO.File]::ReadAllLines($file.FullName)) {
+                $lineNo++
+                if ($line -match $pattern) { "$($file.Name):$lineNo" }
+            }
+        }
+        $hits | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'Line endings and file modes survive a commit' {
+    # Both guard properties that only another platform would otherwise reveal: CRLF only
+    # bites on a Windows checkout, and a missing executable bit only on Linux and macOS.
+
+    BeforeAll {
+        $script:TrackedFiles = @(git -C $script:RepoRoot ls-files -s)
+    }
+
+    It 'pins LF for every text file in .gitattributes' {
+        $attributes = Join-Path $script:RepoRoot '.gitattributes'
+        $attributes | Should -Exist
+        (Get-Content -LiteralPath $attributes) -match '^\*\s+.*\beol=lf\b' |
+            Should -Not -BeNullOrEmpty -Because 'here-strings take the line endings of the checkout'
+    }
+
+    It 'has no CRLF in scripts or published samples' {
+        $paths = @(git -C $script:RepoRoot ls-files -- '*.ps1' '*.psm1' '*.psd1' 'examples/*')
+        $paths | Should -Not -BeNullOrEmpty
+        $crlf = @(foreach ($path in $paths) {
+                $bytes = [System.IO.File]::ReadAllBytes((Join-Path $script:RepoRoot $path))
+                for ($i = 0; $i -lt $bytes.Length - 1; $i++) {
+                    if ($bytes[$i] -eq 13 -and $bytes[$i + 1] -eq 10) { $path; break }
+                }
+            })
+        $crlf | Should -BeNullOrEmpty -Because "these contain CRLF:`n$($crlf -join "`n")"
+    }
+
+    It 'commits the documented ./ entry points as executable' {
+        # CLAUDE.md, the README and the pre-push hook all run these as ./path.
+        $expected = @('tools/Invoke-Checks.ps1', '.githooks/pre-push')
+        $notExecutable = @(foreach ($path in $expected) {
+                $entry = $script:TrackedFiles | Where-Object { ($_ -split "`t", 2)[1] -eq $path }
+                if (-not $entry -or -not $entry.StartsWith('100755')) { $path }
+            })
+        $notExecutable | Should -BeNullOrEmpty -Because "git must store these as 100755: $($notExecutable -join ', ')"
+    }
+
+    It 'gives the executable PowerShell entry point a shebang' {
+        # Without one, bash runs the file as a shell script and fails on the comment block.
+        $first = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'tools/Invoke-Checks.ps1') -TotalCount 1
+        $first | Should -Be '#!/usr/bin/env pwsh'
     }
 }

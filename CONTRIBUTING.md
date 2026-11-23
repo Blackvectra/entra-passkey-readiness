@@ -40,22 +40,26 @@ Install-Module PSScriptAnalyzer -Scope CurrentUser
 Install-Module Microsoft.Graph.Authentication -Scope CurrentUser   # only needed for live runs
 ```
 
-PowerShell 7.0 or later. The scripts enforce it with `#Requires`.
+PowerShell 7.4 or later. The scripts enforce it with `#Requires`.
 
 ## Before you open a PR
 
 ```powershell
-Get-Module -ListAvailable Pester, PSScriptAnalyzer | Select-Object Name, Version
-Invoke-Pester ./tests
-Invoke-ScriptAnalyzer -Path . -Recurse -Settings ./PSScriptAnalyzerSettings.psd1
+./tools/Invoke-Checks.ps1
 ```
 
-**Run the first line.** `Invoke-ScriptAnalyzer` with the module absent is a
-`CommandNotFoundException`, and depending on how it is invoked that can end up looking
-indistinguishable from a clean run -- which is a green light you did not earn and CI will
-take away. Confirm both modules are actually there before trusting either result.
+It runs exactly what CI runs, on Linux and Windows: it confirms Pester 5.5+ and
+PSScriptAnalyzer are installed and throws if either is missing (an absent analyzer can
+otherwise look indistinguishable from a clean run), then runs the analyzer and the full
+suite, and exits non-zero on any finding or failure.
 
-CI runs both and fails on any finding. Two analyzer rules are excluded, with the
+To run it automatically before every push, enable the repository's hooks once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+CI fails on any finding. Two analyzer rules are excluded, with the
 reasoning written out in `PSScriptAnalyzerSettings.psd1`; if you want to exclude a
 third, argue for it there rather than adding an inline suppression.
 

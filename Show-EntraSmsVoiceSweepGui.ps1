@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+#Requires -Version 7.4
 <#
 .SYNOPSIS
     Windows front end for the multi-tenant sweep. Type in tenants, press Run, get a folder
@@ -104,7 +104,14 @@ function Test-CustomerNameInput {
     # came out as '=Contoso would then become the output folder name. No real company is
     # called =Contoso, so refusing the row keeps the file both safe to open in Excel and
     # able to round-trip.
-    if ($Value.Trim()[0] -in @('=', '+', '-', '@', [char]9, [char]13)) { return $false }
+    # Same rule as Protect-CsvInjection: the first character that is not whitespace or a
+    # control character, and the full-width forms of each trigger, so padding cannot hide one.
+    $lead = $null
+    foreach ($character in $Value.ToCharArray()) {
+        if (-not ([char]::IsWhiteSpace($character) -or [char]::IsControl($character))) { $lead = $character; break }
+    }
+    if ($lead -in @('=', '+', '-', '@', [char]0xFF1D, [char]0xFF0B, [char]0xFF0D, [char]0xFF20)) { return $false }
+    if (@($Value.ToCharArray() | Where-Object { [char]::IsControl($_) }).Count -gt 0) { return $false }
 
     return $true
 }
