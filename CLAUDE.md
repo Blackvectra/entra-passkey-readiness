@@ -200,3 +200,17 @@ This matters more than it sounds: the project once printed `2027-01-28` as a cus
 - The README is client- and public-facing and gets read as a portfolio piece. Keep its prose tight and its tables current; `tests/RepoHygiene.Tests.ps1` resolves every relative markdown link, and every `](#anchor)` must resolve to a real heading.
 - US English spelling throughout (normalized in #20).
 - `docs/` carries the long-form material: `Risk-Classification.md`, `Operations-Playbook.md`, `MFA-Enforcement.md`, `Microsoft-Migration-Background.md`.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs live as local markdown files under `.scratch/<feature>/`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default five-role vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`), recorded as a `Status:` line in each issue file. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `GLOSSARY.md` and `docs/adr/` at the repo root (created lazily). See `docs/agents/domain.md`.
