@@ -54,7 +54,7 @@ $examplesDir = $PSScriptRoot
         'New-TicketExport'
         'Protect-CsvInjection'
         'Export-AssessmentCsv'
-        'Write-ProtectedFile'
+        'New-ProtectedDirectory', 'Write-ProtectedFile'
     ))
 # PreferredRaw is hand-supplied per fictional person below rather than derived through
 # Get-PreferredAuthenticationMethod, which expects a real registration-report object this

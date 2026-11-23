@@ -21,7 +21,7 @@ BeforeAll {
     . (Import-ScriptFunction -Path (Get-AssessmentScriptPath) -Name @(
             'Get-PropertyValue'
             'New-RemediationScript'
-            'Write-ProtectedFile'
+            'New-ProtectedDirectory', 'Write-ProtectedFile'
         ))
 
     $script:SignInAgeNever = '(none recorded)'
