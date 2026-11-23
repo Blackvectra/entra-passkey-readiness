@@ -1,0 +1,5 @@
+# Check out every text file with LF on every OS. Here-strings in the scripts
+# take the line endings of the source file, so a CRLF checkout on Windows
+# (core.autocrlf=true on the GitHub runner) changed ticket bodies and the
+# sample files generated from them.
+* text=auto eol=lf
