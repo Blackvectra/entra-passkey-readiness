@@ -94,3 +94,31 @@ jobs:
           name: pester-results
           path: ./testResults.xml
           if-no-files-found: warn
+
+  redaction:
+    # "The one rule" in CONTRIBUTING.md: never commit live tenant evidence. The
+    # hygiene tests catch export-shaped files; this catches a real name typed into
+    # an example or a doc, which is how an employer name once reached the estate
+    # report's help. The names live in the REDACTION_DENYLIST secret (one literal
+    # string per line) so the list is not itself published. Dependabot runs get
+    # no Actions secrets and only bump action versions, so they are skipped.
+    name: Denylisted identifiers
+    if: github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Scan tracked files
+        env:
+          DENYLIST: ${{ secrets.REDACTION_DENYLIST }}
+        run: |
+          if [ -z "$DENYLIST" ]; then
+            echo "::error::REDACTION_DENYLIST secret is not set, so customer identifiers are unchecked. Add it under Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+          printf '%s\n' "$DENYLIST" | sed '/^[[:space:]]*$/d' > "$RUNNER_TEMP/deny.txt"
+          # -l lists matching files only, so secret values never reach the log.
+          if git ls-files -z | xargs -0 grep -i -F -f "$RUNNER_TEMP/deny.txt" -l; then
+            echo "::error::Files above contain a denylisted identifier. Replace it with a fictional one (*-example.com, Contoso)."
+            exit 1
+          fi
