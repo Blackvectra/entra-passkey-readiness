@@ -39,7 +39,7 @@
 
 .EXAMPLE
     .\New-EntraSmsVoiceEstateReport.ps1 -SummaryPath .\SweepSummary_20260821_143000.csv `
-        -Title 'NRG Technology Services' -OutputPath D:\Reports\estate.html
+        -Title 'Contoso Ltd' -OutputPath D:\Reports\estate.html
 
 .NOTES
     This report names every customer in the estate alongside how many of their privileged
