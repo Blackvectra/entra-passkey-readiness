@@ -85,3 +85,12 @@ EntraSmsVoiceChange_*.csv
 # are about to lose MFA. It is the highest-value single file this project produces.
 EstateReadiness_*.html
 !examples/Example-EstateReport.html
+
+# Tenant Profiles name a client, their tenant and certificate thumbprint. Real ones are
+# never committed (docs/adr/0001-shared-tenant-profile-helper.md). Only the fictional example is tracked.
+/profiles/
+*.profile.psd1
+!examples/Example.profile.psd1
+
+# Local planning notes and issue tracker (docs/agents/issue-tracker.md)
+/.scratch/

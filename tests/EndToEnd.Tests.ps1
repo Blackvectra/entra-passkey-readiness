@@ -1396,6 +1396,88 @@ Describe 'A run where nobody needs action' {
     }
 }
 
+Describe 'A run driven by a Tenant Profile' {
+
+    # Reuses the stub module and child-process approach above. The profile supplies the
+    # tenant, the app-only sign-in, the exclusions and the ticket history location; one
+    # explicit parameter overrides it, as a technician would for a one-off run.
+
+    BeforeAll {
+        $script:ProfileRoot = Join-Path $script:Root 'profiles'
+        $script:ProfileOut = Join-Path $script:Root 'profile-out'
+        New-Item -ItemType Directory -Path $script:ProfileRoot, $script:ProfileOut -Force | Out-Null
+        $script:ProfileHistory = Join-Path $script:Root 'fabrikam-history.json'
+
+        @"
+@{
+    SchemaVersion         = 1
+    TenantId              = 'fabrikam-example.com'
+    CustomerName          = 'Fabrikam From Profile'
+    ClientId              = '00000000-1111-4222-8333-444444444444'
+    CertificateThumbprint = 'A1B2C3D4E5F60718293A4B5C6D7E8F9012345678'
+    ExcludeUpnPattern     = @('^svc')
+    TicketHistoryPath     = '$script:ProfileHistory'
+}
+"@ | Set-Content -LiteralPath (Join-Path $script:ProfileRoot 'fabrikam.profile.psd1')
+
+        '@{ SchemaVersion = 1; TenantId = ''contoso.com''; CustomerName = ''Contoso''; ClientSecret = ''x'' }' |
+            Set-Content -LiteralPath (Join-Path $script:ProfileRoot 'leaky.profile.psd1')
+
+        function Invoke-ProfileRun {
+            param([string]$Arguments)
+            $out = Join-Path $script:Root "p-$(New-Guid).txt"
+            $err = Join-Path $script:Root "p-$(New-Guid).err"
+            $command = @"
+`$env:PSModulePath = '$(Join-Path $script:Root 'Modules')' + [IO.Path]::PathSeparator + `$env:PSModulePath
+& '$(Get-AssessmentScriptPath)' $Arguments -SkipAclHardening -Verbose *>&1 | Out-String -Width 400
+"@
+            $pwsh = if ($IsWindows) { Join-Path $PSHOME 'pwsh.exe' } else { Join-Path $PSHOME 'pwsh' }
+            $p = Start-Process -FilePath $pwsh -PassThru -Wait -NoNewWindow `
+                -RedirectStandardOutput $out -RedirectStandardError $err `
+                -ArgumentList @('-NoProfile', '-NonInteractive', '-Command', $command)
+            [pscustomobject]@{
+                ExitCode = $p.ExitCode
+                Output   = (Get-Content -LiteralPath $out -Raw) + (Get-Content -LiteralPath $err -Raw)
+            }
+        }
+
+        $script:ProfileRun = Invoke-ProfileRun -Arguments (
+            "-TenantProfile fabrikam -TenantProfileRoot '$script:ProfileRoot' " +
+            "-CustomerName 'Fabrikam Override' -OutputPath '$(Join-Path $script:ProfileOut 'a.csv')' -ExportTickets")
+        $script:LeakyRun = Invoke-ProfileRun -Arguments "-TenantProfile leaky -TenantProfileRoot '$script:ProfileRoot'"
+    }
+
+    It 'completes, and says which Tenant Profile it used' {
+        $script:ProfileRun.ExitCode | Should -Be 0 -Because $script:ProfileRun.Output
+        $script:ProfileRun.Output | Should -Match "Using Tenant Profile 'fabrikam'"
+    }
+
+    It 'signs in app-only with the Tenant Profile credentials' {
+        $script:ProfileRun.Output | Should -Match 'as app 00000000-1111-4222-8333-444444444444'
+    }
+
+    It 'lets the explicit parameter win, and names the override' {
+        $script:ProfileRun.Output | Should -Match 'CustomerName overridden'
+        $script:ProfileRun.Output | Should -Match "Using Tenant Profile 'fabrikam' \(Fabrikam Override\)"
+    }
+
+    It 'applies the Tenant Profile exclusions' {
+        $rows = Import-Csv -LiteralPath (Join-Path $script:ProfileOut 'a.csv')
+        @($rows | Where-Object { $_.UserPrincipalName -match '^svc' -and $_.Risk -ne 'Excluded' }) |
+            Should -BeNullOrEmpty
+    }
+
+    It 'keeps ticket history where the Tenant Profile says' {
+        $script:ProfileHistory | Should -Exist
+    }
+
+    It 'refuses a Tenant Profile with a disallowed key before contacting any tenant' {
+        $script:LeakyRun.ExitCode | Should -Not -Be 0
+        $script:LeakyRun.Output | Should -Match 'not allowed: ClientSecret'
+        $script:LeakyRun.Output | Should -Not -Match 'Connected tenant'
+    }
+}
+
 Describe 'Earlier targeting lists never sit beside a newer assessment' {
 
     # Both runs pre-seed a previous run's targeting lists exactly where this run's would go.

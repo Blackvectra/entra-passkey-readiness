@@ -59,6 +59,17 @@ Point `-ReportRoot` at your protected client documentation store. Never at a git
 
 Every file this tool writes is a targeting list: it names privileged accounts and states which of them lack a phishing-resistant method. Treat exports the way you treat a penetration test report.
 
+### 2b. Tenant Profiles
+
+Write one [Tenant Profile](../README.md#tenant-profiles) per client tenant, starting from [examples/Example.profile.psd1](../examples/Example.profile.psd1): tenant, customer name, app registration, exclusion patterns and a stable `TicketHistoryPath`. Keep them on a protected share and point `ENTRA_SMSVOICE_PROFILE_ROOT` at it. After that, every command below takes `-TenantProfile <name>` or `-AllTenantProfiles` instead of `-TenantListPath .\tenants.csv` and the credentials.
+
+A Tenant Profile holds no secrets — any key outside the allowed set stops the run — but it does name the client, their tenant and the certificate that reads it, so treat the folder like the evidence store.
+
+```powershell
+.\Invoke-EntraSmsVoiceSweep.ps1 -AllTenantProfiles `
+    -ReportRoot D:\ClientEvidence\EntraMigration\baseline -ThrottleLimit 6 -HtmlReport
+```
+
 ### 3. A baseline, early
 
 Run the whole estate once before you change anything. Everything after this is measured against it, and the diff is only as good as the baseline.
@@ -196,6 +207,8 @@ $real | Where-Object Risk -eq 'Critical' | Format-Table DisplayName, UserPrincip
 Do this **before** generating tickets, not after. Reviewing the exclusions once per customer and recording the pattern in your runbook turns an hours-long first pass into a thirty-second one on every later run.
 
 ### Ticket history, and the one way to get it wrong
+
+**With Tenant Profiles this is solved once:** set `TicketHistoryPath` in each Tenant Profile to a stable file, and every run, single or sweep, finds it. When moving a client from `tenants.csv` to a Tenant Profile, point it at the client's existing history file — Tenant Profile runs file output under the Tenant Profile name, so the old default location is not found.
 
 Re-runs no longer duplicate tickets. The run records which users it ticketed, and a later run raises one only for a user who is new or whose risk band got worse. Somebody who was High last month and is High today is already in a queue.
 
