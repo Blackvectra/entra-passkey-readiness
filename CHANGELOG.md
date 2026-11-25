@@ -28,6 +28,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **`tools/Invoke-Checks.ps1` runs every check CI runs in one command**: it throws when Pester 5.5+ or PSScriptAnalyzer is missing, runs the analyzer and the full suite, and exits non-zero on any finding or failure. CI calls it, and an opt-in `.githooks/pre-push` hook runs it before each push (`git config core.hooksPath .githooks`).
 - **CI runs on `windows-latest` as well as `ubuntu-latest`**, so the NTFS ACL path in `Protect-OutputFile` and the Windows-only code paths are exercised before release rather than by the first operator.
+- **CI fails on any string in the `REDACTION_DENYLIST` Actions secret** in a tracked file. The hygiene tests catch export-shaped files; this catches a real customer or employer name typed into an example or a doc.
 
 - **Privileged accounts are held out of the actionable no-passkey exports**, and a second, wider export names the whole rollout rather than just the campaign subset. `<stem>_NoPasskey_Nonprivileged.csv` joins `<stem>_SmsVoiceUsers_NoPasskey.csv`; the first is known, enabled, in-scope nonprivileged users without a registered passkey (not everyone without one: unknown registration status, privileged users and pattern-excluded users are outside it and counted separately) and the second is the subset who also hold a phone method, so the campaign file can no longer be mistaken for the whole no-passkey population. Both carry nonprivileged users only, and both are built by one function with one switch so their counts cannot diverge.
 
@@ -164,6 +165,8 @@ Fixes from a pre-merge security review of the passkey exports. No new Graph call
 - **The read-only claim is now tested, and stated accurately.** `SECURITY.md` said every Graph call was a GET made by `Invoke-GraphGet`; the legacy per-user MFA read has always gone out as `POST /$batch`, which JSON batching requires. That is still a read, since every request inside the envelope is a GET, but the claim is now worded that way. `tests/ReadOnlyGraph.Tests.ps1` scans every shipped script for Graph SDK write cmdlets and for any request whose method is not a literal GET (the batch envelope excepted), and drives the batch path to check that only GETs go inside it. The other four controls `SECURITY.md` listed as untested (tenant-mismatch abort, URI escaping, certificate-only auth, the report's CSP) now name tests too.
 
 ### Changed
+
+- The `-Title` example in `New-EntraSmsVoiceEstateReport.ps1` uses a fictional organization name.
 
 - **`README.md` documents the sweep summary CSV column by column, and the estate roll-up's parameters.** The sweep summary is the file the estate report reads and the one an operator opens in Excel, and its twenty-one columns were described only in prose. `New-EntraSmsVoiceEstateReport.ps1` had `-SummaryPath` and `-Title` undocumented, and its section still described two callout bands where there are now three. Found by cross-checking every script's parameter block and every output file's header against the README mechanically, rather than by reading it.
 
